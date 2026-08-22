@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" color="#dde4ef" role="img" aria-label="Butai">
+  <defs><linearGradient id="lit-m" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e0af68" stop-opacity="0"/><stop offset="1" stop-color="#e0af68" stop-opacity=".55"/></linearGradient></defs>
+  <rect x="12.50" y="29.50" width="75.00" height="44.62" fill="#10151d"/>
+  <rect x="12.50" y="52.70" width="75.00" height="21.42" fill="url(#lit-m)"/>
+  <path d="M12.50,29.50 L35.00,29.50 C28.70,44.67 27.12,56.27 22.25,74.12 L12.50,74.12 Z" fill="#e0af68"/>
+  <path d="M87.50,29.50 L65.00,29.50 C71.30,44.67 72.88,56.27 77.75,74.12 L87.50,74.12 Z" fill="#e0af68"/>
+  <path d="M5.00,76.00 L5.00,28.48 Q50.00,15.52 95.00,28.48 L95.00,76.00 Z M12.50,76.00 L12.50,35.98 Q50.00,23.02 87.50,35.98 L87.50,76.00 Z" fill="currentColor" fill-rule="evenodd"/>
+  <rect x="-0.50" y="74.12" width="101.00" height="7.50" rx="2.25" fill="currentColor"/>
+</svg>
