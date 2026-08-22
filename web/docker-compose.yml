@@ -1,0 +1,21 @@
+# The bridge and the built client, with a daemon socket mounted in.
+#
+# The socket is the whole configuration: the daemon listens on one AF_UNIX
+# socket and never on TCP, so handing the container that path is the entire
+# integration — the same pattern as mounting /var/run/docker.sock.
+#
+# **No bind mount of the source.** The version before this one mounted `./:/app`
+# so a developer's edits showed up live; with a build step that would shadow
+# `dist/` and the container would serve nothing at all. For live editing run
+# `bun run dev` on the host, which proxies `/api` and `/ws` to a bridge on 8080.
+services:
+  butai-web:
+    build: .
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      # Read-only: the bridge dials the socket and never writes beside it.
+      - "${BUTAI_SOCKET_DIR:-$HOME/.butai}:/run/butai:ro"
+    environment:
+      - BUTAI_SOCKET=/run/butai/butai.sock
+      - PORT=8080

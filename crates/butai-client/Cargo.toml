@@ -1,0 +1,48 @@
+[package]
+name = "butai-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Terminal (TUI) client for the butai daemon."
+
+[dependencies]
+butai-protocol.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
+crossterm.workspace = true
+# Buffer, cursor, selection and undo for the editor page. The daemon used this
+# for the same job; editing a file is client work, so the widget follows.
+tui-textarea.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+libc.workspace = true
+dirs.workspace = true
+arboard.workspace = true
+png.workspace = true
+# The daemon's REST face. A client draws its tab bar, rails and pages from
+# `/v1/*`, so HTTP is not an optional extra here — it is how anything that is
+# not a pane's cells reaches the screen.
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+
+# Wayland's clipboard is a separate protocol from X11's, and arboard only speaks
+# it with this feature on. Linux-only because it is the only target that has
+# both display servers to choose between.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { workspace = true, features = ["wayland-data-control"] }
+
+[lints]
+workspace = true

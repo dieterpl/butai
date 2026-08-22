@@ -1,0 +1,39 @@
+[package]
+name = "butai-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Wire protocol types and framing for butai: the client/daemon message set, cell-run frames, and the REST API DTOs."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+rustix.workspace = true
+crossterm = { workspace = true, optional = true }
+ts-rs = { workspace = true, optional = true }
+
+[features]
+default = ["crossterm"]
+crossterm = ["dep:crossterm"]
+# Emit the browser client's TypeScript from these types. Off by default — it is
+# a code generator, and nothing that links this crate should have to build one.
+#
+# `cargo test -p butai-protocol --features ts` runs ts-rs's generated export
+# tests, which write `web/app/src/protocol/generated/protocol.ts`. The output
+# directory is set once in `.cargo/config.toml` rather than repeated in ~70
+# attributes; see the note there.
+#
+# **This does not touch the wire format.** ts-rs reads the same `serde`
+# attributes serde does, so the bindings describe what the daemon already
+# sends. If a change here would change a byte on the wire, it is wrong.
+ts = ["dep:ts-rs"]
+
+[lints]
+workspace = true

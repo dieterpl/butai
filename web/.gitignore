@@ -1,0 +1,10 @@
+# Installed, not authored. `bun.lock` *is* committed: the image builds with
+# `--frozen-lockfile`, and a lockfile that is not in the repo makes that a
+# promise nothing keeps.
+node_modules/
+
+# Build output.
+dist/
+
+# Built by `bun build` for the renderer differential; regenerated on demand.
+test/*.bundle.js

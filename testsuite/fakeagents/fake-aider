@@ -1,0 +1,40 @@
+#!/bin/bash
+# aider: no interrupt hint in the footer at all, so "working" can only come from
+# the output-recency fallback — and its confirm prompt is spelled `(Y)es/(N)o`,
+# which matches none of butai's PROMPT_MARKERS. This double exists to keep both
+# of those facts measured rather than assumed.
+. "$(dirname "$0")/_lib.sh"
+
+IDLE_LINE='> '
+
+# aider streams a transcript instead of holding a status line, so there is
+# nothing to repaint when the pane is resized. Saying so keeps its output
+# genuinely quiet between turns, which is what makes the recency-only signal
+# observable.
+REPAINTS=0
+
+emit_banner() {
+    printf '\033[2J\033[H'
+    echo '  aider v0.0 (testsuite double)'
+    echo '  main repo: .'
+    echo
+}
+
+# aider streams its edit as it works instead of holding a status line, so the
+# busy phase here is sustained output rather than a marker. Eight seconds is a
+# realistic turn: far longer than the 1s minimum span butai needs before recency
+# counts as "working", and short enough that a test can still watch the signal
+# expire afterwards.
+emit_busy() {
+    emit_noisy 8
+}
+
+emit_question() {
+    echo 'Add src/main.rs to the chat? (Y)es/(N)o/(A)ll/(S)kip all [Yes]: '
+}
+
+emit_prose() {
+    echo 'Applied the edit. Use control-c to stop me if this is wrong.'
+}
+
+run_script

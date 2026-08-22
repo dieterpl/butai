@@ -1,0 +1,5 @@
+# Revisions that touch formatting only. Use with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: apply rustfmt across the workspace
+04212da03df6aa46628367e22fbd0b9de93b0957

@@ -1,0 +1,46 @@
+# butai theme — solarized-light
+#
+# The `solarized-light` built-in, written out in full. You do not need this file
+# to use the theme — `[theme] name = "solarized-light"` is enough — it is here
+# to copy when you want to change two things about it:
+#
+#   cp solarized-light.toml ~/.butai/themes/mysol.toml
+#   then `:theme mysol` in butai.
+#
+# Ethan Schoonover's Solarized, light background. This one is worth pairing:
+# set `syntax_theme = "Solarized (light)"` in `[theme]` so the editor and diff
+# panes match — syntect ships that theme, and a dark one under a light chrome
+# looks wrong.
+
+name = "solarized-light"
+
+[colors]
+# Surfaces. Solarized defines only two light background tones (base3, base2),
+# so `selection_dim` is interpolated between them to keep the unfocused cursor
+# row distinguishable from both.
+ground        = "#fdf6e3"  # base3
+surface       = "#fdf6e3"  # base3: help and pickers, separated by `rule`
+sunken        = "#eee8d5"  # base2: tab strip
+selection     = "#eee8d5"  # base2
+selection_dim = "#f7f1de"  # between base3 and base2
+
+# Text — base01/base00/base1, darkest to lightest
+ink       = "#586e75"  # base01, emphasized content
+muted     = "#657b83"  # base00, body text
+faint     = "#93a1a1"  # base1, comments and secondary content
+on_accent = "#fdf6e3"  # base3, so it reads on the dark accent fill
+
+# Lines
+rule       = "#93a1a1"  # base1
+rule_focus = "#268bd2"  # blue
+
+# State — the accent colors are shared by both Solarized backgrounds
+accent    = "#268bd2"  # blue
+info      = "#2aa198"  # cyan
+ok        = "#859900"  # green
+attention = "#b58900"  # yellow
+danger    = "#dc322f"  # red
+
+# Footer
+status_bg = "#eee8d5"  # base2
+status_fg = "#657b83"  # base00

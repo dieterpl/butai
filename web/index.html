@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>butai</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- What the browser paints before it has a palette. `dark light` in that
+         order means "prefers dark, can do light", so an OS set to dark gets a
+         dark canvas from the user agent itself — no stylesheet, no script, no
+         flash of white between this line and the theme. -->
+    <meta name="color-scheme" content="dark light" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>This client is a JavaScript application. The terminal client is not.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

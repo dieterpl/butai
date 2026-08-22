@@ -1,0 +1,60 @@
+# Two ways to use the test image.
+#
+#   docker compose -f testsuite/docker-compose.yml run --rm testsuite smoke
+#
+#     One-shot: runs a profile and writes its report to testsuite/out/.
+#     `run.sh` is the friendlier entry point and also drives the constrained
+#     container lanes; this is here for CI systems that already speak compose.
+#
+#   docker compose -f testsuite/docker-compose.yml up workbench web
+#
+#     Interactive: a daemon inside the test image with the reference web client
+#     bridged to it on http://localhost:8080. Useful when a test fails and you
+#     want to look at the thing rather than read a screen dump — spawn the same
+#     agents and processes by hand and watch what the rails do.
+#
+# Build context is the repository root, so run these from anywhere with -f.
+services:
+  testsuite:
+    build:
+      context: ..
+      dockerfile: testsuite/Dockerfile
+    init: true
+    volumes:
+      - ./out:/out
+    environment:
+      - BUTAI_OUT=/out
+    command: ["standard"]
+
+  workbench:
+    build:
+      context: ..
+      dockerfile: testsuite/Dockerfile
+    init: true
+    entrypoint: ["butai", "daemon"]
+    environment:
+      # The socket lives in a shared volume rather than under HOME so the web
+      # bridge can reach it. The daemon chmods this directory 0700, which is why
+      # the volume is mounted at a path the daemon's own user owns.
+      - BUTAI_SOCKET=/run/butai/butai.sock
+    volumes:
+      - butai-socket:/run/butai
+    # Note: `exit_when_empty` ships on, so closing the last workspace stops this
+    # container. That is butai behaving correctly, not the compose file breaking.
+    stop_grace_period: 5s
+
+  web:
+    build:
+      context: ../web
+    depends_on:
+      - workbench
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    environment:
+      - BUTAI_SOCKET=/run/butai/butai.sock
+      - PORT=8080
+    volumes:
+      - butai-socket:/run/butai
+
+volumes:
+  butai-socket:

@@ -1,0 +1,31 @@
+#!/bin/bash
+# Gemini CLI: a "cancel" rather than "interrupt" hint, which butai carries as a
+# separate marker.
+. "$(dirname "$0")/_lib.sh"
+
+IDLE_LINE='> '
+
+emit_banner() {
+    printf '\033[2J\033[H'
+    echo '  gemini (testsuite double)'
+    echo
+}
+
+emit_busy() {
+    echo '⠹ Thinking… (esc to cancel, 6s)'
+    echo
+    echo '  > type your message'
+}
+
+emit_question() {
+    echo '  Apply the proposed change to README.md?'
+    echo
+    echo '  ❯ 1. Yes'
+    echo '    2. No'
+}
+
+emit_prose() {
+    echo 'You may configure a signal handler to cancel long jobs.'
+}
+
+run_script

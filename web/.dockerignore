@@ -1,0 +1,11 @@
+# Installed and built inside the image, never copied from here.
+#
+# `node_modules/` in particular: a host tree may hold platform-specific binaries
+# that cannot run in the container, and `bun install --frozen-lockfile` in the
+# builder is what makes the image's dependencies the ones the repo pins rather
+# than the ones a developer happens to have.
+node_modules/
+dist/
+
+# The renderer differential builds these on demand.
+test/*.bundle.js

@@ -1,0 +1,34 @@
+[package]
+name = "butai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A terminal multiplexer built for coding agents: persistent workspaces, an agent/process/git workbench, and a public JSON API any GUI can speak."
+keywords = ["tmux", "terminal", "multiplexer", "tui", "agent"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "butai"
+path = "src/main.rs"
+
+[dependencies]
+butai-protocol.workspace = true
+butai-server.workspace = true
+butai-client.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The REST face of the daemon socket lives in `butai-client` now, since the TUI
+# draws from it too. All this binary still needs is the status type its exit
+# codes branch on.
+hyper.workspace = true
+# Raw mode for the ssh handoff probe; see `handoff.rs`.
+rustix.workspace = true
+
+[lints]
+workspace = true

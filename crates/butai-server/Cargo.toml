@@ -1,0 +1,52 @@
+[package]
+name = "butai-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The butai daemon: pane ownership, terminal emulation, headless rendering, git, and the JSON/REST API."
+
+[dependencies]
+butai-protocol.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+portable-pty.workspace = true
+vt100.workspace = true
+git2.workspace = true
+regex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+slotmap.workspace = true
+memchr.workspace = true
+unicode-width.workspace = true
+nucleo-matcher.workspace = true
+rustix.workspace = true
+dirs.workspace = true
+
+# macOS SYSTEM-rail telemetry reads CPU/RAM via mach syscalls (sys.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+flate2.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

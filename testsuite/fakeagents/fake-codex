@@ -1,0 +1,31 @@
+#!/bin/bash
+# Codex CLI: capitalised interrupt hint (butai matches case-insensitively) and a
+# numbered approval menu.
+. "$(dirname "$0")/_lib.sh"
+
+IDLE_LINE='› '
+
+emit_banner() {
+    printf '\033[2J\033[H'
+    echo '  codex (testsuite double)'
+    echo
+}
+
+emit_busy() {
+    echo '▌ Working  (8s · Esc to interrupt)'
+    echo
+    echo '  › send a message'
+}
+
+emit_question() {
+    echo '  Allow codex to run `cargo test`?'
+    echo
+    echo '  ❯ 1. Yes, run it'
+    echo '    2. No, keep going without it'
+}
+
+emit_prose() {
+    echo 'The build script has a hook you can wire up to interrupt on failure.'
+}
+
+run_script

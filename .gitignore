@@ -1,0 +1,112 @@
+# ── Build output ─────────────────────────────────────────────────────
+/target
+/dist
+**/*.rs.bk
+*.pending-snap
+web/__pycache__/
+__pycache__/
+*.py[cod]
+# The client's CDN dependencies, downloaded by the image build (see
+# web/tools/vendor.py). Ninety-nine generated files that belong to a pin list,
+# not to history — and a copy left here would shadow nothing, because the build
+# ignores it too.
+web/vendor/
+
+# Test-suite reports (testsuite/run.sh writes one directory per lane).
+/testsuite/out/
+
+# ── AI / agent working files ─────────────────────────────────────────
+# Local instruction files, session state and the scratch notes agents
+# leave behind. These are working files and are not distributed with the
+# project. Excluding a path here is a packaging decision only: it makes
+# no statement about the terms the distributed source is offered under,
+# which are stated in one place and nowhere else.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claude.json
+AGENTS.md
+AGENT.md
+GEMINI.md
+.gemini/
+.cursorrules
+.cursor/
+.codex/
+.aider*
+.windsurf/
+.clinerules
+.clinerules/
+.roo/
+.continue/
+.opencode/
+.junie/
+.amazonq/
+.kilocode/
+.trae/
+.qwen/
+.crush/
+.serena/
+.specstory/
+.mcp.json
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/chatmodes/
+
+# Agent- and human-authored scratch notes. The docs that ship live in
+# docs/ under their own names; anything matching these patterns is local.
+NOTES.md
+TODO.md
+# Lowercase too: the ignore rules are matched case-sensitively on Linux CI.
+todo.md
+SCRATCH.md
+HANDOFF*.md
+PLAN*.md
+*-notes.md
+*-NOTES.md
+*_notes.md
+*_NOTES.md
+*-plan.md
+*_PLAN.md
+*-handoff.md
+*_HANDOFF.md
+*-handover.md
+*_HANDOVER.md
+HANDOVER*.md
+*-design.md
+*_DESIGN.md
+*.local.md
+/notes/
+/scratch/
+/.notes/
+/private/
+
+# ── Local environment ────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# ── Editor / OS junk ─────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.zed/
+
+# ── Runtime / logs ───────────────────────────────────────────────────
+*.log
+/log/
+/logs/

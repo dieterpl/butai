@@ -1,0 +1,11 @@
+# The committed style is more compact than default rustfmt: struct literals and
+# call chains stay on one line up to `max_width`. Without this file `cargo fmt`
+# explodes them, which is why CI's `cargo fmt --all --check` has been red and
+# why contributors were hand-matching the surrounding style instead of running
+# the formatter.
+#
+# This config alone does not make the tree clean — it was formatted with a mix
+# of profiles over time, and ~200 hunks still differ. It is committed on its own
+# so new code can be formatted normally; a tree-wide `cargo fmt --all` is a
+# separate, deliberate commit to be taken when no other work is in flight.
+use_small_heuristics = "Max"

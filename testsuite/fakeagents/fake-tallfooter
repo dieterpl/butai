@@ -1,0 +1,39 @@
+#!/bin/bash
+# An agent whose status marker sits ABOVE a tall footer, so the marker is more
+# than FOOTER_SCAN_ROWS (8) lines from the bottom of the pane.
+#
+# This is the shape of the 8-row band's limit: nothing is wrong with the marker,
+# it is simply out of the window butai looks at, and the agent reads idle for the
+# whole turn.
+. "$(dirname "$0")/_lib.sh"
+
+IDLE_LINE='> '
+
+emit_banner() {
+    printf '\033[2J\033[H'
+    echo '  verbose-agent (testsuite double)'
+    echo
+}
+
+emit_busy() {
+    echo '✻ Working on it… (esc to interrupt)'
+    echo '───────────────────────────────────────────────'
+    echo '  context:   14 files · 8.2k tokens'
+    echo '  model:     fake-1'
+    echo '  tools:     read, write, bash'
+    echo '  branch:    main'
+    echo '  sandbox:   on'
+    echo '  approvals: auto'
+    echo '───────────────────────────────────────────────'
+    echo '  shortcuts: ? help · / commands · @ files'
+    echo '  > _'
+}
+
+emit_question() {
+    echo '  Proceed with the edit?'
+    echo
+    echo '  ❯ 1. Yes'
+    echo '    2. No'
+}
+
+run_script

@@ -1,0 +1,221 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   The bridge between the daemon's palette and Tailwind.
+
+   Every colour below is `var(--x)` — **by reference, never by value** — so the
+   palette stays `settings.ts`'s and writing custom properties onto <html>
+   restyles Tailwind's output along with everything else. `theme.ts` does that
+   write and nothing else; a theme is a palette applied over the page, never a
+   second stylesheet and never a class.
+
+   **There is no colour literal anywhere under `src/`.** The old client had the
+   same rule and `check.py` enforced it; the reason has not changed. `settings.ts`
+   owns the palettes, and a copy in the view layer is drift with extra steps.
+
+   Tailwind v4 resolves these through `color-mix()`, which is the one thing the
+   v3 Play CDN could not do: `bg-card/50` works now.
+
+   ## This file was reversed, deliberately
+
+   An earlier pass moved this client to a *web app* look: system sans for the
+   chrome, 32px rows, four radii, four shadows, 150ms motion. It has been
+   reversed. The target is now **the terminal client**, read off the real
+   captures in `docs/images/` — `workbench.svg`, `settings.svg`, `help.svg` —
+   which are a character grid written out as SVG, so every colour and every cell
+   coordinate in them is exactly what the TUI drew. What that grid is:
+
+     one family (monospace), one size (14px), a cell of 8.4 x 18
+     panels framed in box-drawing rules with the title let into the top rule
+     buttons written `[+ agent]` — square brackets, no fill, no radius
+     no shadow, no radius, no elevation, no motion
+     selection is a background band
+
+   The tokens below are that grid. Nothing here is a preference; each one is a
+   measurement off a capture, and the two that are not are marked as the
+   concessions they are.
+--------------------------------------------------------------------------- */
+
+@theme {
+  /* Surfaces and text. The names on the left are shadcn's, because the
+     component source uses them verbatim. One reads backwards at first glance:
+     in shadcn `accent` is the *hover tint*, not the brand colour. butai's
+     `--accent` is the brand blue, and it lands on `primary`. */
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--fg);
+  --color-popover: var(--panel);
+  --color-popover-foreground: var(--fg);
+  --color-muted: var(--panel2);
+  --color-muted-foreground: var(--dim);
+  --color-accent: var(--panel2);
+  --color-accent-foreground: var(--fg);
+  --color-secondary: var(--panel2);
+  --color-secondary-foreground: var(--fg);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--on-accent);
+  --color-destructive: var(--bad);
+  --color-destructive-foreground: var(--on-accent);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--focus);
+
+  /* butai's own roles under their own names. `sel` is the selection band: one
+     concept, one colour — see `Row`. */
+  --color-sel: var(--sel);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+  --color-run: var(--run);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-term-bg: var(--term-bg);
+  --color-term-fg: var(--term-fg);
+  --color-status-bg: var(--status-bg);
+  --color-status-fg: var(--status-fg);
+
+  /* ── Type: one family ────────────────────────────────────────────────────
+     **`--font-sans` and `--font-mono` are the same stack, and that is the
+     point.** The terminal has one family because a terminal *has* only one;
+     every rule, every row and every label in `workbench.svg` is drawn on the
+     same 8.4 x 18 cell. The previous pass split them and used sans for the
+     chrome, which is precisely the difference being undone.
+
+     They stay as two names rather than collapsing to one because `font-sans`
+     and `font-mono` are spelled all over `src/pages/`, and a page saying
+     `font-mono` about a path is still saying something true — it is a claim
+     about *why* the string is monospaced, and that claim outlives this pass. If
+     the two families ever diverge again, the call sites are already marked.
+
+     No web font. The image must build with no network, and a system stack costs
+     nothing and renders natively on every platform. */
+  --font-sans: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* The ramp, collapsed to **two steps**, because the terminal has one and a
+     browser needs somewhere to put a footnote.
+
+       14px  the cell. Every row, every rule, every label, every button.
+       12px  under the cell. Annotations that the TUI simply does not draw —
+             a description under a settings row, a provenance line.
+
+     The names are historical: `text-11`, `text-12`, `text-13`, `text-14`,
+     `text-16` are spelled across `src/pages/`, which is not in this pass, so
+     they survive as *aliases onto the two steps* rather than as five sizes. A
+     page asking for `text-16` gets the cell, which is what the TUI would have
+     given it.
+
+     Line height is 18px throughout — the terminal's cell — so wrapped prose and
+     stacked rows land on the same rhythm as the grid. */
+  --text-11: 12px;
+  --text-11--line-height: 18px;
+  --text-12: 12px;
+  --text-12--line-height: 18px;
+  --text-13: 14px;
+  --text-13--line-height: 18px;
+  --text-14: 14px;
+  --text-14--line-height: 18px;
+  --text-16: 14px;
+  --text-16--line-height: 18px;
+  --text-xs: 12px;
+  --text-xs--line-height: 18px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 18px;
+  --text-lg: 14px;
+  --text-lg--line-height: 18px;
+
+  /* Zero, and it has to be. Letter-spacing on a monospace grid is a grid that
+     no longer lines up with the one under it — the caps in `SectionTitle` sit
+     in the same rule as the box-drawing characters either side of them. The
+     token stays defined because pages spell `tracking-caps`. */
+  --tracking-caps: 0em;
+
+  /* ── Geometry ───────────────────────────────────────────────────────────
+     **No radii.** A terminal has none: a corner is `┌`, which is two strokes
+     meeting at a right angle. Clearing the namespace rather than zeroing four
+     tokens is deliberate — it takes `rounded-sm`/`md`/`lg`/`xl` out of
+     existence everywhere at once, including the shadcn primitives and the few
+     pages that spell one, so nothing has to be hunted down file by file.
+     `rounded-none` is a static utility and still resolves. */
+  --radius-*: initial;
+
+  /* **No shadows.** Same reasoning and the same mechanism: elevation is the
+     other half of what made this read as a web app, and there is no such thing
+     as a raised surface on a character grid. With the namespace cleared,
+     `shadow-xs`/`sm`/`md`/`lg` generate nothing, and `shadow-none` still does.
+     Ring utilities are untouched — they run on `--tw-ring-*`, not on this. */
+  --shadow-*: initial;
+
+  /* The row scale. **22px**, and this is the first of the two deliberate
+     concessions to the pointer: the terminal's line is 18px at 14px type, and
+     22 rather than 18 is what makes a row comfortably clickable without it
+     reading as a web app's 32px control. Four pixels, spent once, here.
+
+     `row-compact` is 20px for a dense list — a diff, a file tree — and
+     `row-lg` 26px for the app header, which in the TUI is one cell like
+     everything else but has to hold controls in a browser. */
+  --spacing-row: 22px;
+  --spacing-row-compact: 20px;
+  --spacing-row-lg: 26px;
+
+  /* ── Motion ─────────────────────────────────────────────────────────────
+     **None.** A terminal repaints; it does not animate. `0s` rather than
+     deleting the token, because `transition-*` utilities are spelled in
+     `src/stage/` and the shadcn primitives, and a duration of zero turns each
+     of them into the repaint it should have been. Explicit `duration-N`
+     classes still win, which is why the primitives that carry one have had it
+     removed rather than being left to this. */
+  --default-transition-duration: 0s;
+}
+
+/* Respect the system setting. There is almost nothing left for this to switch
+   off — the duration token above is already zero — but `sonner` and the Radix
+   overlays bring their own keyframes, and this is what reaches those. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    /* The one family, on the cell. */
+    font-family: var(--font-mono);
+    font-size: var(--text-13);
+    line-height: var(--text-13--line-height);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Anything numeric lines up. Mostly redundant now that every glyph is a cell
+     wide, but a few monospace stacks still ship proportional oldstyle figures
+     and this costs nothing. */
+  .tabular,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The scrollbars, themed. A default scrollbar in a dark panel is the one
+     piece of chrome that gives away that this is a document. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+}

@@ -1,0 +1,156 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>renderer differential</title>
+    <style>
+      /* Both renderers get a container of exactly the same size, because both
+         size their cell grid from it. A one-pixel difference here would show up
+         as every glyph landing on a different subpixel and the whole diff going
+         red for no reason at all. */
+      html, body { margin: 0; background: #000; }
+      .pair { display: flex; gap: 0; }
+      .box { width: 640px; height: 240px; position: relative; }
+      canvas { display: block; width: 100%; height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div class="pair">
+      <div class="box" id="oldbox"><butai-screen preview id="old"></butai-screen></div>
+      <div class="box" id="newbox"><canvas id="newcanvas"></canvas></div>
+    </div>
+
+    <script type="module">
+      import "/butai-screen.js";
+      import { FIXTURES } from "/app/test/stage-fixture.bundle.js";
+      import { Screen } from "/app/test/screen.bundle.js";
+
+      const FONT_PX = 15;
+
+      // One theme for both, written as custom properties on <html> exactly as
+      // `theme.ts` does. The old element reads them through `_readTheme`; the
+      // new one gets the same values through `getTheme`. If either invented its
+      // own default the diff would report a difference that is really a
+      // difference in how the test was set up.
+      const THEME = {
+        "--term-bg": "#0e1116",
+        "--term-fg": "#d7dde5",
+        "--accent": "#58a6ff",
+        "--focus": "#1f6feb44",
+      };
+      for (const [k, v] of Object.entries(THEME)) document.documentElement.style.setProperty(k, v);
+
+      const oldEl = document.getElementById("old");
+      const newCanvas = document.getElementById("newcanvas");
+
+      function pixels(canvas) {
+        const ctx = canvas.getContext("2d");
+        return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      }
+
+      const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+      window.__compare = async () => {
+        const out = [];
+
+        // The new renderer, constructed once and reused, exactly as the old
+        // element is — a fresh instance per fixture would hide any state that
+        // leaks between frames, which is precisely what the partial-frame
+        // fixture is looking for.
+        let screen;
+        try {
+          screen = new Screen(newCanvas, {
+            onMessage: () => {},
+            getTheme: () => ({
+              bg: THEME["--term-bg"],
+              fg: THEME["--term-fg"],
+              accent: THEME["--accent"],
+              focus: THEME["--focus"],
+            }),
+            preview: true,
+            fontPx: FONT_PX,
+          });
+        } catch (e) {
+          return [{ name: "construct Screen", error: String(e && e.stack ? e.stack : e) }];
+        }
+
+        oldEl.setFontPx?.(FONT_PX);
+        screen.setFontPx?.(FONT_PX);
+
+        // Let both settle before measuring anything.
+        //
+        // Both renderers observe their box and re-grid when it changes, and a
+        // `ResizeObserver`'s *first* callback is delivered a frame after
+        // `observe()` — where it sets `canvas.width`, which blanks the backing
+        // store, and schedules a repaint. Reading pixels inside that window
+        // catches a canvas that has been cleared and not yet redrawn, and it
+        // showed up as the first fixture differing by 100% while every later
+        // one matched exactly. That shape — first case only — is the tell for a
+        // warm-up race in the harness rather than a difference in the drawing.
+        await raf();
+        await raf();
+
+        // Make the cursor fixtures mean something.
+        //
+        // Both renderers are `preview`, so neither is ever focused, so
+        // `_drawCursor` draws the hollow unfocused rectangle and returns before
+        // the block / bar / underline arms. That made all three cursor fixtures
+        // draw the *same* rectangle: deleting the entire bar arm passed all ten.
+        // Forcing focus true and stopping the blink turns three decorative
+        // fixtures into real ones.
+        const forceFocused = (obj) => {
+          obj._hasFocus = () => true;
+          obj._blink = true;
+          if (obj._blinkTimer) clearInterval(obj._blinkTimer);
+          obj._blinkTimer = null;
+        };
+        forceFocused(oldEl);
+        forceFocused(screen);
+
+        for (const fx of FIXTURES) {
+          try {
+            oldEl._resize(fx.cols, fx.rows);
+            screen.resize(fx.cols, fx.rows);
+            if (fx.frame.full) {
+              oldEl.clear();
+              screen.clear();
+            }
+            oldEl.applyFrame(fx.frame);
+            screen.applyFrame(fx.frame);
+            await raf();
+
+            const a = pixels(oldEl.canvas);
+            const b = pixels(newCanvas);
+            if (a.length !== b.length) {
+              out.push({ name: fx.name, error: `canvas sizes differ: ${a.length} vs ${b.length}` });
+              continue;
+            }
+            let diff = 0;
+            let firstAt = null;
+            const w = oldEl.canvas.width;
+            for (let i = 0; i < a.length; i += 4) {
+              // Alpha is skipped: both contexts are opaque, and a difference in
+              // the alpha byte alone cannot be visible.
+              if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) {
+                diff++;
+                if (!firstAt) {
+                  const p = i / 4;
+                  firstAt = {
+                    x: p % w,
+                    y: Math.floor(p / w),
+                    old: `${a[i]},${a[i + 1]},${a[i + 2]}`,
+                    new: `${b[i]},${b[i + 1]},${b[i + 2]}`,
+                  };
+                }
+              }
+            }
+            out.push({ name: fx.name, diff, pixels: a.length / 4, firstAt });
+          } catch (e) {
+            out.push({ name: fx.name, error: String(e && e.stack ? e.stack : e) });
+          }
+        }
+        return out;
+      };
+    </script>
+  </body>
+</html>

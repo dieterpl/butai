@@ -1,0 +1,42 @@
+{
+  // Bun runs TypeScript directly, so nothing here emits. `tsc --noEmit` is a
+  // checker and only a checker — which is the point of the whole exercise: the
+  // generated `protocol.ts` is worth nothing if the compiler is not run over
+  // the code that consumes it.
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    // Bun resolves `./foo.ts` as written and never emits, so the extension is
+    // the honest one. Without this the imports would have to name a `.js` that
+    // does not exist anywhere in the tree.
+    "allowImportingTsExtensions": true,
+
+    "jsx": "react-jsx",
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+
+    // The settings that make the generated DTOs mean something. Without
+    // `strictNullChecks` an `exited: number | null` reads as a number and the
+    // client renders "exit 0" for a running agent; without
+    // `noUncheckedIndexedAccess` every `rows[i]` is non-null by fiat, which is
+    // exactly the lie the old untyped client was already telling.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+
+    // `@/` is what shadcn's own component source imports by, so it has to
+    // resolve here and in `vite.config.ts` both. No `baseUrl`: TypeScript 7
+    // removed it, and `paths` resolves against this file's directory anyway.
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["server", "src", "test", "vite.config.ts"]
+}

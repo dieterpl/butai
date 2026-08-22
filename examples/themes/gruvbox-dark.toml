@@ -1,0 +1,42 @@
+# butai theme — gruvbox-dark
+#
+# The `gruvbox-dark` built-in, written out in full. You do not need this file to
+# use the theme — `[theme] name = "gruvbox-dark"` is enough — it is here to copy
+# when you want to change two things about it:
+#
+#   cp gruvbox-dark.toml ~/.butai/themes/mygruv.toml
+#   then `:theme mygruv` in butai.
+#
+# Warm retro palette, all values from gruvbox's own ramps. Pairs well with
+# `syntax_theme = "base16-eighties.dark"` for the editor and diff panes.
+
+name = "gruvbox-dark"
+
+[colors]
+# Surfaces — bg0_h/bg0/bg0_s/bg1/bg2, darkest to lightest
+ground        = "#282828"  # bg0
+surface       = "#32302f"  # bg0_s: help, pickers
+sunken        = "#1d2021"  # bg0_h: tab strip
+selection     = "#504945"  # bg2
+selection_dim = "#3c3836"  # bg1
+
+# Text — fg1/fg3/gray
+ink       = "#ebdbb2"
+muted     = "#bdae93"
+faint     = "#928374"
+on_accent = "#282828"  # bg0, so it reads on the light accent fill
+
+# Lines
+rule       = "#504945"
+rule_focus = "#83a598"
+
+# State — gruvbox's bright variants, which carry on the dark grounds
+accent    = "#83a598"  # bright blue
+info      = "#8ec07c"  # bright aqua
+ok        = "#b8bb26"  # bright green
+attention = "#fabd2f"  # bright yellow
+danger    = "#fb4934"  # bright red
+
+# Footer
+status_bg = "#3c3836"  # bg1
+status_fg = "#ebdbb2"

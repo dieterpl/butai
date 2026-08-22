@@ -1,0 +1,11 @@
+# Build context for testsuite/Dockerfile is the repository root, so keep the
+# things that are large, rebuilt, or irrelevant out of it.
+.git
+target
+dist
+testsuite/out
+web/__pycache__
+**/__pycache__
+*.pyc
+docs/images
+.DS_Store

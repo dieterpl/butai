@@ -1,0 +1,111 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/butai-protocol",
+    "crates/butai-server",
+    "crates/butai-client",
+    "crates/butai",
+]
+
+[workspace.package]
+version = "0.12.1"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.88"
+repository = "https://github.com/dieterpl/butai"
+homepage = "https://github.com/dieterpl/butai"
+
+[workspace.dependencies]
+# Path *and* version: the path wins for workspace builds, and the version is
+# what `cargo publish` rewrites the dependency to. Without it, packaging fails
+# with "all dependencies must have a version requirement specified". Bump these
+# with `workspace.package.version`.
+butai-protocol = { path = "crates/butai-protocol", version = "0.12.1" }
+butai-server = { path = "crates/butai-server", version = "0.12.1" }
+butai-client = { path = "crates/butai-client", version = "0.12.1" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "io-std",
+    "sync",
+    "time",
+    "signal",
+    "process",
+    "macros",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
+# `Accept-Encoding: gzip` on the REST API and the event stream. Already in the
+# tree under `png`/`tiff` (the clipboard image path), so taking it directly costs
+# no new build and no new supply chain. The pure-Rust backend, not zlib-sys.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# Only the cell grid and its geometry — `Buffer`, `Rect`, `Style`, `Widget`.
+# The terminal is driven by crossterm directly, so none of ratatui's backends
+# are wanted; taking them would pull a second crossterm in beside ours.
+ratatui = { version = "0.30", default-features = false, features = ["std"] }
+crossterm = { version = "0.28", features = ["serde", "event-stream"] }
+portable-pty = "0.8"
+vt100 = "0.16"
+git2 = { version = "0.19", default-features = false }
+syntect = { version = "5", default-features = false, features = [
+    "default-fancy",
+] }
+# `tui-textarea` 0.7 is the last release under that name and pins ratatui
+# 0.29, which in turn pins `unicode-width = "=0.2.0"` — the chain that kept the
+# tree on a vt100 that panics when a pane is scrolled back further than one
+# screen. `tui-textarea-2` is the maintained continuation, same API and same
+# `tui_textarea` lib name, so it is taken under the old name and nothing that
+# imports it changes. Its crossterm-0.28 feature keeps our crossterm where it
+# is; the editor hands the widget a `crossterm::event::KeyEvent` directly.
+tui-textarea = { package = "tui-textarea-2", version = "0.12", default-features = false, features = [
+    "crossterm_0_28",
+] }
+regex = "1"
+toml = "0.8"
+toml_edit = "0.22"
+dirs = "5"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+nucleo-matcher = "0.3"
+unicode-width = "0.2"
+slotmap = "1"
+memchr = "2"
+rustix = { version = "0.38", features = ["fs", "net", "process", "termios"] }
+libc = "0.2"
+# Reading the *local* clipboard, which only a client can do. `image-data` is the
+# feature that carries `get_image`; the rest of arboard's defaults are text
+# paths we already have (OSC 52 out, bracketed paste in) and Wayland support we
+# ask for explicitly per-target instead.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# arboard hands back raw RGBA, and an agent CLI needs a file it can open, so the
+# client re-encodes. Already in arboard's own tree on Linux.
+png = "0.18"
+insta = "1"
+tempfile = "3"
+# TypeScript for the browser client, generated from the DTOs themselves rather
+# than hand-written beside them. Optional and off by default: it is a build-time
+# code generator, and a crate published to crates.io should not make every
+# downstream build compile one. `cargo test -p butai-protocol --features ts` is
+# what writes the bindings; CI then diffs them against what is checked in.
+ts-rs = "12"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+strip = true

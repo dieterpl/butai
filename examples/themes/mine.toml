@@ -1,0 +1,16 @@
+# butai theme — mine
+#
+# The other files here are complete palettes, which is the rare case. Most
+# themes look like this one: start from a built-in, change what bothers you.
+# Everything not listed is inherited, so this file keeps working when new roles
+# are added.
+#
+#   cp mine.toml ~/.butai/themes/
+#   then `:theme mine` in butai.
+
+extends = "blueprint-dark"
+
+[colors]
+accent     = "#ff8800"
+rule_focus = "#ff8800"
+faint      = "ansi:8"  # let the terminal pick this one

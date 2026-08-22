@@ -1,0 +1,21 @@
+# Where `--features ts` writes the browser client's TypeScript.
+#
+# ts-rs reads this at *compile* time, so it has to be an environment variable
+# rather than an argument. Setting it here instead of in each `#[ts(export_to)]`
+# means the path is written down once: about seventy attributes name
+# `protocol.ts`, and none of them names a directory. `relative = true` resolves
+# it against this file's parent — the workspace root — so it holds wherever
+# cargo is invoked from, including from inside `crates/butai-protocol`, where
+# `CARGO_MANIFEST_DIR` would otherwise put the bindings two directories too deep.
+#
+# Nothing reads it without the feature, and the feature is off by default.
+#
+# **It has to be the directory the client actually imports from.** It kept
+# saying `web/app/src/...` after the TypeScript cutover moved the client up to
+# `web/src/...`, and nothing complained: the export wrote a fresh `protocol.ts`
+# into a directory git does not track, while CI's binding check diffed the real
+# one and found it unchanged every time. `SysDto::disks` reached the daemon and
+# never reached the browser — and the check that exists to catch exactly that
+# reported green throughout, because a file nobody writes never differs.
+[env]
+TS_RS_EXPORT_DIR = { value = "web/src/protocol/generated", relative = true }

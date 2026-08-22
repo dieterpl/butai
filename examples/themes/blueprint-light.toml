@@ -1,0 +1,42 @@
+# butai theme — blueprint-light
+#
+# This is the built-in `blueprint-light` written out in full, as a starting
+# point for your own. Copy it to ~/.butai/themes/<name>.toml, edit, and
+# select it with `[theme] name = "<name>"` in config.toml.
+#
+# You rarely need every role: `extends = "blueprint-light"` plus the two or
+# three colors you actually want to change is usually the better file.
+#
+# Values are "#rrggbb", "ansi:N" (0-255, resolved by your terminal), or
+# "default" (the terminal's own foreground/background).
+#
+# See docs/theming.md for what each role is used for.
+
+[colors]
+# Surfaces
+ground        = "#e9edf3"  # window background
+surface       = "#f7f9fc"  # overlays: help, pickers
+sunken        = "#dfe5ee"  # tab strip
+selection     = "#dbe2ee"  # cursor row, focused list
+selection_dim = "#e3e8f1"  # cursor row, unfocused list
+
+# Text
+ink       = "#1b2331"  # primary
+muted     = "#5c6980"  # secondary: buttons
+faint     = "#8a95a8"  # hints, labels, placeholders
+on_accent = "#f7f9fc"  # text on an accent/attention fill
+
+# Lines
+rule       = "#c6cfdd"
+rule_focus = "#2f56b8"
+
+# State — semantic, not decorative. Keep the meanings if you recolor these.
+accent    = "#2f56b8"  # markers, active tab, headers
+info      = "#0e7490"  # finished agent, directories, the NET gauge's ↓
+ok        = "#4a7c2a"  # ok, staged, additions
+attention = "#9c6407"  # working, modified, badges
+danger    = "#b3261e"  # WAIT, FAIL(n), untracked, deletions
+
+# Footer
+status_bg = "#dfe5ee"
+status_fg = "#5c6980"

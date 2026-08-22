@@ -1,0 +1,72 @@
+#!/bin/bash
+# Claude Code's terminal shape: a spinner line whose interrupt hint is the busy
+# marker, a boxed permission dialog whose highlighted option is what butai
+# recognises as "needs you", and the much taller multiple-choice question, which
+# only its hint line gives away. All three are matched by butai today.
+#
+# _lib.sh installs no-op defaults, so it is sourced first and overridden below.
+. "$(dirname "$0")/_lib.sh"
+
+IDLE_LINE='> '
+
+emit_banner() {
+    printf '\033[2J\033[H'
+    echo '  ✻ Claude Code (testsuite double)'
+    echo
+    echo "  cwd: $PWD"
+    echo
+}
+
+emit_busy() {
+    echo '✻ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)'
+    echo
+    echo '╭─────────────────────────────────────────────────╮'
+    echo '│ > try "how should I fix the failing test?"      │'
+    echo '╰─────────────────────────────────────────────────╯'
+}
+
+emit_question() {
+    echo '╭─────────────────────────────────────────────────╮'
+    echo '│ Do you want to make this edit to src/lib.rs?    │'
+    echo '│                                                 │'
+    echo '│ ❯ 1. Yes                                        │'
+    echo '│   2. No, and tell Claude what to do differently  │'
+    echo '╰─────────────────────────────────────────────────╯'
+}
+
+# The AskUserQuestion dialog, transcribed from a real pane. Nothing like the
+# permission box above: the question is not a "do you want to…", every option
+# carries a description, and the whole thing is far taller than the 8-row footer
+# band — the highlighted `❯ 1.` is thirteen rows up. What butai has left to read
+# is the hint line, whose "esc to cancel" is Gemini's *working* marker and whose
+# "enter to select" is the part that means a choice is pending.
+emit_choice() {
+    echo '←  ☐ Database  ☐ Deployment  ✔ Submit  →'
+    echo
+    echo 'Which database would you like to use?'
+    echo
+    echo '❯ 1. PostgreSQL'
+    echo '     Robust relational database with advanced features, best for'
+    echo '     production systems with complex queries.'
+    echo '  2. SQLite'
+    echo '     Lightweight embedded database ideal for development and'
+    echo '     small-scale deployments.'
+    echo '  3. MySQL'
+    echo '     Popular open-source database with wide hosting support,'
+    echo '     commonly used in web applications.'
+    echo '  4. Type something.'
+    echo '───────────────────────────────────────────────────────────────'
+    echo '  5. Chat about this'
+    echo
+    echo 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'
+}
+
+emit_prose() {
+    # The negative control. "to interrupt" and "do you want to" both appear, but
+    # neither is anchored to a key press and there is no option list, so butai
+    # must leave this agent alone.
+    echo 'I will keep going. You can always press a key to interrupt me later.'
+    echo 'Do you want to know what I changed in the meantime?'
+}
+
+run_script

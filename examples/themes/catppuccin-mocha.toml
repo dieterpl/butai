@@ -1,0 +1,42 @@
+# butai theme — catppuccin-mocha
+#
+# The `catppuccin-mocha` built-in, written out in full. You do not need this
+# file to use the theme — `[theme] name = "catppuccin-mocha"` is enough — it is
+# here to copy when you want to change two things about it:
+#
+#   cp catppuccin-mocha.toml ~/.butai/themes/mymocha.toml
+#   then `:theme mymocha` in butai.
+#
+# Catppuccin's darkest flavour, using its named colors as-is. Pairs well with
+# `syntax_theme = "base16-mocha.dark"` for the editor and diff panes.
+
+name = "catppuccin-mocha"
+
+[colors]
+# Surfaces — crust/mantle/base/surface0/surface1, darkest to lightest
+ground        = "#1e1e2e"  # base
+surface       = "#313244"  # surface0: help, pickers
+sunken        = "#181825"  # mantle: tab strip
+selection     = "#45475a"  # surface1
+selection_dim = "#313244"  # surface0
+
+# Text
+ink       = "#cdd6f4"  # text
+muted     = "#a6adc8"  # subtext0
+faint     = "#6c7086"  # overlay0
+on_accent = "#1e1e2e"  # base, so it reads on the light accent fill
+
+# Lines
+rule       = "#45475a"  # surface1
+rule_focus = "#89b4fa"  # blue
+
+# State
+accent    = "#89b4fa"  # blue
+info      = "#89dceb"  # sky
+ok        = "#a6e3a1"  # green
+attention = "#f9e2af"  # yellow
+danger    = "#f38ba8"  # red
+
+# Footer
+status_bg = "#181825"  # mantle
+status_fg = "#a6adc8"  # subtext0
