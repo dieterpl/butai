@@ -26,7 +26,7 @@ export const PROTO_VERSION = 1;
 // Cargo.toml. check.py asserts the two are equal whenever the Rust source is
 // alongside — a constant that drifts makes the mismatch banner below lie in the
 // one situation it exists for.
-export const CLIENT_VERSION = "0.12.1";
+export const CLIENT_VERSION = "1.0.0";
 
 // The oldest daemon we will send `watch` to. It landed in 0.6 as an additive
 // change, but a daemon older than that could not *decode* it and closed the

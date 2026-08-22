@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "butai"
-version = "0.12.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "butai-client",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "butai-client"
-version = "0.12.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "butai-protocol"
-version = "0.12.1"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "crossterm",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "butai-server"
-version = "0.12.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "butai-protocol",
