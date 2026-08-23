@@ -568,3 +568,4 @@ dropped and its panes keep running, which is the entire point of a daemon.
 | Conversation ids | `crates/butai-server/src/ids.rs` |
 | Paths and the `~/.butai` layout | `crates/butai-protocol/src/paths.rs` |
 | Persistence and restore | `crates/butai-server/src/core.rs` (`SessionState`, `restore_session`, `persist_session`) |
+| Updating butai in place | `crates/butai-client/src/update.rs`, `crates/butai-client/build.rs` (the target triple it asks the release for) |

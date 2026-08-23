@@ -1932,6 +1932,16 @@ pub enum ConfirmKind {
     /// A chosen row that destroys something, now that there is a name to put
     /// in the question.
     Pick { target: PickTarget, value: String, label: String },
+    /// A newer release is out, and this machine can install it.
+    ///
+    /// The odd one out in here: every other kind is asking before something is
+    /// thrown away, so `no` means "leave it alone" and nothing more. This one
+    /// means "not this version, ever" and is written to `[update]
+    /// declined_version` — which is why [`crate::workbench`] routes a confirm
+    /// box's `no` through the same answering path as its `yes` rather than just
+    /// dropping the overlay. `esc` still dismisses without answering, and that
+    /// is the way to be asked again next launch.
+    Update { version: String },
 }
 
 /// A titled list with a cursor.

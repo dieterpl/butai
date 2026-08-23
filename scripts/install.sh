@@ -7,9 +7,23 @@
 # Downloads the right prebuilt binary for this machine, verifies its checksum
 # when the release publishes one, and drops `butai` somewhere on your PATH.
 #
+# It is also how you *upgrade* one, so it finishes the job: installing a binary
+# does not restart anything, and the daemon already running is the one that was
+# started by the old build. Left alone that is a new client talking to an old
+# daemon — the skew butai reports in its footer. So when this replaces an
+# existing install it stops the daemon too, which is not destructive: the open
+# workspaces and every pane's output are snapshotted first and restored by the
+# build that comes up next.
+#
+# From inside butai there is nothing to install *into* safely — stopping the
+# daemon would close the workbench you are reading this in — so there it says so
+# and leaves it to you. `butai update` is the one that can do it from in there,
+# because it restarts itself afterwards.
+#
 # Knobs (all optional):
 #   BUTAI_VERSION=v0.3.0    install a specific tag instead of the latest
 #   BUTAI_INSTALL_DIR=~/bin  install somewhere other than the default
+#   BUTAI_NO_RESTART=1       install the binary and leave the daemon alone
 #
 set -eu
 
@@ -168,10 +182,43 @@ else
 fi
 
 mkdir -p "$dest_dir"
+# Was there one here already? Asked before the move, because afterwards there
+# always is — and it decides whether this is an install or an upgrade.
+had_one=0
+[ -e "$dest_dir/$BIN" ] && had_one=1
 mv "$src" "$dest_dir/$BIN"
 
 say ""
-say "installed $BIN $bare_version -> $dest_dir/$BIN"
+if [ "$had_one" -eq 1 ]; then
+    say "updated $BIN -> $bare_version in $dest_dir"
+else
+    say "installed $BIN $bare_version -> $dest_dir/$BIN"
+fi
+
+# ── hand the daemon over to the new build ────────────────────────────────
+#
+# The socket file is the test rather than `butai ls`, which would *start* a
+# daemon to answer: every command that talks to one connects-or-spawns. A stale
+# socket left by a crash is harmless here — `kill-server` cleans it up.
+sock="${BUTAI_SOCKET:-$HOME/.butai/butai.sock}"
+if [ "$had_one" -eq 1 ] && [ -S "$sock" ] && [ -z "${BUTAI_NO_RESTART:-}" ]; then
+    if [ -n "${BUTAI:-}" ]; then
+        # Inside a pane of the very daemon we would be stopping.
+        say ""
+        say "the running daemon is still the old build, and you are inside it."
+        say "when you are ready, from outside butai:"
+        say ""
+        say "    butai update          # or: butai kill-server, then butai"
+    elif "$dest_dir/$BIN" kill-server >/dev/null 2>&1; then
+        say "stopped the old daemon — your workspaces are saved and come back"
+    else
+        say ""
+        say "could not stop the running daemon; it is still the old build."
+        say "run this when convenient (your workspaces are kept):"
+        say ""
+        say "    butai kill-server"
+    fi
+fi
 
 case ":$PATH:" in
     *":$dest_dir:"*) ;;
@@ -187,4 +234,7 @@ say ""
 say "Then, from any project directory:"
 say ""
 say "    butai"
+say ""
+say "You only need this script once: butai asks before updating itself from"
+say "here on, and \`butai update\` does it on demand."
 say ""

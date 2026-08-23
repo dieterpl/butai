@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-23
+
+### Added
+
+- **butai updates itself.** A workbench asks once at launch when a newer
+  release exists — *"butai 1.1.0 is available — you have 1.0.0"* — and **yes**
+  downloads it, checks it against the release's `SHA256SUMS`, replaces the
+  binary and restarts into the new build with the session intact. Until now the
+  only way to move to a new release was to re-run `scripts/install.sh` by hand,
+  and the usual result of doing that was a client on the new build talking to a
+  daemon on the old one, because installing a binary restarts nothing. That is
+  the skew `skew_notice` has been reporting in the footer all along; this is the
+  thing that ends it.
+
+  **`no` is an answer, not a dismissal.** It means *this version*, and it is
+  written to `[update] declined_version`, so 1.1.0 stops asking and 1.2.0 still
+  asks once of its own. `esc` answers nothing and you are asked again next
+  launch. `:update` and `butai update` ignore the recorded answer — typing
+  either one is what changing your mind looks like.
+
+  **Which of the seven published tarballs this machine wants is decided at
+  compile time.** `crates/butai-client/build.rs` bakes the target triple in, so
+  a musl build asks for the musl tarball because it *is* the musl build.
+  `scripts/install.sh` has to guess with `uname` and `ldd --version | grep musl`
+  — it runs before any butai exists and has no better option — and a wrong guess
+  there produces a binary that does not exec. A release with no artifact for
+  this triple is reported and never approximated.
+
+  **Nothing is offered that cannot be carried out.** Before the question is
+  asked, butai checks that the directory holding the binary is writable and that
+  it is not a `cargo` build in a `target/` directory. Finding out that
+  `/usr/local/bin` belongs to root *after* the download and the daemon stop is
+  the worst possible moment for it.
+
+  **The daemon is stopped before the binary is replaced, not after**, and the
+  order is load-bearing rather than tidy: a daemon is located through
+  `std::env::current_exe()`, and on Linux that reads `".../butai (deleted)"` once
+  the file underneath it has been renamed over. Stopping first, waiting for the
+  socket to actually stop answering, swapping, then exec'ing an explicitly
+  resolved path is the sequence with no window in it. The stop is the same
+  snapshot `butai kill-server` takes — every open workspace, its agents, and
+  each pane's output, written before anything is torn down — so a failure at any
+  step costs a restart and no work.
+
+- **`butai update`**, the deliberate form of that question, for a shell prompt
+  rather than a workbench. `--check` reports and changes nothing, `--yes`
+  installs without asking, and `--json` answers with `current`, `latest`,
+  `target`, `asset`, `install_path` and `update_available`. It stops after the
+  swap instead of opening a workbench: the daemon is down and the next `butai`
+  starts it on the new build. See [docs/cli.md](docs/cli.md#butai-update).
+
+- **`scripts/install.sh` finishes an upgrade.** Installing a binary restarts
+  nothing, so running it over an existing butai used to leave the old daemon
+  serving the old build — the skew above, arrived at by the one route that was
+  *meant* to be the upgrade path. It now stops the daemon after replacing the
+  binary, which keeps the workspaces and pane output like every other stop, and
+  from inside a butai pane it says so and leaves it alone rather than closing
+  the workbench you are reading it in. `BUTAI_NO_RESTART=1` opts out.
+
+- **`[update]` in `config.toml`**, read by the client. `check = false` turns the
+  whole thing off, as does `BUTAI_NO_UPDATE_CHECK` for a butai a package manager
+  owns. The SETTINGS ▸ ABOUT group grows a `check for updates` toggle beside the
+  version row, which now names the release waiting when there is one. See
+  [docs/configuration.md](docs/configuration.md#update).
+
+- **`:update`** in the command vocabulary — the way back to a prompt you
+  dismissed or turned down, without leaving the workbench.
+
+### Changed
+
+- A confirm box's **`no` now runs through the same answering path as its `yes`**
+  rather than just dropping the overlay. Every existing question still does
+  nothing when answered no — they are all about destroying something, where no
+  means "leave it alone" and there is nothing left to say. The update prompt is
+  the first one whose no carries a decision, and it could not have been written
+  without this.
+
+
 ## [1.0.0] - 2026-08-22
 
 First stable release. Everything below landed since `0.12.1`; the move to
@@ -1920,7 +1998,8 @@ Initial workspace: per-user daemon with server-side VT emulation, editor,
 file tree, and git panes; a terminal (TUI) client; and a public framed +
 REST protocol. See [`docs/protocol.md`](docs/protocol.md).
 
-[Unreleased]: https://github.com/dieterpl/butai/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dieterpl/butai/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/dieterpl/butai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/dieterpl/butai/compare/v0.12.1...v1.0.0
 [0.12.1]: https://github.com/dieterpl/butai/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/dieterpl/butai/compare/v0.11.0...v0.12.0

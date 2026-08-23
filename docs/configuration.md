@@ -388,6 +388,52 @@ than a silent fallback.
 Each gauge is one row: a disk is a level with no history, so there is no trace to
 draw. See [DSK](workbench.md#dsk).
 
+### `[update]`
+
+Whether butai looks for a newer release of itself, and which one you already
+turned down. Read by the **client** — the daemon never declares this table.
+
+```toml
+[update]
+check = true                 # default
+declined_version = "1.1.0"   # written for you; see below
+```
+
+| key | type | default | effect |
+|---|---|---|---|
+| `check` | bool | `true` | Ask GitHub for the latest release at start, and every six hours after. This is the only outbound request a butai client makes; everything else in it talks to a Unix socket. |
+| `declined_version` | string | unset | A release you answered **no** to. Written by the prompt, not by you. |
+
+**The check knows which build it is.** A release publishes seven tarballs, one
+per target, and the artifact this machine wants is decided at *compile* time:
+`crates/butai-client/build.rs` bakes the target triple in, so a musl build asks
+for the musl tarball because it is the musl build. That is stricter than
+`scripts/install.sh`, which has to read `uname` and `ldd --version` because it
+runs before any butai exists. If a release publishes nothing for this triple —
+a build from source on a platform the matrix does not cover — you are told, and
+nothing is downloaded.
+
+**What the prompt's two answers mean.** `yes` downloads the tarball, checks it
+against the release's `SHA256SUMS`, stops the daemon, replaces the binary and
+restarts into it. Stopping the daemon is not destructive: it snapshots the open
+workspaces and every pane's output first, exactly as `butai kill-server` does,
+and the new build restores them. `no` writes `declined_version` and that release
+stops asking — the *next* one still asks once of its own. `esc` answers nothing,
+so you are asked again next launch.
+
+`:update` ignores `declined_version` and asks now, which is the way back to a
+prompt you dismissed or turned down. So does `butai update` — see
+[cli.md](cli.md#butai-update).
+
+**Nothing is offered that cannot be carried out.** Before the question is asked,
+butai checks that the directory holding the binary is writable and that the
+binary is not a `cargo` build in a `target/` directory. An update offer you
+cannot accept is worse than no offer, and finding out after the download and
+the daemon stop is the worst moment of all.
+
+`BUTAI_NO_UPDATE_CHECK` switches the whole thing off from the environment, for a
+butai installed by a package manager whose updates arrive some other way.
+
 ### `[[remote]]`
 
 Other daemons whose workspaces join this tab bar. Connected at start, so they
@@ -497,6 +543,8 @@ exactly as it was.
 | SETTINGS → APPEARANCE → theme, Enter | `[theme] name` |
 | SETTINGS → AGENTS → default agent, or `d` in the agent picker, or `:agent-default NAME` | `[general] default_agent` (removed outright when you unpin, so the file looks like one that never set it) |
 | SETTINGS → MACHINES → auto-attach, `space` | `[general] remote_auto_attach` |
+| SETTINGS → ABOUT → check for updates, `space` | `[update] check` |
+| Answering **no** to the update prompt | `[update] declined_version` (that release only; `esc` writes nothing and asks again next launch) |
 | SETTINGS → WORKBENCH size rows (`-`/`+`/`0`), or leaving `alt-l` LAYOUT mode | all four `[ui]` keys; a height cleared to automatic is removed rather than written |
 | the machines button (`alt-h`), once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
 | Disconnecting a machine (`alt-h`, or the tab's row menu) | removes that `[[remote]]` block |
@@ -530,7 +578,7 @@ be silently discarding something the file's owner typed on purpose.
 | `[general] default_shell`, `exit_when_empty`, `scrollback`, `restore_bytes`, `[[agents]]` | `:reload-config` (or `butai` restart). `scrollback` and `restore_bytes` are read when a pane spawns, so existing panes keep the budget they were born with. |
 | `[general] prefix`, `[keys]`, `[theme]`, `[ui]`, `[[remote]]` | the next client start — with the exceptions below |
 | `[theme] name` | live from the SETTINGS page, which applies each palette as the cursor passes it and puts the old one back if you leave without choosing |
-| `[general] default_agent`, `remote_auto_attach`, `[ui]` | live when *you* change them in the client; a hand edit needs a restart |
+| `[general] default_agent`, `remote_auto_attach`, `[ui]`, `[update] check` | live when *you* change them in the client; a hand edit needs a restart |
 
 `:reload-config` is a command to the daemon and reloads the daemon's half only —
 re-reading the file and replacing the config the daemon holds, with any parse
@@ -583,6 +631,7 @@ file fell back to defaults, and something said so".
 | `BUTAI` | the client | Set in every pane to the daemon's socket; the nesting guard compares it against the socket being attached to, so attaching a *different* daemon from inside a pane is still allowed. |
 | `BUTAI_THEME_DIR` | client | Overrides `~/.butai/themes`. |
 | `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this. |
+| `BUTAI_NO_UPDATE_CHECK` | client | Non-empty and not `0` stops the update check entirely, whatever `[update] check` says. For a butai a package manager owns. |
 | `BUTAI_NO_HANDOFF` | the CLI | Non-empty and not `0` stops bare `butai` over ssh from handing its machine to the workbench you are already looking at. |
 | `SSH_CONNECTION` | the CLI | Its presence (plus a tty) is what makes that handoff probe run at all, so a local `butai` never pays for it. |
 | `SHELL` | daemon | Fallback shell when `default_shell` is unset. |

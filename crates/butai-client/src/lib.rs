@@ -23,6 +23,7 @@ pub mod syntax;
 pub mod term;
 pub mod theme;
 pub mod tui;
+pub mod update;
 pub mod verbs;
 pub mod workbench;
 
@@ -30,6 +31,22 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use butai_protocol::AttachTarget;
+
+/// How the workbench ended.
+///
+/// It used to be the detach reason and nothing else — a `String` that
+/// [`run_client`] printed. Accepting an update needs a second answer, and it
+/// cannot be carried out where it is given: the terminal is in raw mode with
+/// the workbench drawn on it, and both the download's progress and any error
+/// belong on an ordinary screen. So the loop hands the decision back and
+/// [`run_client`] acts on it once the [`tui::TerminalGuard`] has put the
+/// terminal back.
+pub enum Exit {
+    /// Why the workbench stopped, for `[butai: …]`.
+    Detached(String),
+    /// Somebody said yes. Nothing has been downloaded or replaced yet.
+    Update(update::Offer),
+}
 
 /// Refuse to attach to the daemon we are already inside. The daemon sets `BUTAI`
 /// in every pane's environment, to its own socket path; nesting a client inside
@@ -137,9 +154,38 @@ fn remotes() -> Vec<workbench::RemoteDial> {
 pub fn run_client(socket: &Path, target: AttachTarget) -> Result<()> {
     guard_against_nesting(Some(socket))?;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let reason = rt.block_on(attach(socket.to_path_buf(), target))?;
-    println!("[butai: {reason}]");
-    Ok(())
+    match rt.block_on(attach(socket.to_path_buf(), target, true))? {
+        Exit::Detached(reason) => {
+            println!("[butai: {reason}]");
+            Ok(())
+        }
+        // The terminal is ours again by now — the guard went out of scope with
+        // the workbench — so this prints like any other command, and the exec
+        // at the end of it inherits a terminal in a state a program can use.
+        Exit::Update(offer) => rt.block_on(update_in_place(offer, socket)),
+    }
+}
+
+/// Carry out an accepted update: download, verify, swap, restart.
+///
+/// Ordinary stdout, on purpose. A 6 MB download over a hotel connection is a
+/// wait, and a wait with nothing on screen is indistinguishable from a hang —
+/// the workbench cannot say so, because by this point it is gone.
+async fn update_in_place(offer: update::Offer, socket: &Path) -> Result<()> {
+    println!("[butai: updating {} -> {}]", update::CURRENT, offer.version);
+    println!("  downloading {}", offer.asset);
+
+    // Blocking: `ureq`, a SHA-256 over the whole tarball, and gzip.
+    let staged = tokio::task::spawn_blocking(move || update::stage(&offer))
+        .await
+        .map_err(|e| anyhow::anyhow!("the download did not finish: {e}"))??;
+
+    println!("  stopping the daemon (your workspaces are saved and come back)");
+    update::apply(&staged, socket).await?;
+    println!("[butai: updated to {} — restarting]", staged.version);
+
+    // Only returns if the exec failed, and then the error is the return value.
+    Err(update::restart(staged.install_path()))
 }
 
 /// [`run_client`] for a caller that already has a runtime — `butai standalone`,
@@ -147,19 +193,28 @@ pub fn run_client(socket: &Path, target: AttachTarget) -> Result<()> {
 /// than printing it.
 pub fn run_client_on(socket: &Path, target: AttachTarget) -> Result<String> {
     guard_against_nesting(Some(socket))?;
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(attach(socket.to_path_buf(), target))
-    })
+    // `false`: standalone's daemon is this process, so the `kill-server` an
+    // update ends with would take the client down with it, and the socket it
+    // came back to would be a temporary path that no longer exists.
+    let exit = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(attach(socket.to_path_buf(), target, false))
+    })?;
+    match exit {
+        Exit::Detached(reason) => Ok(reason),
+        // Unreachable: `run` was told not to offer one. Matched rather than
+        // unwrapped so that stays true if the flag ever moves.
+        Exit::Update(_) => Ok("detached".to_string()),
+    }
 }
 
 /// Spawn the daemon if it is not up, then talk to it the way every other client
 /// does: REST and an event stream for everything structured, one framed
 /// connection for the pane on the stage.
-async fn attach(socket: PathBuf, target: AttachTarget) -> Result<String> {
+async fn attach(socket: PathBuf, target: AttachTarget, updates: bool) -> Result<Exit> {
     drop(conn::connect_or_spawn(&socket).await?);
     let ws = target_workspace(&target);
     ensure_workspace(&socket, &target).await?;
-    workbench::run(endpoints(socket), remotes(), ws).await
+    workbench::run(endpoints(socket), remotes(), ws, updates).await
 }
 
 /// Open the workspace the target asks for, if it is not open already.

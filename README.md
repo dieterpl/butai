@@ -76,6 +76,13 @@ against the release's `SHA256SUMS`, and drops `butai` in `/usr/local/bin` or
 `~/.local/bin`. No runtime and no dependencies — it's one binary.
 [Read it first](scripts/install.sh) if you'd rather; it's POSIX `sh`.
 
+**You only run that once.** After the first install butai keeps itself current:
+when a newer release exists it asks, once, and `yes` swaps the binary and
+restarts onto it with your workspaces, agents and scrollback intact. `no` means
+that version, not that question, so it stops asking about it and still tells you
+about the next one. `butai update` is the same thing on demand, and
+`[update] check = false` turns it off.
+
 Pin a version or pick your own directory:
 
 ```sh

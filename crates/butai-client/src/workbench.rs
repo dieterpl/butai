@@ -28,7 +28,7 @@ use crossterm::{cursor, event, queue, terminal};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::chrome::{
     self, DiffKind, DiffMode, DiffView, Docker, DockerRow, EditMode, Editor, Files, Focus,
@@ -45,6 +45,14 @@ use crate::selection::{self, Drag};
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 /// Sprite clock, gated on something actually animating.
 const FAST_TICK: std::time::Duration = std::time::Duration::from_millis(120);
+/// How often a running client asks whether a newer release exists.
+///
+/// The first tick is immediate, so this is both the launch check and the
+/// one that catches a release cut while a workbench has been up for days —
+/// which is the normal state of one, since the daemon outlives the terminal.
+/// Six hours because the answer changes about that often at best, and the
+/// unauthenticated GitHub API allows sixty requests an hour per address.
+const UPDATE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
 /// How long between attempts to re-open a stage connection that dropped.
 ///
@@ -290,12 +298,20 @@ fn tab_index(daemons: &[Daemon], hosts: &[Option<String>]) -> Vec<(usize, usize)
     out
 }
 
-/// Run the client-rendered workbench until detach.
+/// Run the client-rendered workbench until it detaches, or until somebody
+/// accepts an update.
+///
+/// `updates` is whether this client may offer one. `butai standalone` passes
+/// `false`: its daemon is in-process, so the `kill-server` an update ends with
+/// would take the client down with it, and its socket is a private path that
+/// goes away with the process — there is no session on the other side to come
+/// back to.
 pub async fn run(
     endpoints: Vec<Endpoint>,
     remotes: Vec<RemoteDial>,
     ws_name: Option<String>,
-) -> Result<String> {
+    updates: bool,
+) -> Result<crate::Exit> {
     anyhow::ensure!(!endpoints.is_empty(), "no daemon to connect to");
     let mut hosts: Vec<Option<String>> = endpoints.iter().map(|e| e.host.clone()).collect();
     let mut sockets: Vec<PathBuf> = endpoints.iter().map(|e| e.socket.clone()).collect();
@@ -315,6 +331,10 @@ pub async fn run(
     let (adopt_tx, mut adopt_rx) = unbounded_channel::<(String, Result<crate::ssh::Forward>)>();
     // The GIT page's reads, which run off the loop so they cannot freeze it.
     let (git_tx, mut git_rx) = unbounded_channel::<GitLoad>();
+    // The update check, off the loop for the same reason and one more: it is
+    // the only thing in a butai client that leaves the machine, so it is the
+    // only one whose slowest case is a network that never answers.
+    let (update_tx, mut update_rx) = unbounded_channel::<Result<Option<crate::update::Offer>>>();
     // Which GIT read is the current one. See [`GitLoad::generation`].
     let mut git_generation: u64 = 0;
 
@@ -400,6 +420,23 @@ pub async fn run(
     // daemon owned this until it stopped dialling; the decision is this side's
     // now, so the setting has to be read here or it stops meaning anything.
     let mut auto_attach = config.general.remote_auto_attach;
+    // Whether to look at all: the config key, the environment opt-out, and
+    // whether this client is one that could carry an update out.
+    let mut updates_enabled = updates && crate::update::enabled(config.update.check);
+    // The newest release, once a check has found one. Held so `:update` and the
+    // SETTINGS row can reopen the question without asking GitHub again.
+    let mut update_offer: Option<crate::update::Offer> = None;
+    // The version already turned down — from the file, then from this session's
+    // own answer, so declining does not have to survive a reload to take effect.
+    let mut declined_update = config.update.declined_version.clone();
+    // Whether the box has been put up yet. The launch check raises it; a later
+    // one leaves a footer notice instead, because a modal takes the keyboard
+    // (see [`handle_input`]) and doing that to somebody mid-sentence in an agent
+    // pane is not a thing to do unprompted.
+    let mut update_prompted = false;
+    // Set by `:update`: report what a silent check swallows, ask again about a
+    // version that was declined, and raise the box rather than a notice.
+    let mut update_forced = false;
     // Same story for `[ui]`: the daemon read it while it owned the layout. It
     // is this side's now, and `save_ui` has been writing to it all along — so
     // without this read, resizing a rail with Alt-l saved and then came back at
@@ -443,6 +480,7 @@ pub async fn run(
         auto_attach,
         remotes: config.remote.iter().map(remote_label).collect(),
         bindings: (keymap.len(), config.keys.len()),
+        update_check: config.update.check,
         ..Default::default()
     };
     // The HELP page's topic and reading position. Nothing to seed and nothing to
@@ -461,6 +499,9 @@ pub async fn run(
     // scans of two different buffers would be two answers.
     let mut screen_links = links::ScreenLinks::default();
     let mut dirty = true;
+    // The first tick fires immediately, so this is the launch check too —
+    // one clock rather than a spawn before the loop and a timer inside it.
+    let mut update_tick = tokio::time::interval(UPDATE_CHECK_EVERY);
     let mut slow = tokio::time::interval(TICK);
     let mut fast = tokio::time::interval(FAST_TICK);
     // Which workspace the page state on screen belongs to.
@@ -714,7 +755,7 @@ pub async fn run(
                     }
                     dirty = true;
                 }
-                None => break "daemon connection lost".to_string(),
+                None => break crate::Exit::Detached("daemon connection lost".to_string()),
             },
             msg = recv_stage(stage.as_mut()) => match msg {
                 Some(ServerMsg::Frame(frame)) => {
@@ -903,7 +944,53 @@ pub async fn run(
                     &mut rows,
                 ) {
                     Flow::Continue => dirty = true,
-                    Flow::Detach => break "detached".to_string(),
+                    Flow::Detach => break crate::Exit::Detached("detached".to_string()),
+                    Flow::Update => match update_offer.take() {
+                        Some(offer) => break crate::Exit::Update(offer),
+                        // The offer went away under the box — a `:update` that
+                        // found nothing, most likely. Nothing to do but close.
+                        None => dirty = true,
+                    },
+                    Flow::DeclineUpdate(version) => {
+                        match crate::config::Config::save_declined_version(&version) {
+                            Ok(()) => {
+                                view.flash = Some(format!(
+                                    "butai {version} declined — `butai update` to change your mind"
+                                ));
+                            }
+                            // A config that cannot be written is worth saying
+                            // out loud: the answer looked like it took, and on
+                            // the next start it would ask again.
+                            Err(e) => view.flash = Some(format!("update: {e}")),
+                        }
+                        // Either way it does not ask again *this* session.
+                        declined_update = Some(version);
+                        update_offer = None;
+                        dirty = true;
+                    }
+                    Flow::CheckUpdate => {
+                        match &update_offer {
+                            // Already know about one: reopen the question
+                            // rather than asking GitHub the same thing twice.
+                            Some(offer) => {
+                                view.overlay = Some(update_overlay(&offer.version));
+                                view.flash = Some(format!(
+                                    "no won't ask again for {} — esc asks next launch",
+                                    offer.version
+                                ));
+                            }
+                            None if updates => {
+                                view.flash = Some("checking for updates…".to_string());
+                                update_forced = true;
+                                spawn_update_check(&update_tx);
+                            }
+                            None => {
+                                view.flash =
+                                    Some("standalone does not update itself".to_string());
+                            }
+                        }
+                        dirty = true;
+                    }
                     Flow::PickAgent => {
                         match agent_picker(&daemons, &hosts, &view, pinned.as_deref()).await {
                             Ok(overlay) => view.overlay = Some(overlay),
@@ -980,6 +1067,17 @@ pub async fn run(
                             Edit::Links(on) => {
                                 view.links = on;
                                 if let Err(e) = crate::config::Config::save_links(on) {
+                                    view.flash = Some(format!("config.toml: {e}"));
+                                }
+                            }
+                            // The clock keeps ticking either way; the flag
+                            // is what its arm consults, so turning the check
+                            // off takes effect at the next tick rather than at
+                            // the next start.
+                            Edit::UpdateCheck(on) => {
+                                settings.update_check = on;
+                                updates_enabled = updates && crate::update::enabled(on);
+                                if let Err(e) = crate::config::Config::save_update_check(on) {
                                     view.flash = Some(format!("config.toml: {e}"));
                                 }
                             }
@@ -1887,6 +1985,58 @@ pub async fn run(
                     }
                 }
             }
+            Some(found) = update_rx.recv() => {
+                // `:update` asked for this one, so it reports rather than
+                // shrugging, and it overrides a previous no.
+                let forced = std::mem::take(&mut update_forced);
+                match found {
+                    Ok(Some(offer)) => {
+                        let declined =
+                            !forced && declined_update.as_deref() == Some(offer.version.as_str());
+                        if !declined {
+                            // Never over another modal: one at a time is the
+                            // rule the overlay type is built on, and stealing
+                            // the branch picker somebody just opened is worse
+                            // than telling them later.
+                            if view.overlay.is_none() && (forced || !update_prompted) {
+                                view.overlay = Some(update_overlay(&offer.version));
+                                view.flash = Some(format!(
+                                    "no won't ask again for {} — esc asks next launch",
+                                    offer.version
+                                ));
+                                update_prompted = true;
+                            } else {
+                                view.flash =
+                                    Some(format!("butai {} is available — :update", offer.version));
+                            }
+                            settings.update_available = Some(offer.version.clone());
+                            update_offer = Some(offer);
+                            dirty = true;
+                        }
+                    }
+                    Ok(None) => {
+                        if forced {
+                            view.flash =
+                                Some(format!("butai {} is the latest", crate::update::CURRENT));
+                            dirty = true;
+                        }
+                    }
+                    // A laptop on a train has no network, and that is the
+                    // ordinary case rather than something worth a footer. Only
+                    // somebody who typed `:update` gets told.
+                    Err(e) => {
+                        if forced {
+                            view.flash = Some(format!("update: {e:#}"));
+                            dirty = true;
+                        } else {
+                            tracing::debug!("update check: {e:#}");
+                        }
+                    }
+                }
+            }
+            _ = update_tick.tick(), if updates_enabled => {
+                spawn_update_check(&update_tx);
+            }
             _ = slow.tick() => {
                 view.tick = view.tick.wrapping_add(1);
                 dirty = true;
@@ -1906,6 +2056,38 @@ pub async fn run(
     }
     drop(_guard);
     Ok(reason)
+}
+
+/// The box that asks. One builder because three routes open it: the launch
+/// check, `:update`, and the SETTINGS row.
+///
+/// `yes: false` like every other confirm — but for a different reason. The rest
+/// preselect "no" so the keystroke that throws work away is never the one that
+/// opened the box; this one does it so an update is something you agree to
+/// rather than something that happens while you are reaching for the keyboard.
+fn update_overlay(version: &str) -> Overlay {
+    Overlay::Confirm(chrome::ConfirmOverlay {
+        title: "UPDATE".into(),
+        header: format!("butai {version} is available — you have {}", crate::update::CURRENT),
+        yes: false,
+        kind: chrome::ConfirmKind::Update { version: version.to_string() },
+    })
+}
+
+/// Ask GitHub whether there is a newer release, off the event loop.
+///
+/// Same shape as [`spawn_git_refresh`], and for the same reason its doc comment
+/// gives: awaited here, a network call stops the client dead for as long as it
+/// takes. `ureq` is blocking on top of that, so the work goes to a blocking
+/// thread rather than parking a runtime worker on a socket.
+fn spawn_update_check(tx: &UnboundedSender<Result<Option<crate::update::Offer>>>) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let found = tokio::task::spawn_blocking(crate::update::check)
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("the update check did not finish: {e}")));
+        tx.send(found).ok();
+    });
 }
 
 /// The rows a tree page shows for `dir`: the listing, with a `..` on top
@@ -2804,6 +2986,7 @@ fn settings_click(
         }
         (Kind::Toggle(on), RowId::AutoAttach) => Flow::SettingsEdit(Edit::AutoAttach(!on)),
         (Kind::Toggle(on), RowId::Links) => Flow::SettingsEdit(Edit::Links(!on)),
+        (Kind::Toggle(on), RowId::UpdateCheck) => Flow::SettingsEdit(Edit::UpdateCheck(!on)),
         _ => {
             st.open = None;
             Flow::SettingsEdit(Edit::Moved)
@@ -4208,6 +4391,15 @@ async fn recv_stage(stage: Option<&mut Stage>) -> Option<ServerMsg> {
 enum Flow {
     Continue,
     Detach,
+    /// Take the offered update. Leaves the loop: the download and the swap
+    /// need the terminal back first, so they happen in [`crate::run_client`]
+    /// once the guard has restored it.
+    Update,
+    /// Turn the offered update down, for good, for that version. Writes
+    /// `[update] declined_version`; see [`chrome::ConfirmKind::Update`].
+    DeclineUpdate(String),
+    /// `:update` — ask now, whatever the file says, and say what came back.
+    CheckUpdate,
     /// Open the agent picker; the list comes from the daemon, so the loop
     /// fetches it rather than the key handler.
     PickAgent,
@@ -5176,6 +5368,9 @@ fn handle_settings_key(
                 Some(Flow::SettingsEdit(Edit::AutoAttach(!on)))
             }
             (Kind::Toggle(on), RowId::Links) => Some(Flow::SettingsEdit(Edit::Links(!on))),
+            (Kind::Toggle(on), RowId::UpdateCheck) => {
+                Some(Flow::SettingsEdit(Edit::UpdateCheck(!on)))
+            }
             _ => Some(Flow::Continue),
         },
         // `-`/`+` rather than the arrows: left and right mean nothing else on
@@ -5620,7 +5815,14 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
             c.yes = true;
             return confirm(view);
         }
-        (Overlay::Confirm(_), event::KeyCode::Char('n')) => view.overlay = None,
+        // `n` goes through the same answering path as `y` rather than just
+        // dropping the box. For everything destructive that is the same thing —
+        // [`confirm`] returns `Flow::Continue` when the answer was no — but an
+        // update prompt's "no" *means* something, and has to be remembered.
+        (Overlay::Confirm(c), event::KeyCode::Char('n')) => {
+            c.yes = false;
+            return confirm(view);
+        }
         (Overlay::Confirm(_), event::KeyCode::Enter) => return confirm(view),
         _ => {}
     }
@@ -5679,8 +5881,8 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
         // answer nothing.
         Overlay::Confirm(c) => match row {
             2 => {
-                view.overlay = None;
-                Flow::Continue
+                c.yes = false;
+                confirm(view)
             }
             3 => {
                 c.yes = true;
@@ -5695,7 +5897,18 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
 fn confirm(view: &mut View) -> Flow {
     let Some(Overlay::Confirm(c)) = view.overlay.take() else { return Flow::Continue };
     if !c.yes {
-        return Flow::Continue;
+        // For every question about destroying something, no means "leave it
+        // alone" and there is nothing left to do. An update prompt is the one
+        // question where the answer is worth keeping: no means *this version*,
+        // not "not now", and the file has to learn which one.
+        //
+        // `esc` never reaches here — it drops the overlay in
+        // [`handle_overlay_key`] — which is what makes dismissing the box the
+        // way to be asked again next launch.
+        return match c.kind {
+            chrome::ConfirmKind::Update { version } => Flow::DeclineUpdate(version),
+            _ => Flow::Continue,
+        };
     }
     match c.kind {
         chrome::ConfirmKind::Discard { path } => Flow::Git(GitAction::Discard(path)),
@@ -5704,6 +5917,7 @@ fn confirm(view: &mut View) -> Flow {
         // Hand the action back to the same path that asked, with the answer
         // recorded so it goes through this time.
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
+        chrome::ConfirmKind::Update { .. } => Flow::Update,
         chrome::ConfirmKind::MenuAction => match view.pending_menu_action.take() {
             Some(action) => {
                 view.confirmed_menu_action = Some(action);
@@ -6672,6 +6886,7 @@ fn run_view(verb: ViewVerb, view: &mut View) -> Flow {
             Flow::Search(String::new())
         }
         ViewVerb::Branch => Flow::PickBranch,
+        ViewVerb::Update => Flow::CheckUpdate,
         // The list is built by the loop, which is where the painted screen is.
         ViewVerb::Links => Flow::PickLinks,
         // The reference is a page of its own — not a modal, which covered the
@@ -9213,6 +9428,137 @@ mod tests {
         let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
         assert!(matches!(&flow, Flow::Git(GitAction::Discard(p)) if p == "u.rs"), "{flow:?}");
         assert!(view.overlay.is_none(), "the box should have closed");
+    }
+
+    /// The update prompt's two answers mean different things from every other
+    /// confirm box's, and the difference is the whole feature: `no` is about
+    /// *that version* and has to be remembered, `esc` is "not now".
+    #[test]
+    fn declining_an_update_is_an_answer_and_not_a_dismissal() {
+        // As every confirm box opens: on "no", so the update is something you
+        // agree to rather than something you land on.
+        let mut view = View { overlay: Some(update_overlay("1.1.0")), ..Default::default() };
+        let Some(Overlay::Confirm(c)) = &view.overlay else { panic!("no confirm box") };
+        assert!(!c.yes);
+        assert!(c.header.contains("1.1.0"), "{}", c.header);
+        assert!(c.header.contains(crate::update::CURRENT), "{}", c.header);
+
+        // `n` carries the version out, so the loop can write it down. This is
+        // what the other kinds do *not* do — theirs is a bare `Continue`.
+        let flow = handle_overlay_key(key(event::KeyCode::Char('n')), &mut view);
+        assert!(matches!(&flow, Flow::DeclineUpdate(v) if v == "1.1.0"), "{flow:?}");
+        assert!(view.overlay.is_none());
+
+        // Enter on the preselected "no" is the same answer by a different key.
+        view.overlay = Some(update_overlay("1.1.0"));
+        let flow = handle_overlay_key(key(event::KeyCode::Enter), &mut view);
+        assert!(matches!(&flow, Flow::DeclineUpdate(v) if v == "1.1.0"), "{flow:?}");
+
+        // `esc` is not an answer. Nothing is recorded, so the next launch asks
+        // again — which is the only way back to the question without `:update`.
+        view.overlay = Some(update_overlay("1.1.0"));
+        let flow = handle_overlay_key(key(event::KeyCode::Esc), &mut view);
+        assert!(matches!(flow, Flow::Continue), "esc must record nothing: {flow:?}");
+        assert!(view.overlay.is_none());
+
+        // `q` dismisses like `esc`, for the same reason.
+        view.overlay = Some(update_overlay("1.1.0"));
+        let flow = handle_overlay_key(key(event::KeyCode::Char('q')), &mut view);
+        assert!(matches!(flow, Flow::Continue), "{flow:?}");
+
+        // And yes is what updates.
+        view.overlay = Some(update_overlay("1.1.0"));
+        let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
+        assert!(matches!(flow, Flow::Update), "{flow:?}");
+        assert!(view.overlay.is_none());
+    }
+
+    /// Routing `n` through [`confirm`] changed the answering path for every
+    /// confirm box, not just the new one. The others must still do nothing on
+    /// no — this is the regression that change could cause.
+    #[test]
+    fn every_other_confirm_still_does_nothing_when_answered_no() {
+        for kind in [
+            chrome::ConfirmKind::Discard { path: "u.rs".into() },
+            chrome::ConfirmKind::DeleteFile { path: "u.rs".into() },
+            chrome::ConfirmKind::CloseWorkspace {
+                id: butai_protocol::SessionId(1),
+                name: "proj".into(),
+            },
+            chrome::ConfirmKind::MenuAction,
+            chrome::ConfirmKind::Pick {
+                target: chrome::PickTarget::DeleteBranch,
+                value: "main".into(),
+                label: "main".into(),
+            },
+        ] {
+            let mut view = View {
+                overlay: Some(Overlay::Confirm(chrome::ConfirmOverlay {
+                    title: "X".into(),
+                    header: "x".into(),
+                    yes: false,
+                    kind,
+                })),
+                ..Default::default()
+            };
+            let flow = handle_overlay_key(key(event::KeyCode::Char('n')), &mut view);
+            assert!(matches!(flow, Flow::Continue), "no must stay inert: {flow:?}");
+            assert!(view.overlay.is_none(), "and must still close the box");
+        }
+    }
+
+    /// The box is drawn with "no" on row 2 and "yes" on row 3, and the pointer
+    /// has to mean what the keyboard means — including carrying the declined
+    /// version out, which is the part `view.overlay = None` used to swallow.
+    #[test]
+    fn clicking_no_on_an_update_declines_it() {
+        const COLS: u16 = 80;
+        const ROWS: u16 = 24;
+
+        // Where the box actually lands is [`chrome::overlay_layout`]'s business,
+        // so ask it rather than hard-coding a row that centring would move.
+        let find_row = |want: usize| -> (u16, u16) {
+            let overlay = update_overlay("1.1.0");
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    if chrome::overlay_hit(COLS, ROWS, &overlay, x, y) == Some(want) {
+                        return (x, y);
+                    }
+                }
+            }
+            panic!("row {want} of the update box was never drawn");
+        };
+        let click_at = |x, y| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        // Row 2 is `no`, and it declines rather than merely closing.
+        let mut view = View { overlay: Some(update_overlay("1.1.0")), ..Default::default() };
+        let (x, y) = find_row(2);
+        let flow = overlay_mouse(&click_at(x, y), &mut view, COLS, ROWS);
+        assert!(matches!(&flow, Flow::DeclineUpdate(v) if v == "1.1.0"), "{flow:?}");
+        assert!(view.overlay.is_none());
+
+        // Row 3 is `yes`.
+        view.overlay = Some(update_overlay("1.1.0"));
+        let (x, y) = find_row(3);
+        let flow = overlay_mouse(&click_at(x, y), &mut view, COLS, ROWS);
+        assert!(matches!(flow, Flow::Update), "{flow:?}");
+        assert!(view.overlay.is_none());
+    }
+
+    /// `:update` is the way back to a prompt that was dismissed or turned down.
+    #[test]
+    fn the_update_verb_parses_and_dispatches() {
+        assert_eq!(
+            crate::keymap::parse_action("update"),
+            Ok(crate::keymap::Action::View(ViewVerb::Update))
+        );
+        let mut view = View::default();
+        assert!(matches!(run_view(ViewVerb::Update, &mut view), Flow::CheckUpdate));
     }
 
     /// A commit message is typed, and an empty one is refused before it reaches

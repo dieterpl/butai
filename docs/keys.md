@@ -250,6 +250,7 @@ terminal                a new shell
 monitor [gpu]           the machine's own monitor
 host                    add a machine
 branch                  the branch picker
+update                  check for a newer butai, and offer it
 find                    search the workspace
 layout                  resize the rails
 zoom                    zen

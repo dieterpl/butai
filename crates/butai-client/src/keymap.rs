@@ -79,6 +79,12 @@ pub enum ViewVerb {
     Links,
     /// The branch picker.
     Branch,
+    /// Ask whether a newer release exists, and offer it.
+    ///
+    /// The way back to a prompt that was dismissed or turned down: it asks
+    /// GitHub whatever `[update] check` and `declined_version` say, because
+    /// typing it is the gesture that changes your mind.
+    Update,
     /// The reference.
     Help,
 }
@@ -255,6 +261,7 @@ pub fn parse_action(s: &str) -> Result<Action, ParseError> {
         "find" | "search" => return Ok(Action::View(ViewVerb::Search)),
         "links" | "urls" => return Ok(Action::View(ViewVerb::Links)),
         "branch" => return Ok(Action::View(ViewVerb::Branch)),
+        "update" => return Ok(Action::View(ViewVerb::Update)),
         "help" => return Ok(Action::View(ViewVerb::Help)),
         "resize" => {
             let dir = dir_arg(arg)?;

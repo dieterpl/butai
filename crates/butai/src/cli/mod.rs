@@ -15,6 +15,7 @@
 //! face and stay on the framed control path: their output is a documented
 //! contract the test suite drives, and moving them would change it for no gain.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -105,6 +106,15 @@ pub enum Cmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Update butai to the latest release, and restart the daemon onto it
+    Update {
+        /// Report what is available and change nothing
+        #[arg(long)]
+        check: bool,
+        /// Install without asking
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
     /// Run the daemon in the foreground (normally spawned automatically)
     Daemon,
     /// Bridge stdin/stdout to the daemon socket (for `ssh host butai proxy`)
@@ -173,6 +183,9 @@ pub fn run(cli: Cli) -> Result<u8> {
             block_on(async move { process::run(cmd, &ctx).await })
         }
         Some(Cmd::Whoami) => whoami(&Out::new(json, quiet), &socket).map(|_| crate::exit::OK),
+        Some(Cmd::Update { check, yes }) => {
+            update(&socket, &Out::new(json, quiet), check, yes || quiet)
+        }
         Some(Cmd::Daemon) => butai_server::run_daemon(&socket).map(|_| crate::exit::OK),
         Some(Cmd::Proxy) => crate::proxy::run(&socket).map(|_| crate::exit::OK),
         // Stands alone on purpose: no nesting guard, no daemon, so it works
@@ -221,6 +234,95 @@ fn whoami(out: &Out, socket: &std::path::Path) -> Result<()> {
         writeln!(w, "socket {}", socket.display())?;
         Ok(())
     })
+}
+
+/// `butai update` — the deliberate form of the prompt the workbench raises.
+///
+/// It differs from that prompt in three ways, all of them because this one was
+/// typed. It ignores `[update] declined_version`, since asking is what changing
+/// your mind looks like. It reports what a launch check swallows — no network,
+/// no release for this target, an install directory owned by root — because
+/// somebody is waiting on an answer. And a `no` here is only "not now": it
+/// writes nothing, where the workbench's `no` is remembered for that version.
+///
+/// It also stops after the swap rather than reopening a workbench. The daemon
+/// is down and the next `butai` starts it on the new build, which is what
+/// somebody at a shell prompt asked for.
+fn update(socket: &std::path::Path, out: &Out, check_only: bool, assume_yes: bool) -> Result<u8> {
+    use butai_client::update;
+
+    let current = update::CURRENT;
+    let Some(offer) = update::check()? else {
+        let value = serde_json::json!({
+            "current": current,
+            "target": update::TARGET,
+            "update_available": false,
+        });
+        out.emit_owned(&value, |w| {
+            writeln!(w, "butai {current} is the latest")?;
+            Ok(())
+        })?;
+        return Ok(crate::exit::OK);
+    };
+
+    let value = serde_json::json!({
+        "current": current,
+        "latest": offer.version,
+        "target": update::TARGET,
+        "asset": offer.asset,
+        "install_path": offer.install.display().to_string(),
+        "update_available": true,
+    });
+    out.emit_owned(&value, |w| {
+        writeln!(w, "butai {} is available — you have {current}", offer.version)?;
+        writeln!(w, "  {}", offer.asset)?;
+        writeln!(w, "  into {}", offer.install.display())?;
+        Ok(())
+    })?;
+    if check_only {
+        return Ok(crate::exit::OK);
+    }
+
+    if !assume_yes && !confirm_update()? {
+        // Deliberately not written to `declined_version`: a command you typed
+        // and then answered no to means "not now", and silencing this version
+        // everywhere is not what it asked for.
+        eprintln!("not updated");
+        return Ok(crate::exit::OK);
+    }
+
+    let quiet_step = |msg: &str| {
+        if !out.is_quiet() {
+            eprintln!("{msg}");
+        }
+    };
+    quiet_step(&format!("downloading {}", offer.asset));
+    let staged = update::stage(&offer)?;
+    quiet_step("stopping the daemon (your workspaces are saved and come back)");
+    block_on(async { update::apply(&staged, socket).await })?;
+
+    out.emit_owned(&serde_json::json!({ "updated_to": staged.version, "from": current }), |w| {
+        writeln!(w, "updated {current} -> {}", staged.version)?;
+        Ok(())
+    })?;
+    Ok(crate::exit::OK)
+}
+
+/// Ask on the terminal. `n` unless somebody types `y`, and `n` when there is
+/// nobody there to type: a pipeline that wanted this to go through says so with
+/// `--yes` rather than being surprised by a binary swap.
+fn confirm_update() -> Result<bool> {
+    use std::io::BufRead;
+
+    if !rustix::termios::isatty(std::io::stdin()) {
+        anyhow::bail!("not a terminal — pass --yes to install without asking");
+    }
+    eprint!("install it? [y/N] ");
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Run one async command to completion.

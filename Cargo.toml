@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MPL-2.0"
 rust-version = "1.88"
@@ -20,9 +20,9 @@ homepage = "https://github.com/dieterpl/butai"
 # what `cargo publish` rewrites the dependency to. Without it, packaging fails
 # with "all dependencies must have a version requirement specified". Bump these
 # with `workspace.package.version`.
-butai-protocol = { path = "crates/butai-protocol", version = "1.0.0" }
-butai-server = { path = "crates/butai-server", version = "1.0.0" }
-butai-client = { path = "crates/butai-client", version = "1.0.0" }
+butai-protocol = { path = "crates/butai-protocol", version = "1.1.0" }
+butai-server = { path = "crates/butai-server", version = "1.1.0" }
+butai-client = { path = "crates/butai-client", version = "1.1.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -93,6 +93,30 @@ arboard = { version = "3.6", default-features = false, features = ["image-data"]
 # arboard hands back raw RGBA, and an agent CLI needs a file it can open, so the
 # client re-encodes. Already in arboard's own tree on Linux.
 png = "0.18"
+# ── the self-updater ──────────────────────────────────────────────────────
+# butai speaks no TCP at all otherwise: the `hyper` above is the daemon's REST
+# face over an AF_UNIX socket, in the clear, and there is no TLS anywhere in
+# the tree. Reaching api.github.com needs a client that has some.
+#
+# ureq over hyper-rustls for two reasons. A release asset download redirects
+# (`github.com/.../releases/download/...` -> `objects.githubusercontent.com`)
+# and ureq follows it, where raw hyper would hand back the 302; and its default
+# features carry `rustls-webpki-roots`, so the CA set is compiled in rather
+# than read from the host — which is what makes the check work on the static
+# musl builds, whose whole point is running on a distroless or scratch image
+# with no system trust store to read. It is blocking, so the client calls it
+# from `spawn_blocking` and never from the event loop.
+ureq = "3"
+# Checking a downloaded tarball against the release's SHA256SUMS before
+# anything is executed. rustls brings a SHA-256 with it, but not behind an API
+# worth reaching through; this is the crate that says what it does.
+sha2 = "0.10"
+# One file — the binary — out of that tarball. Pairs with the `flate2` above,
+# which is already here for the REST API's gzip, so only the archive layer is
+# new. Hand-rolling a tar reader to save a dependency is the wrong trade when
+# what comes out of it is written over the executable you are running.
+tar = "0.4"
+
 insta = "1"
 tempfile = "3"
 # TypeScript for the browser client, generated from the DTOs themselves rather

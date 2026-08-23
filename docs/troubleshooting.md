@@ -132,6 +132,36 @@ butai                              # start again on the new build
 `kill-server` snapshots the open workspaces and their pane output first, so this
 is not destructive. `kill-server --clear` is the one that forgets them.
 
+`butai update` does all three of those in one go — install the new binary, stop
+the daemon, and leave the next start to bring it back on the new build — which
+is the way to avoid arriving here at all. See
+[cli.md](cli.md#butai-update).
+
+### An update that did not go through
+
+Nothing is lost at any point, because the daemon writes its session snapshot
+before it stops. Whatever the message said, a plain `butai` brings a workbench
+back; the only question is which build it comes back on.
+
+```sh
+butai --version                    # which one is installed now
+ls -l "$(command -v butai)"        # and whether the swap actually happened
+```
+
+| message | what it means |
+|---|---|
+| `butai is installed at /usr/local/bin/butai, which this user cannot write` | The check refused to offer at all. Re-run `scripts/install.sh`, or install somewhere you own with `BUTAI_INSTALL_DIR=~/.local/bin`. |
+| `<tag> publishes no build for <triple>` | That release has no artifact for this target — a build from source on a platform the matrix does not cover. Nothing is downloaded; there is no near-enough match to fall back to. |
+| `checksum mismatch for <asset>` | What arrived is not what the release published. Worth investigating rather than working around: nothing was written. |
+| `the daemon did not stop within 15s` | The swap was not attempted. `butai kill-server` by hand, then `butai update` again. |
+| `is a build in a cargo target directory` | You are running `target/debug/butai`. cargo owns that file; install one with `cargo install --path crates/butai`. |
+| `not a terminal — pass --yes` | `butai update` in a script. It will not replace a binary on a guess. |
+
+To turn the whole thing off — a butai a package manager owns, or a machine that
+should not reach the network — set `check = false` under `[update]`, or export
+`BUTAI_NO_UPDATE_CHECK=1`. See
+[configuration.md](configuration.md#update).
+
 ### The connection drops mid-session
 
 `daemon closed the connection`, `connection closed before handshake`, or a stage
@@ -464,6 +494,7 @@ directory paths verbatim.
 | Exit codes | `crates/butai/src/exit.rs` |
 | Frame skipping and the bad-frame cap | `crates/butai-protocol/src/framing.rs`, `crates/butai-server/src/client_conn.rs` |
 | Theme resolution and its warning | `crates/butai-client/src/theme.rs` |
+| The update check, download, swap and restart | `crates/butai-client/src/update.rs` |
 | `[keys]` dispatch through the prefix | `crates/butai-client/src/keymap.rs`, `workbench.rs` (`handle_prefix`) |
 | Agent markers and pattern overrides | `crates/butai-server/src/pane/terminal.rs` |
 | Resume, `spoke`, and the retry window | `crates/butai-server/src/core.rs` |

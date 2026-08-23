@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Terminal (TUI) client for the butai daemon."
+# Bakes the target triple in as `BUTAI_TARGET`, so the self-updater asks the
+# release for the artifact this build actually is rather than guessing from
+# `uname`. See `build.rs`.
+build = "build.rs"
 
 [dependencies]
 butai-protocol.workspace = true
@@ -37,6 +41,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+
+# The self-updater (`update.rs`): HTTPS to the GitHub release, the checksum
+# it publishes, and the one file worth taking out of the tarball. Everything
+# else in this crate talks to a Unix socket, so this is the only outbound
+# network in a butai client.
+ureq.workspace = true
+sha2.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 # Wayland's clipboard is a separate protocol from X11's, and arboard only speaks
 # it with this feature on. Linux-only because it is the only target that has

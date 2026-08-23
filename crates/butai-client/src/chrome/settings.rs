@@ -67,6 +67,12 @@ pub struct Settings {
     pub remotes: Vec<String>,
     /// How many keys are bound, and how many of those came from `[keys]`.
     pub bindings: (usize, usize),
+    /// Whether butai looks for a newer release: `[update] check`.
+    pub update_check: bool,
+    /// A newer release, once a check has found one. `None` covers both "no
+    /// check has answered yet" and "this is the latest", which the ABOUT row
+    /// draws the same way — there is nothing to offer either way.
+    pub update_available: Option<String>,
     pub loaded: bool,
     /// The page this one was entered from, so `esc` puts it back rather than
     /// dropping you somewhere you never were.
@@ -85,6 +91,8 @@ impl Default for Settings {
             auto_attach: true,
             remotes: Vec::new(),
             bindings: (0, 0),
+            update_check: true,
+            update_available: None,
             loaded: false,
             ret: Page::Agents,
         }
@@ -131,6 +139,7 @@ pub enum RowId {
     ProcsRows,
     SystemRows,
     Links,
+    UpdateCheck,
     /// Read-only. Several rows share it because none of them acts.
     Fact,
 }
@@ -195,6 +204,8 @@ pub enum Edit {
     AutoAttach(bool),
     /// Mark URLs up as hyperlinks for the terminal, or stop.
     Links(bool),
+    /// Look for a newer release, or stop looking.
+    UpdateCheck(bool),
     /// `view.geom` has already moved; persist it to `[ui]`.
     Geom,
 }
@@ -356,9 +367,23 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                 Row::info(
                     "version",
                     "",
-                    format!("butai {}", env!("CARGO_PKG_VERSION")),
+                    match &s.update_available {
+                        Some(v) => format!("butai {} — {v} available", env!("CARGO_PKG_VERSION")),
+                        None => format!("butai {}", env!("CARGO_PKG_VERSION")),
+                    },
                     "Client and daemon agree a protocol version at the handshake.",
                 ),
+                Row {
+                    id: RowId::UpdateCheck,
+                    label: "check for updates",
+                    key: "[update] check",
+                    // Where the *acting* lives, since this row only decides
+                    // whether to look. A page that both looked and installed
+                    // would be a page that restarts the daemon under you.
+                    desc: "Ask GitHub about new releases at start. `:update` asks now.",
+                    value: on_off(s.update_check).into(),
+                    kind: Kind::Toggle(s.update_check),
+                },
                 Row::info(
                     "config",
                     "",

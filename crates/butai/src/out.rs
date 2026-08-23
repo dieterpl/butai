@@ -22,6 +22,15 @@ impl Out {
         Self { json, quiet }
     }
 
+    /// Whether success output is suppressed.
+    ///
+    /// For the one command that reports *progress* rather than a result:
+    /// `butai update` narrates a download and a daemon restart on stderr, and
+    /// `--quiet` has to reach that too or the flag only half works.
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+
     /// Emit a daemon response: the raw body under `--json`, otherwise whatever
     /// `render` writes.
     pub fn emit(

@@ -19,6 +19,7 @@ the socket.
 | **structured control** | `workspace`, `pane`, `agent`, `process`, `whoami` | HTTP over the same socket, one connection per request |
 | **legacy one-shots** | `ls`, `kill-session`, `kill-server` | the framed control path — they predate the REST face and their output is a contract the test suite drives |
 | **process modes** | `daemon`, `proxy`, `reset`, `standalone` | no daemon conversation at all; they *are* the process |
+| **the odd one** | `update` | HTTPS to GitHub, then the framed path for the one `kill-server` it ends with |
 
 ### Bare `butai`
 
@@ -546,6 +547,71 @@ socket path. `ssh -L` needs that path and cannot guess it: it forwards the path
 verbatim without shell expansion, and `~/.butai/butai.sock` is not guaranteed
 anyway. See [remote.md](remote.md).
 
+## `butai update`
+
+```sh
+butai update           # check, ask, install, restart the daemon onto it
+butai update --check   # report what is available and change nothing
+butai update --yes     # install without asking (implied by --quiet)
+```
+
+The deliberate form of the question the workbench raises at launch. Both end in
+the same place; this one is for a shell prompt, and differs in four ways.
+
+* **It ignores `[update] declined_version`.** Typing the command *is* changing
+  your mind, so a release you turned down is offered again.
+* **It reports what a launch check swallows.** No network, no build published
+  for this target, an install directory owned by root — somebody is waiting on
+  an answer here, where a client starting up should just start up.
+* **A `no` is only "not now".** It writes nothing. The workbench's `no` is
+  remembered for that version; this one is not, because you can just run it
+  again.
+* **It does not open a workbench.** It stops after the swap, with the daemon
+  down. The next `butai` starts it on the new build.
+
+```
+butai 1.1.0 is available — you have 1.0.0
+  butai-1.1.0-x86_64-unknown-linux-musl.tar.gz
+  into /home/you/.local/bin/butai
+install it? [y/N] y
+downloading butai-1.1.0-x86_64-unknown-linux-musl.tar.gz
+stopping the daemon (your workspaces are saved and come back)
+updated 1.0.0 -> 1.1.0
+```
+
+**Which artifact it takes is decided at compile time, not runtime.** A release
+publishes seven tarballs, one per target, and `crates/butai-client/build.rs`
+bakes this build's own target triple in — so a musl build asks for the musl
+tarball because it *is* the musl build. `scripts/install.sh` has to guess with
+`uname` and `ldd --version`; it runs before any butai exists and has no better
+option. A release with no artifact for this triple is reported, never
+approximated.
+
+The download is checked against the release's `SHA256SUMS` before anything is
+executed, and the binary is replaced by a rename in its own directory, so there
+is no moment where a half-written file is on your `PATH`.
+
+**Stopping the daemon is not destructive**, and the order matters. It is the
+same snapshot `butai kill-server` takes — the open workspaces, their agents, and
+every pane's output — written *before* anything is torn down, and restored by
+the build that comes up next. The daemon is stopped before the swap rather than
+after, because a daemon is located through `/proc/self/exe`, which reads
+`".../butai (deleted)"` once the file underneath it has been replaced.
+
+Not a terminal and no `--yes` is an error rather than a silent install:
+
+```
+error: not a terminal — pass --yes to install without asking
+```
+
+Under `--json`, the same answers as a body: `current`, `latest`, `target`,
+`asset`, `install_path`, `update_available`.
+
+Everything about *when it asks on its own* — the launch check, the six-hourly
+one, and the two answers — is `[update]` in
+[configuration.md](configuration.md#update). Inside the workbench, `:update`
+opens the same question.
+
 ## Process modes
 
 ### `butai daemon`
@@ -814,7 +880,8 @@ of them takes the stage; you never divide a pane.
 | section | source |
 |---|---|
 | entry point, exit-code plumbing | `crates/butai/src/main.rs` |
-| the command tree, global flags, `ls`, `kill-session`, `kill-server`, `whoami` | `crates/butai/src/cli/mod.rs` |
+| the command tree, global flags, `ls`, `kill-session`, `kill-server`, `whoami`, `update` | `crates/butai/src/cli/mod.rs` |
+| the updater itself: the check, the download, the swap, the restart | `crates/butai-client/src/update.rs`, `crates/butai-client/build.rs` |
 | target grammar and parsing | `crates/butai/src/target.rs` |
 | target resolution, `pane ls` / `read` / `send`, key names, self-target refusal | `crates/butai/src/cli/pane.rs` |
 | `agent` verbs, `--until`, the wait loop, spawn readiness | `crates/butai/src/cli/agent.rs` |

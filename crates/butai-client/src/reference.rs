@@ -620,6 +620,7 @@ palette. What it takes:
     monitor [gpu]           the machine's own monitor, on the stage
     host                    the machines: connect or disconnect
     branch                  the branch picker
+    update                  check for a newer butai, and offer it
     find                    search the workspace
     links                   the URLs on screen: enter opens, y copies
     layout                  resize the rails

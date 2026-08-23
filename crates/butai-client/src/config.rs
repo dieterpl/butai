@@ -12,8 +12,9 @@
 //! scrollback budget is not something a client can enforce. Keeping one struct
 //! meant every field looked shared whether it was or not.
 //!
-//! **Writes are surgical.** `save_ui`, `save_default_agent`
-//! and `save_remote`/`forget_remote` rewrite a single key or block through
+//! **Writes are surgical.** `save_ui`, `save_default_agent`,
+//! `save_declined_version` and `save_remote`/`forget_remote` rewrite a single
+//! key or block through
 //! `toml_edit` and leave every other key, comment and blank line where it was,
 //! because this is a file a person edits by hand.
 
@@ -36,6 +37,9 @@ pub struct Config {
     /// bar. Connected at start, so they are there without a gesture every
     /// morning.
     pub remote: Vec<RemoteDef>,
+    /// `[update]`: whether to look for a newer release, and which one was
+    /// turned down.
+    pub update: UpdateConfig,
 }
 
 /// One `[[remote]]` block.
@@ -68,6 +72,51 @@ pub struct RemoteDef {
     /// resolves its own default and finds the daemon already running there,
     /// rather than starting a second one on a path nothing else uses.
     pub socket_path: Option<String>,
+}
+
+/// `[update]`.
+///
+/// ```toml
+/// [update]
+/// check = true                 # look for a newer release at all
+/// declined_version = "1.1.0"   # written when you answer no; that one stops asking
+/// ```
+///
+/// Client-side, because the client is the side that can ask a question and the
+/// side that owns the binary a person actually runs. The daemon never declares
+/// this table and serde ignores what it does not know, so it costs the daemon
+/// nothing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Ask GitHub whether a newer release exists. On by default: an update you
+    /// are not told about is one you do not get.
+    ///
+    /// This is the only outbound request a butai client makes. Turning it off
+    /// — here, or with `BUTAI_NO_UPDATE_CHECK` for a packaged install whose
+    /// updates arrive some other way — stops it entirely.
+    pub check: bool,
+    /// A version that was offered and turned down.
+    ///
+    /// Answering no to the prompt is an answer about *that release*, not about
+    /// updating: it is written here so 1.1.0 stops asking, and left behind when
+    /// 1.2.0 comes out so that one asks once of its own. Cleared by hand, or by
+    /// `butai update`, which ignores it — somebody who types the command has
+    /// changed their mind by definition.
+    pub declined_version: Option<String>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { check: true, declined_version: None }
+    }
+}
+
+impl UpdateConfig {
+    /// Whether `version` is the one already turned down.
+    pub fn declined(&self, version: &str) -> bool {
+        self.declined_version.as_deref() == Some(version)
+    }
 }
 
 /// `[general]`, client side. The daemon's struct declares a different set of
@@ -434,6 +483,35 @@ impl Config {
         })
     }
 
+    /// Remember that a release was offered and turned down.
+    ///
+    /// The prompt has two answers and this is what the second one means: not
+    /// "later" but "not this one". `esc` dismisses the box without coming here,
+    /// which is the way to be asked again next launch.
+    pub fn save_declined_version(version: &str) -> std::io::Result<()> {
+        Self::save_declined_version_at(&Self::path(), version)
+    }
+
+    /// [`save_declined_version`](Self::save_declined_version) against an
+    /// explicit path (tests).
+    pub fn save_declined_version_at(path: &Path, version: &str) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            table(doc, "update")["declined_version"] = toml_edit::value(version);
+        })
+    }
+
+    /// Whether to look for a newer release at all: `[update] check`.
+    pub fn save_update_check(on: bool) -> std::io::Result<()> {
+        Self::save_update_check_at(&Self::path(), on)
+    }
+
+    /// [`save_update_check`](Self::save_update_check) against an explicit path.
+    pub fn save_update_check_at(path: &Path, on: bool) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            table(doc, "update")["check"] = toml_edit::value(on);
+        })
+    }
+
     /// Remember a machine connected from `[+ host]`, as a `[[remote]]` block.
     ///
     /// **Only a deliberate connection is written.** A machine that announced
@@ -691,6 +769,70 @@ mod tests {
         assert_eq!(parse_hex_color("#7aa2f7"), Some((0x7a, 0xa2, 0xf7)));
         assert_eq!(parse_hex_color("7aa2f7"), None);
         assert_eq!(parse_hex_color("#zzz"), None);
+    }
+
+    #[test]
+    fn the_update_table_defaults_to_checking_and_nothing_declined() {
+        let cfg = Config::default();
+        assert!(cfg.update.check, "an update you are not told about is one you do not get");
+        assert_eq!(cfg.update.declined_version, None);
+        assert!(!cfg.update.declined("1.1.0"));
+    }
+
+    #[test]
+    fn a_declined_version_only_silences_that_version() {
+        let text = "[update]\ncheck = true\ndeclined_version = \"1.1.0\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.update.declined("1.1.0"));
+        // The whole point of storing the version rather than a bool: the next
+        // release has to ask once of its own.
+        assert!(!cfg.update.declined("1.2.0"));
+        assert!(!cfg.update.declined("1.0.9"));
+    }
+
+    #[test]
+    fn save_declined_version_preserves_other_content() {
+        let dir = std::env::temp_dir().join(format!("butai-save-decline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# my setup\n[general]\nprefix = \"C-a\"\n\n[ui]\nleft_rail = 30\n")
+            .unwrap();
+
+        Config::save_declined_version_at(&path, "1.1.0").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my setup"), "{text}");
+        let (cfg, warnings) = Config::load_from(&path);
+        assert!(warnings.is_empty());
+        assert_eq!(cfg.general.prefix, "C-a");
+        assert_eq!(cfg.ui.left_rail, Some(30));
+        assert!(cfg.update.declined("1.1.0"));
+        // Still checking — turning one release down is not turning the feature
+        // off, and the two keys have to stay independent.
+        assert!(cfg.update.check);
+
+        // Declining a later release replaces the key rather than adding a second.
+        Config::save_declined_version_at(&path, "1.2.0").unwrap();
+        let (cfg2, _) = Config::load_from(&path);
+        assert!(cfg2.update.declined("1.2.0"));
+        assert!(!cfg2.update.declined("1.1.0"));
+        let text2 = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text2.matches("declined_version").count(), 1);
+
+        // And the two writers do not tread on each other.
+        Config::save_update_check_at(&path, false).unwrap();
+        let (cfg3, _) = Config::load_from(&path);
+        assert!(!cfg3.update.check);
+        assert!(cfg3.update.declined("1.2.0"));
+
+        // A hand-edited `update` that is not a table is replaced, not indexed
+        // into — the same defence every other writer has.
+        std::fs::write(&path, "update = 5\n").unwrap();
+        Config::save_declined_version_at(&path, "1.3.0").unwrap();
+        let (cfg4, _) = Config::load_from(&path);
+        assert!(cfg4.update.declined("1.3.0"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
