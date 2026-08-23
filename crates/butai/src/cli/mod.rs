@@ -301,10 +301,32 @@ fn update(socket: &std::path::Path, out: &Out, check_only: bool, assume_yes: boo
     quiet_step("stopping the daemon (your workspaces are saved and come back)");
     block_on(async { update::apply(&staged, socket).await })?;
 
-    out.emit_owned(&serde_json::json!({ "updated_to": staged.version, "from": current }), |w| {
-        writeln!(w, "updated {current} -> {}", staged.version)?;
-        Ok(())
-    })?;
+    // `apply` leaves nothing of butai running, and the workbench path execs into
+    // the new build from here. There is nothing to exec into from a bare `butai
+    // update`, so the daemon is started again explicitly: without it the machine
+    // sits with no daemon until the next command happens to spawn one, and the
+    // workspaces this just promised would come back are not up.
+    //
+    // By install path, never `current_exe()` — the rename above turned this
+    // process's own path into a deleted inode of the *old* build.
+    quiet_step("starting the daemon on the new version");
+    let restarted = butai_client::conn::spawn_daemon_at(staged.install_path(), socket);
+    if let Err(e) = &restarted {
+        eprintln!("updated, but the daemon did not start: {e:#}");
+        eprintln!("the next butai command will start it");
+    }
+
+    out.emit_owned(
+        &serde_json::json!({
+            "updated_to": staged.version,
+            "from": current,
+            "daemon_restarted": restarted.is_ok(),
+        }),
+        |w| {
+            writeln!(w, "updated {current} -> {}", staged.version)?;
+            Ok(())
+        },
+    )?;
     Ok(crate::exit::OK)
 }
 

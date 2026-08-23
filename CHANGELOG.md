@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-23
+
+### Fixed
+
+- **`butai update` brings the daemon back.** It stopped the daemon, swapped the
+  binary in, printed `updated X -> Y` and exited — leaving the machine with no
+  daemon at all until some later command happened to spawn one. The workbench
+  path never had this: it execs into the new build, which re-attaches. A bare
+  `butai update` has nothing to exec into, so it now starts the daemon itself
+  and reports whether that worked (`daemon_restarted` in `--json`).
+
+  The restart goes by install path, never `current_exe()`. By that point the
+  rename has turned this process's own path into the deleted inode of the build
+  that was just replaced, so starting it would put the *old* daemon back — the
+  version skew the feature exists to end.
+
+- **A flaky end-to-end test.** `a_shell_process_is_named_by_its_full_command`
+  typed into the pane without waiting for the shell's prompt, so a prompt drawn
+  between two keystrokes split the echo — CI caught `sle$ ep 41` — and the wait
+  for `"sleep 41"` then timed out. Every other test here types `echo MARKER`,
+  which the command prints again on a line of its own; `sleep` prints nothing,
+  leaving the echo as the only occurrence.
+
+- **Two CI checks that could not fail for the right reason.** The generated
+  TypeScript check diffed `web/app/src/protocol/generated/`, gone since the
+  client moved up to `web/src/`, so it reported green over any drift. The web
+  relay test spawned `/var/tmp/butai-probe/butai` when `BUTAI_BIN` was unset —
+  absent on a clean runner, and worse on a developer box, where it proved the
+  relay against whatever binary was last left there. It now skips unless
+  `BUTAI_BIN` names one, and a CI job builds the daemon and points it at that.
+
 ## [1.1.0] - 2026-08-23
 
 ### Added
@@ -1998,7 +2029,8 @@ Initial workspace: per-user daemon with server-side VT emulation, editor,
 file tree, and git panes; a terminal (TUI) client; and a public framed +
 REST protocol. See [`docs/protocol.md`](docs/protocol.md).
 
-[Unreleased]: https://github.com/dieterpl/butai/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/dieterpl/butai/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/dieterpl/butai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/dieterpl/butai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/dieterpl/butai/compare/v0.12.1...v1.0.0
 [0.12.1]: https://github.com/dieterpl/butai/compare/v0.12.0...v0.12.1

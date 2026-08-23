@@ -70,6 +70,18 @@ pub async fn connect_existing(socket: &Path) -> Result<UnixStream> {
 /// Spawn `butai daemon` detached. A shared lock on the daemon's lock file
 /// tells us whether one is already alive (the daemon holds it exclusively).
 fn spawn_daemon(socket: &Path) -> Result<()> {
+    let exe = std::env::current_exe().context("locate butai binary")?;
+    spawn_daemon_at(&exe, socket)
+}
+
+/// [`spawn_daemon`] for a caller that knows which binary to start.
+///
+/// `butai update` needs this. By the time it has a daemon to bring back it has
+/// already renamed the new build over the old one, and `current_exe()` then
+/// names the *deleted inode* of the binary that was replaced — starting that
+/// would put the old daemon back, which is the one thing an update must not do.
+/// The install path is the only name that still resolves to the new build.
+pub fn spawn_daemon_at(exe: &Path, socket: &Path) -> Result<()> {
     let dir = socket.parent().context("socket path has no parent")?;
     std::fs::create_dir_all(dir)?;
     let lock_path = butai_protocol::paths::lock_path_for(socket);
@@ -82,7 +94,6 @@ fn spawn_daemon(socket: &Path) -> Result<()> {
     // No daemon alive. Release our probe lock before spawning.
     let _ = flock(&lock_file, FlockOperation::NonBlockingUnlock);
 
-    let exe = std::env::current_exe().context("locate butai binary")?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())

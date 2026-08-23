@@ -133,6 +133,12 @@ jobs:
     # Only a tag publishes. A dispatch run stops after proving the matrix builds.
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      # For CHANGELOG.md. The job otherwise needs no source, but the release
+      # notes are the changelog's section for this tag rather than a generated
+      # commit list: the entry says what changed and why, which a list of
+      # subject lines does not.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -144,6 +150,34 @@ jobs:
           sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
+      # The changelog's own section for this tag, verbatim. `awk` rather than a
+      # markdown tool: the heading shape is fixed by Keep a Changelog, and the
+      # section is everything between this version's heading and the next one.
+      - name: Release notes from the changelog
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$version]" '
+            index($0, v) == 1 { found = 1; next }
+            found && /^## \[/  { exit }
+            found             { print }
+          ' CHANGELOG.md > notes.md
+          # A tag with no entry is a mistake worth failing on: it means the
+          # changelog was not updated for a release that is about to ship.
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $GITHUB_REF_NAME"
+            exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo
+            echo "Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh\`"
+            echo
+            echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
+          } >> notes.md
+          echo "--- notes.md ---"; cat notes.md
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,5 +185,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file notes.md \
             dist/*.tar.gz dist/SHA256SUMS
