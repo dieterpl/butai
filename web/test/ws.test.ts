@@ -16,7 +16,21 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const BUTAI = Bun.env.BUTAI_BIN ?? "/var/tmp/butai-probe/butai";
+// The daemon binary under test, named explicitly by `BUTAI_BIN`.
+//
+// This used to fall back to `/var/tmp/butai-probe/butai`, which is why the
+// suite was green on a developer box and red on every clean one. Worse than
+// the CI failure: that path holds whatever binary was last dropped there, so
+// locally these tests were proving the relay against a months-old daemon while
+// reporting on the current tree. A path nobody set is not a default worth
+// having — CI's integration job builds one and points this at it.
+const BUTAI = Bun.env.BUTAI_BIN ?? "";
+const HAVE_BUTAI = BUTAI !== "" && existsSync(BUTAI);
+if (!HAVE_BUTAI) {
+  console.warn(
+    "ws.test.ts: skipping — set BUTAI_BIN to a butai binary to run the relay tests",
+  );
+}
 const PORT = 8093;
 
 let run: string;
@@ -40,6 +54,7 @@ async function waitFor(what: string, probe: () => Promise<boolean> | boolean, ms
 }
 
 beforeAll(async () => {
+  if (!HAVE_BUTAI) return;
   run = shortTmp();
   sock = join(run, "d.sock");
   // `BUTAI` (no suffix) is exported by a butai pane and holds a *socket* path,
@@ -76,6 +91,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAVE_BUTAI) return;
   bridge?.kill();
   daemon?.kill();
   // By socket, never by pattern: `pkill -f butai` matches the user's own daemon.
@@ -114,7 +130,7 @@ function exchange(msg: unknown, timeoutMs = 10_000): Promise<Record<string, unkn
   });
 }
 
-test("a hello crosses the relay and the daemon's hello comes back", async () => {
+test.skipIf(!HAVE_BUTAI)("a hello crosses the relay and the daemon's hello comes back", async () => {
   const reply = await exchange({
     hello: { proto_version: 1, encoding: "json", cols: 80, rows: 24, target: "default", cwd: "/" },
   });
@@ -126,7 +142,7 @@ test("a hello crosses the relay and the daemon's hello comes back", async () => 
   expect(hello.proto_version).toBe(1);
 });
 
-test("a message sent before the daemon socket is dialled is not dropped", async () => {
+test.skipIf(!HAVE_BUTAI)("a message sent before the daemon socket is dialled is not dropped", async () => {
   // The upgrade completes immediately; `Bun.connect` does not. The client's
   // `hello` lands in exactly that window, so the bridge queues rather than
   // drops. Sending on `open` — which is what `exchange` does — *is* the race,
@@ -138,7 +154,7 @@ test("a message sent before the daemon socket is dialled is not dropped", async 
   for (const r of replies) expect(Object.keys(r)[0]).toBe("hello");
 });
 
-test("an unknown daemon key is refused before any socket is dialled", async () => {
+test.skipIf(!HAVE_BUTAI)("an unknown daemon key is refused before any socket is dialled", async () => {
   const res = await fetch(`http://127.0.0.1:${PORT}/ws?daemon=nope`);
   expect(res.status).toBe(400);
   expect(((await res.json()) as { error: string }).error).toContain("no daemon called 'nope'");

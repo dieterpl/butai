@@ -46,7 +46,7 @@ jobs:
 
       # The step above already regenerated the browser client's TypeScript:
       # `--all-features` turns on `butai-protocol`'s `ts` feature, whose export
-      # tests write `web/app/src/protocol/generated/`. So proving the checked-in
+      # tests write `web/src/protocol/generated/`. So proving the checked-in
       # bindings are current costs one `git diff` rather than a second build.
       #
       # This is the whole point of generating them. A DTO that gains a field and
@@ -56,10 +56,10 @@ jobs:
       # `cargo test -p butai-protocol --features ts` and commit what it writes.
       - name: TypeScript bindings are current
         run: |
-          git diff --exit-code --stat web/app/src/protocol/generated/ || {
+          git diff --exit-code --stat web/src/protocol/generated/ || {
             echo "::error::The generated TypeScript is stale. Run:"
             echo "::error::  cargo test -p butai-protocol --features ts"
-            echo "::error::and commit web/app/src/protocol/generated/."
+            echo "::error::and commit web/src/protocol/generated/."
             exit 1
           }
 
@@ -136,6 +136,54 @@ jobs:
 
       - name: Build
         run: bun run build
+
+  integration:
+    # The one web test that needs a real daemon. It lives here rather than in
+    # the `web` job because that job is bun-only by design, and a test that
+    # spawns `butai` cannot pass without something having built it.
+    #
+    # Left in `web`, it read `BUTAI_BIN` with a hardcoded fallback and so was
+    # green on a box where a stale binary happened to sit at that path and red
+    # on every clean one. Building it here is what makes the test mean anything:
+    # it is the current tree's daemon the relay is proved against, not whatever
+    # was lying around.
+    name: integration (web relay against a real daemon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Debug, not release: this proves the relay's framing, and an optimised
+      # build buys nothing but runner minutes.
+      - name: Build the daemon
+        run: cargo build -p butai
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Relay tests
+        working-directory: web
+        env:
+          BUTAI_BIN: ${{ github.workspace }}/target/debug/butai
+        run: bun test test/ws.test.ts
 
   docker:
     # Independent of the `rust` job on purpose. This suite proves the daemon's
