@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly soak, and the only scheduled run that exercises the real agent
+    # CLIs — the one thing that catches an upstream status-line reword.
+    - cron: "0 3 * * *"
+  # Lets the nightly-only jobs (the release-target check) be run on demand.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup show && rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test --all --all-features
+
+      # The step above already regenerated the browser client's TypeScript:
+      # `--all-features` turns on `butai-protocol`'s `ts` feature, whose export
+      # tests write `web/app/src/protocol/generated/`. So proving the checked-in
+      # bindings are current costs one `git diff` rather than a second build.
+      #
+      # This is the whole point of generating them. A DTO that gains a field and
+      # a client that never learned about it is the drift the old hand-written
+      # JS could not detect; here it is a red CI step naming the exact line.
+      # The fix is never to edit the generated file — it is to run
+      # `cargo test -p butai-protocol --features ts` and commit what it writes.
+      - name: TypeScript bindings are current
+        run: |
+          git diff --exit-code --stat web/app/src/protocol/generated/ || {
+            echo "::error::The generated TypeScript is stale. Run:"
+            echo "::error::  cargo test -p butai-protocol --features ts"
+            echo "::error::and commit web/app/src/protocol/generated/."
+            exit 1
+          }
+
+  targets:
+    # The release matrix rots quietly: a dependency picks up a C library, or a
+    # cfg gate assumes glibc, and nobody finds out until a tag is cut. This
+    # type-checks every published target nightly so the break surfaces within a
+    # day instead of at release time. `check`, not `build` — the point is to
+    # catch a target that stopped compiling, and a full link of seven targets
+    # is not worth the runner time.
+    name: release targets still compile
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, cross: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true }
+          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: aarch64-apple-darwin, os: macos-14, cross: false }
+          - { target: x86_64-apple-darwin, os: macos-13, cross: false }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show && rustup target add ${{ matrix.target }}
+      - if: matrix.cross
+        run: cargo install cross --locked
+      - name: Check
+        run: |
+          builder=cargo
+          if [ "${{ matrix.cross }}" = "true" ]; then builder=cross; fi
+          "$builder" check --release --target ${{ matrix.target }} -p butai
+
+  web:
+    # The client is TypeScript with a build step now, so the compiler is the
+    # first check and it is a real one: the DTOs it checks against are generated
+    # from `butai-protocol` by ts-rs, so a daemon field a client never learned
+    # about fails here rather than surfacing as a value silently ignored in a
+    # browser.
+    #
+    # This replaces `check.py --static-only`, which existed because nothing read
+    # `web/`'s code until a browser did — a module that failed to parse was one
+    # console line and a blank page. `tsc` reads all of it in under a second, and
+    # `bun run build` proves it also links.
+    #
+    # Independent of the `rust` job for the same reason it always was: a lint
+    # failure elsewhere must not hide a client nobody can load.
+    name: web client (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # `--frozen-lockfile`, so CI installs what the repo pins rather than
+      # whatever resolves today. The image build asserts the same thing.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+  docker:
+    # Independent of the `rust` job on purpose. This suite proves the daemon's
+    # public API from outside, the way `web/` does, and gating it behind fmt or
+    # clippy would mean a lint failure hides an API regression.
+    name: docker testsuite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Choose a profile
+        id: profile
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "name=soak" >> "$GITHUB_OUTPUT"
+            echo "args=--minutes 25" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "name=smoke" >> "$GITHUB_OUTPUT"
+            echo "args=" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=standard" >> "$GITHUB_OUTPUT"
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run the suite
+        run: ./testsuite/run.sh ${{ steps.profile.outputs.name }} ${{ steps.profile.outputs.args }}
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testsuite-${{ steps.profile.outputs.name }}
+          path: testsuite/out/
+          if-no-files-found: warn
