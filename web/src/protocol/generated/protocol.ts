@@ -988,6 +988,31 @@ changed: boolean,
 size: number, };
 
 /**
+ * What a daemon did when it was asked to update itself.
+ *
+ * The answer to `POST /v1/update`, and the only place the versions are
+ * reported: the detach that follows deliberately carries the ordinary
+ * `DETACH_SERVER_SHUTDOWN` reason, because clients match on that string to
+ * tell "the daemon is restarting, keep your cells" from "your pane is gone"
+ * — see [`crate::ServerMsg::Detached`].
+ */
+export type UpdateDto = { 
+/**
+ * The version the daemon is running as it answers.
+ */
+current: string, 
+/**
+ * The latest published version, when the check reached GitHub.
+ */
+latest: string | null, 
+/**
+ * Whether anything is happening. `false` means `current` was already the
+ * latest and nothing was changed; `true` means a verified binary is in
+ * place and this daemon is going down to come back on it.
+ */
+updating: boolean, };
+
+/**
  * Every configured CLI's account standing (`GET /v1/usage`).
  *
  * Machine-scoped rather than workspace-scoped: an account limit is not a

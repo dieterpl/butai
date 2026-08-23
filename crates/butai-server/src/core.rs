@@ -231,6 +231,15 @@ pub enum Event {
     },
     /// A new `GET /v1/events` subscriber; `tx` receives pushed state changes.
     ApiSubscribe(UnboundedSender<ApiEvent>),
+    /// A self-update finished downloading. `Ok(None)` means the daemon was
+    /// already on the latest release. The reply is carried along rather than
+    /// answered off-thread because the decision to shut down and the answer to
+    /// the client that asked for it have to be made in one place, in that
+    /// order.
+    UpdateReady {
+        result: Result<Option<butai_update::Staged>, String>,
+        reply: tokio::sync::oneshot::Sender<ApiReply>,
+    },
     /// Graceful daemon shutdown (signal handler).
     Shutdown,
 }
@@ -436,6 +445,14 @@ pub struct ServerCore {
     /// per-workspace so the name is unique without consulting the directory,
     /// and monotonic so the names sort by age for pruning.
     put_seq: u64,
+    /// A self-update is downloading. One at a time: the second would stage a
+    /// second temp file beside the same binary and race the first to rename
+    /// over it.
+    updating: bool,
+    /// A verified new binary, waiting for this daemon to finish shutting down
+    /// so it can be swapped in. Set only by the update path, and the reason
+    /// [`ServerCore::run`] has a return value at all — see `daemon::run`.
+    restart_into: Option<butai_update::Staged>,
     /// Saved workspaces this start could not rebuild because their directory
     /// did not resolve. Carried so [`persist_session`](Self::persist_session)
     /// can write them back out — see [`restore_session`](Self::restore_session)
@@ -733,6 +750,8 @@ impl ServerCore {
             repo_probe_next: HashMap::new(),
             resume_retry: std::collections::HashSet::new(),
             put_seq: 0,
+            updating: false,
+            restart_into: None,
             deferred: Vec::new(),
         }
     }
@@ -753,7 +772,18 @@ impl ServerCore {
         self.socket = path;
     }
 
-    pub async fn run(mut self, mut rx: UnboundedReceiver<Event>, mut out_rx: OutputRx) {
+    /// Run until the last workspace dies, a signal arrives, or `kill-server`.
+    ///
+    /// Returns the binary this daemon stopped in order to *become*, when it
+    /// stopped for a self-update. Carrying it out of the loop rather than
+    /// acting on it here is deliberate: the swap has to happen after the
+    /// session snapshot is written and the socket is unbound, and neither of
+    /// those is this function's to do.
+    pub async fn run(
+        mut self,
+        mut rx: UnboundedReceiver<Event>,
+        mut out_rx: OutputRx,
+    ) -> Option<butai_update::Staged> {
         self.restore_session();
         let mut last_render = Instant::now() - FRAME_INTERVAL;
         loop {
@@ -825,6 +855,7 @@ impl ServerCore {
             }
         }
         info!("server core exiting");
+        self.restart_into.take()
     }
 
     /// Non-blocking drain of both channels. All pending control events are
@@ -1044,6 +1075,46 @@ impl ServerCore {
                 if structural && succeeded {
                     let ws = self.build_ws_summaries();
                     self.broadcast_api(ApiEvent::Workspaces(ws));
+                }
+            }
+            Event::UpdateReady { result, reply } => {
+                self.updating = false;
+                match result {
+                    Err(e) => {
+                        warn!("update: {e}");
+                        let _ = reply.send(ApiReply::Error(e));
+                    }
+                    Ok(None) => {
+                        info!("update: already on {}", butai_update::CURRENT);
+                        let _ = reply.send(ApiReply::Update(butai_protocol::api::UpdateDto {
+                            current: butai_update::CURRENT.to_string(),
+                            latest: Some(butai_update::CURRENT.to_string()),
+                            updating: false,
+                        }));
+                    }
+                    Ok(Some(staged)) => {
+                        info!(
+                            "update: {} -> {} staged, restarting",
+                            butai_update::CURRENT,
+                            staged.version
+                        );
+                        // Answered *before* the teardown, because the teardown
+                        // ends in this process being replaced and an unsent
+                        // reply would go with it.
+                        let _ = reply.send(ApiReply::Update(butai_protocol::api::UpdateDto {
+                            current: butai_update::CURRENT.to_string(),
+                            latest: Some(staged.version.clone()),
+                            updating: true,
+                        }));
+                        self.restart_into = Some(staged);
+                        // Plain `kill-server`, detach reason and all. Clients
+                        // match on `DETACH_SERVER_SHUTDOWN` to tell a daemon
+                        // that is coming back from a pane that is gone, so a
+                        // restart that invented its own reason would blank the
+                        // stage of every workbench attached to it — see
+                        // `ServerMsg::Detached`.
+                        self.kill_server(false);
+                    }
                 }
             }
             Event::WorkspaceWritten(sid) => {
@@ -2459,6 +2530,38 @@ impl ServerCore {
 
         let tx = self.events_tx.clone();
         match req {
+            // Not a filesystem call, but off-thread for the same reason and
+            // then some: an HTTPS round trip to GitHub and a SHA-256 over a
+            // ~6 MB tarball, either of which would stop every pane repainting
+            // for as long as it took.
+            ApiRequest::Update => {
+                if !self.config.update.allow_remote {
+                    let _ = reply.send(ApiReply::BadRequest(
+                        "this daemon does not take update requests — set `[update] \
+                         allow_remote = true` in ~/.butai/config.toml (and \
+                         `reload-config`), or run `butai update` on the machine it \
+                         is running on"
+                            .into(),
+                    ));
+                    return None;
+                }
+                if self.updating {
+                    let _ = reply.send(ApiReply::Busy("an update is already running".into()));
+                    return None;
+                }
+                self.updating = true;
+                tokio::spawn(async move {
+                    // Blocking throughout — `ureq`, sha2, gzip — so it goes on
+                    // the blocking pool rather than a runtime worker.
+                    let result = tokio::task::spawn_blocking(|| {
+                        butai_update::check()?.map(|offer| butai_update::stage(&offer)).transpose()
+                    })
+                    .await
+                    .map_err(|e| format!("the download did not finish: {e}"))
+                    .and_then(|r| r.map_err(|e: anyhow::Error| format!("{e:#}")));
+                    let _ = tx.send(Event::UpdateReady { result, reply });
+                });
+            }
             ApiRequest::Tree { ws, path, filter } => {
                 // The markers come from the cached git pane, so they are read
                 // here rather than off-thread — but only as an `Arc` clone now.
@@ -2758,8 +2861,11 @@ impl ServerCore {
             | ApiRequest::GitRemotes(_)
             | ApiRequest::GitTags(_)
             | ApiRequest::GitWorktrees(_)
-            | ApiRequest::GitConflict { .. } => {
-                ApiReply::Error("internal: filesystem request was not offloaded".into())
+            | ApiRequest::GitConflict { .. }
+            // Same: `offload_api` answers this one from a spawned task, because
+            // it is an HTTPS round trip and a checksum over a tarball.
+            | ApiRequest::Update => {
+                ApiReply::Error("internal: off-thread request was not offloaded".into())
             }
             // Index and ref work: libgit2, on the actor, answered synchronously.
             // A rename answering 202 would be absurd for something that takes a

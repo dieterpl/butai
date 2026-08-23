@@ -1,10 +1,12 @@
 //! The daemon's half of `~/.butai/config.toml`.
 //!
 //! One file, two readers. This one takes the shell, the scrollback and restore
-//! budgets, `[api]` and `[[agents]]`; the client's `config::Config` takes
-//! `[keys]`, `[theme]`, `[ui]`, `[[remote]]` and the prefix. Neither struct
-//! declares the other's tables and serde ignores what it does not know, so each
-//! side parses the whole file and sees only its own part.
+//! budgets, `[api]`, `[[agents]]` and `[update] allow_remote`; the client's
+//! `config::Config` takes `[keys]`, `[theme]`, `[ui]`, `[[remote]]`, the prefix
+//! and the rest of `[update]`. Neither struct declares the other's tables and
+//! serde ignores what it does not know, so each side parses the whole file and
+//! sees only its own part — `[update]` is the one table they share, and they
+//! share it a key at a time.
 //!
 //! Also `.butai.toml`, the per-project file, which is entirely the daemon's:
 //! what to name a workspace, which processes to bring up, which agents to
@@ -23,6 +25,7 @@ use serde::Deserialize;
 pub struct Config {
     pub general: General,
     pub api: Api,
+    pub update: Update,
     pub agents: Vec<AgentDef>,
     pub budgets: Vec<BudgetDef>,
 }
@@ -80,6 +83,29 @@ impl Default for General {
             restore_bytes: 256 * 1024,
         }
     }
+}
+
+/// The daemon's share of `[update]`. The client reads `check` and
+/// `declined_version` out of the same table and ignores this key, as this
+/// struct ignores those — the "one file, two readers" split at the top of this
+/// module.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct Update {
+    /// Let a client attached to this daemon make it update *itself* —
+    /// `POST /v1/update`, and `butai update --daemon` on top of it.
+    ///
+    /// Off by default, and the default is the interesting half. The socket's
+    /// only access control is the `0700` on its directory, and over a forward
+    /// or `butai proxy` the far end is whoever holds the ssh session; "can
+    /// reach the daemon" is a much weaker claim than "may replace the program
+    /// this machine runs". Turning it on is the machine's owner saying those
+    /// are the same set here.
+    ///
+    /// It is not a promise that the update is quiet: when this fires, clients
+    /// are detached and every workspace is killed and restored, exactly as
+    /// `kill-server` already does.
+    pub allow_remote: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

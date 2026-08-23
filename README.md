@@ -83,6 +83,12 @@ that version, not that question, so it stops asking about it and still tells you
 about the next one. `butai update` is the same thing on demand, and
 `[update] check = false` turns it off.
 
+**A daemon on another machine updates itself.** A remote session is two butais,
+and updating the one in front of you leaves the one doing the work as it was.
+`butai update --daemon` — or `:update` on a tab from another machine — hands the
+whole job to the daemon over there: check, download, verify, restart, workspaces
+restored. It has to be allowed on that side, with `[update] allow_remote = true`.
+
 Pin a version or pick your own directory:
 
 ```sh

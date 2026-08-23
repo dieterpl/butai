@@ -30,10 +30,17 @@ pub fn run(target: AttachTarget) -> Result<()> {
     rt.block_on(async move {
         let dir = private_dir()?;
         let socket = dir.path().join("butai.sock");
-        let (config, warnings) = Config::load();
+        let (mut config, warnings) = Config::load();
         for w in &warnings {
             eprintln!("butai: config: {w}");
         }
+        // The daemon here is this process, on a socket that goes away with it.
+        // A self-update would stop it — taking the workbench in front of it
+        // down — and then have nothing to exec into, because the swap and the
+        // restart are `butai daemon`'s to do and this is not that. Same
+        // reasoning as the `updates: false` `run_client_on` passes: the
+        // client's own updater is the one that works here.
+        config.update.allow_remote = false;
 
         let listener =
             UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;

@@ -390,23 +390,44 @@ draw. See [DSK](workbench.md#dsk).
 
 ### `[update]`
 
-Whether butai looks for a newer release of itself, and which one you already
-turned down. Read by the **client** — the daemon never declares this table.
+Whether butai looks for a newer release of itself, which one you already turned
+down, and whether the daemon may be told to update itself.
+
+The one table both halves read — a key at a time. `check` and
+`declined_version` are the **client**'s; `allow_remote` is the **daemon**'s.
+Neither struct declares the other's keys and serde ignores what it does not
+know, so they share the table without either seeing the other's part.
 
 ```toml
 [update]
 check = true                 # default
 declined_version = "1.1.0"   # written for you; see below
+allow_remote = false         # default
 ```
 
-| key | type | default | effect |
-|---|---|---|---|
-| `check` | bool | `true` | Ask GitHub for the latest release at start, and every six hours after. This is the only outbound request a butai client makes; everything else in it talks to a Unix socket. |
-| `declined_version` | string | unset | A release you answered **no** to. Written by the prompt, not by you. |
+| key | type | default | read by | effect |
+|---|---|---|---|---|
+| `check` | bool | `true` | client | Ask GitHub for the latest release at start, and every six hours after. This is the only outbound request a butai client makes; everything else in it talks to a Unix socket. |
+| `declined_version` | string | unset | client | A release you answered **no** to. Written by the prompt, not by you. |
+| `allow_remote` | bool | `false` | daemon | Let a client attached to this daemon make it update *itself* — `POST /v1/update`, and `butai update --daemon` on top of it. |
+
+**`allow_remote` is off by default, and the default is the interesting half.**
+The socket's only access control is the `0700` on its directory, and over an
+`ssh -L` forward or `butai proxy` the far end is whoever holds the ssh session.
+"Can reach the daemon" is a much weaker claim than "may replace the program this
+machine runs"; turning this on is the machine's owner saying those are the same
+set here. An unconfigured daemon answers `400` and names the key.
+
+It is not a promise that the update is quiet. When it fires, clients are
+detached and every workspace is killed and restored — exactly what `kill-server`
+already does, and the same snapshot comes back. It is also not a second opinion
+about *whether* to update: the daemon does its own check, and answers "already
+on the latest" when there is nothing to do. See
+[cli.md](cli.md#--daemon-updating-a-butai-you-are-not-on).
 
 **The check knows which build it is.** A release publishes seven tarballs, one
 per target, and the artifact this machine wants is decided at *compile* time:
-`crates/butai-client/build.rs` bakes the target triple in, so a musl build asks
+`crates/butai-update/build.rs` bakes the target triple in, so a musl build asks
 for the musl tarball because it is the musl build. That is stricter than
 `scripts/install.sh`, which has to read `uname` and `ldd --version` because it
 runs before any butai exists. If a release publishes nothing for this triple —

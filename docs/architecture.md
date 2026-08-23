@@ -6,7 +6,7 @@ shape it is heading towards. [design.md](design.md) covers *why the interface
 looks the way it does*; [protocol.md](protocol.md) is the normative wire spec
 and this page links to it rather than restating message types.
 
-## The four crates
+## The five crates
 
 ```
                     ┌───────────────────┐
@@ -24,24 +24,35 @@ and this page links to it rather than restating message types.
    └─────────┬─────────┘             └─────────┬─────────┘
              │                                 │
              └──────────────┬──────────────────┘
-                            ▼
-                  ┌───────────────────┐
-                  │  butai-protocol   │  wire types, framing,
-                  │                   │  REST DTOs, paths, names
-                  └───────────────────┘
+                            │
+             ┌──────────────┴──────────────────┐
+             ▼                                 ▼
+  ┌───────────────────┐             ┌───────────────────┐
+  │  butai-protocol   │             │   butai-update    │  the release, the
+  │  wire types,      │             │  check, download, │  checksum, the swap,
+  │  framing, DTOs,   │             │  verify, swap     │  the exec
+  │  paths, names     │             │                   │
+  └───────────────────┘             └───────────────────┘
 ```
 
 | Crate | Owns |
 | --- | --- |
 | `butai-protocol` | Everything both sides must agree on: the framed message types, the length-prefixed codec, the REST request/reply DTOs, `~/.butai` path resolution, and the binary-name list used when re-executing butai on another machine. No I/O beyond reading environment variables. |
-| `butai-server` | The daemon. The single-owner core actor, workspaces, panes, PTYs and the VT emulator, the git surface, process supervision, machine telemetry, search, the HTTP facade, and persistence. |
+| `butai-server` | The daemon. The single-owner core actor, workspaces, panes, PTYs and the VT emulator, the git surface, process supervision, machine telemetry, search, the HTTP facade, persistence, and answering `POST /v1/update` by restarting onto a new build. |
 | `butai-client` | The terminal client and everything that draws: chrome geometry and rows, the keymap, themes, syntax highlighting, selection, the dial, and the REST/framed client code. |
+| `butai-update` | Replacing butai with a newer one: which release is latest, which of the seven artifacts this build is, the checksum, the swap, and the exec. The only outbound network in the tree. Knows nothing about sockets — *stopping* the daemon before the swap is the caller's, because a client does it by asking and a daemon does it by leaving its own event loop. |
 | `butai` | The binary. Decides which role this invocation is (attach, proxy, standalone, daemon, one-shot CLI), resolves targets, and prints machine-readable output. |
 
-`butai-protocol` depends on nothing else in the workspace. `butai-server` and
-`butai-client` each depend on it and not on each other. The binary depends on
-all three — which is the only reason a single artifact can be both ends of the
-socket.
+`butai-protocol` and `butai-update` depend on nothing else in the workspace.
+`butai-server` and `butai-client` each depend on both and not on each other. The
+binary depends on all four — which is the only reason a single artifact can be
+both ends of the socket.
+
+`butai-update` is a crate of its own rather than a module because both ends need
+it and neither should carry the other. A daemon that can update itself
+(`POST /v1/update`) has to reach the updater, and taking it from `butai-client`
+would drag ratatui, crossterm, arboard and png into the daemon for the sake of
+four functions.
 
 ## One binary, three roles
 
@@ -568,4 +579,5 @@ dropped and its panes keep running, which is the entire point of a daemon.
 | Conversation ids | `crates/butai-server/src/ids.rs` |
 | Paths and the `~/.butai` layout | `crates/butai-protocol/src/paths.rs` |
 | Persistence and restore | `crates/butai-server/src/core.rs` (`SessionState`, `restore_session`, `persist_session`) |
-| Updating butai in place | `crates/butai-client/src/update.rs`, `crates/butai-client/build.rs` (the target triple it asks the release for) |
+| Updating butai in place | `crates/butai-update/src/lib.rs`, `crates/butai-update/build.rs` (the target triple it asks the release for) |
+| Stopping the daemon before the swap: the client's way, and the daemon's own | `crates/butai-client/src/update.rs`, `crates/butai-server/src/core.rs` (`Event::UpdateReady`), `daemon.rs` |

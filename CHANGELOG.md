@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A daemon can update itself, on request: `POST /v1/update`.** `butai update`
+  only ever updated the machine you typed it on. That is the wrong machine for
+  half of what butai is for — a workbench attached over `ssh host butai proxy`,
+  or the web client behind `web/server/`, is talking to a daemon it could not
+  update, and updating the binary in front of you left the one doing the work
+  exactly as it was. The only fix was to ssh in and run it by hand.
+
+  One request now does the whole job on the far side: check the release,
+  download, verify against `SHA256SUMS`, swap the binary, restart onto it. It
+  answers before it goes down — `{current, latest, updating}`, `202` when it is
+  restarting and `200` when there was nothing to do.
+
+  Three ways to ask: `butai update --daemon` (new flag, aimed at
+  `--socket`/`$BUTAI_SOCKET`), `:update` in the workbench on a tab from another
+  machine, and the route itself. `--daemon` has no `--check` counterpart, and
+  deliberately: a check the daemon answers and something else acts on is a
+  version that can change in between.
+
+  **Off unless the far machine says otherwise** — `[update] allow_remote`, new
+  and defaulting to `false`. The socket's only access control is the `0700` on
+  its directory, and over a forward or `butai proxy` the far end is whoever
+  holds the ssh session; "can reach the daemon" is a much weaker claim than
+  "may replace the program this machine runs". An unconfigured daemon answers
+  `400` and names the key. `butai standalone` forces it off — its daemon is the
+  same process as its client, with nothing to exec into.
+
+  The restart is an ordinary `kill-server`, detach reason and all. That last
+  part is load-bearing rather than tidy: clients match on
+  `DETACH_SERVER_SHUTDOWN` to tell a daemon that is coming back from a pane
+  that has gone, so a restart announcing itself more descriptively would blank
+  the stage of every attached workbench at the exact moment it should hold it.
+  There is now a test that fails if the string changes.
+
+- **`butai-update`, a fifth crate.** The updater moved out of `butai-client`
+  whole, because the daemon needs it and should not carry ratatui, crossterm,
+  arboard and png to get it. It knows nothing about sockets: *stopping* the
+  daemon before the swap stays with the caller, since a client does it by
+  asking and a daemon does it by leaving its own event loop. `build.rs` and the
+  compiled-in target triple went with it.
+
+### Fixed
+
+- **A daemon restart was untested from the one angle that matters.** Every
+  restore test dropped its client first and restarted on a *fresh* socket, so
+  nothing covered a client that was up throughout, or rebinding a socket path a
+  dead daemon left behind — both of which a self-updating daemon does every
+  time. `a_restart_detaches_viewers_with_the_reason_that_means_it_is_coming_back`
+  covers them.
+
 ## [1.1.1] - 2026-08-23
 
 ### Fixed

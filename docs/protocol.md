@@ -493,6 +493,7 @@ is aborted rather than completed, and no decoder in the list above minds.
 | GET | `/v1/workspaces/{id}/git/conflict?path=` | the three sides of one conflicted file → `{path,base,ours,theirs}`; an absent stage is `""` |
 | GET | `/v1/workspaces/{id}/git/op` | the running (or last) git operation; 404 if none has run |
 | DELETE | `/v1/workspaces/{id}/git/op` | kill the running operation |
+| POST | `/v1/update` | make the **daemon** update itself: check the release, download, verify, swap the binary, restart onto it → `UpdateDto {current,latest,updating}`. `200` when it was already on the latest, **`202`** when it is going down to come back on a new one. Refused with `400` unless `[update] allow_remote` is set; `409` while one is already running; `500` for a check or download that failed, leaving the daemon exactly as it was. The restart is an ordinary `kill-server` — workspaces are snapshotted first and restored by the build that comes up, and attached clients are detached with the usual shutdown reason, so a client holds its cells and reconnects. See [`butai update --daemon`](cli.md#--daemon-updating-a-butai-you-are-not-on) |
 | POST | `/v1/workspaces` | `{name?,layout?,path?}` create → `201 {"id"}`; an empty body is valid |
 | POST | `/v1/fs/mkdir` | `{path?,name}` create a directory, returns the new listing |
 | DELETE | `/v1/workspaces/{id}` | kill workspace |
@@ -822,7 +823,7 @@ Say so plainly rather than let a reader assume the surface is guarded:
 * **[`testsuite/`](../testsuite/README.md)** drives a real daemon and fails the
   run if a route it *lists* is never called. The list is
   `testsuite/suite/coverage.py`'s `HTTP_ROUTES`, and it is maintained by hand —
-  today it names 60 of the 69 routes above. The nine it does not name are
+  today it names 61 of the 70 routes above. The nine it does not name are
   `GET …/search`, `POST …/git/apply`, `POST`/`DELETE …/git/remote`,
   `GET …/git/worktrees`, `POST`/`DELETE …/git/worktree`,
   `POST …/git/worktree/prune` and `DELETE …/file`. Eight of those nine are
@@ -832,9 +833,9 @@ Say so plainly rather than let a reader assume the surface is guarded:
 * **[`web/check.py`](../web/check.py)** counts from the other end. It parses the
   router's `match` for the denominator and `web/`'s own sources for the
   numerator, so neither half is a copy that can go stale, and it prints
-  `route coverage: n/69` on every run. It reaches 61 — a *different* set: it has
+  `route coverage: n/70` on every run. It reaches 61 — a *different* set: it has
   callers for all the git routes above and none for `search`, `git/apply`,
-  `panes/{pane}/input`, `panes/{pane}/output`, the three per-workspace
+  `update`, `panes/{pane}/input`, `panes/{pane}/output`, the three per-workspace
   aggregates the push channel supersedes, or the legacy `DELETE …/processes/{pane}`.
   Two of its 60 are declared in the client's `api.js` and bound to no verb, so
   they are asked for by source and by nobody; `web/README.md` names them.

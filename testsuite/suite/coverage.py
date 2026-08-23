@@ -10,7 +10,7 @@ direction is the other way round, and this file is the one that lags.
 
 What is missing, measured against the enums rather than remembered:
 
-    HTTP_ROUTES   60 of the router's 69 arms. Absent: GET .../search,
+    HTTP_ROUTES   61 of the router's 70 arms. Absent: GET .../search,
                   POST .../git/apply, POST and DELETE .../git/remote,
                   GET .../git/worktrees, POST and DELETE .../git/worktree,
                   POST .../git/worktree/prune, DELETE .../file
@@ -35,6 +35,7 @@ denominator and the numerator from source, so neither can go stale).
 HTTP_ROUTES = [
     "GET /v1/workspaces",
     "GET /v1/system",
+    "POST /v1/update",
     "GET /v1/agents",
     "GET /v1/fs",
     "GET /v1/notifications",

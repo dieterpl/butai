@@ -18,7 +18,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use butai_protocol::{AttachTarget, Command, ServerMsg};
 use clap::{Parser, Subcommand};
 
@@ -114,6 +114,13 @@ pub enum Cmd {
         /// Install without asking
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Update the daemon on --socket instead of this binary
+        ///
+        /// The daemon does its own check, download and restart, so this
+        /// reaches a machine you are not on — a forwarded socket, or an
+        /// `ssh` away. It has to be allowed there: `[update] allow_remote`.
+        #[arg(long, conflicts_with = "check")]
+        daemon: bool,
     },
     /// Run the daemon in the foreground (normally spawned automatically)
     Daemon,
@@ -183,8 +190,13 @@ pub fn run(cli: Cli) -> Result<u8> {
             block_on(async move { process::run(cmd, &ctx).await })
         }
         Some(Cmd::Whoami) => whoami(&Out::new(json, quiet), &socket).map(|_| crate::exit::OK),
-        Some(Cmd::Update { check, yes }) => {
-            update(&socket, &Out::new(json, quiet), check, yes || quiet)
+        Some(Cmd::Update { check, yes, daemon }) => {
+            let out = Out::new(json, quiet);
+            if daemon {
+                update_daemon(&socket, &out, yes || quiet)
+            } else {
+                update(&socket, &out, check, yes || quiet)
+            }
         }
         Some(Cmd::Daemon) => butai_server::run_daemon(&socket).map(|_| crate::exit::OK),
         Some(Cmd::Proxy) => crate::proxy::run(&socket).map(|_| crate::exit::OK),
@@ -330,6 +342,53 @@ fn update(socket: &std::path::Path, out: &Out, check_only: bool, assume_yes: boo
     Ok(crate::exit::OK)
 }
 
+/// Hand the whole update to the daemon on `socket` — `butai update --daemon`.
+///
+/// The point is the machine this is *not* running on. Over a forwarded socket
+/// or `ssh host butai update --daemon`, the daemon there checks, downloads,
+/// verifies and restarts onto the new build itself; updating this binary would
+/// leave that one exactly as it was, which is the version skew the updater
+/// exists to end.
+///
+/// There is no `--check` counterpart, and deliberately: a check the daemon
+/// answers and something else acts on is a version that can change in between,
+/// so the daemon takes one request and reports what it did. That is also why
+/// the confirmation below names no version — nothing here knows one yet.
+///
+/// [`Api::remote`], never `Api::new`: a socket that is not answering means the
+/// daemon this was aimed at is not there, and spawning a *local* one to update
+/// instead would be the opposite of what was asked.
+fn update_daemon(socket: &std::path::Path, out: &Out, assume_yes: bool) -> Result<u8> {
+    if !assume_yes && !confirm_daemon_update(socket)? {
+        eprintln!("not updated");
+        return Ok(crate::exit::OK);
+    }
+
+    // The daemon holds the connection open for the download, so this is a wait
+    // with nothing on screen unless it is said out loud.
+    if !out.is_quiet() {
+        eprintln!("asking the daemon on {} to update itself", socket.display());
+    }
+    let body = block_on(async move {
+        Api::remote(socket.to_path_buf()).post("/v1/update", &serde_json::Value::Null).await
+    })?;
+    let dto: butai_protocol::api::UpdateDto = serde_json::from_slice(&body).with_context(|| {
+        format!("parse the daemon's answer: {}", String::from_utf8_lossy(&body))
+    })?;
+
+    out.emit_owned(&serde_json::to_value(&dto)?, |w| {
+        match (&dto.latest, dto.updating) {
+            (Some(v), true) => writeln!(w, "daemon updating {} -> {v}", dto.current)?,
+            _ => writeln!(w, "daemon is on {}, the latest", dto.current)?,
+        }
+        Ok(())
+    })?;
+    if dto.updating && !out.is_quiet() {
+        eprintln!("it is restarting; your workspaces are saved and come back");
+    }
+    Ok(crate::exit::OK)
+}
+
 /// Ask on the terminal. `n` unless somebody types `y`, and `n` when there is
 /// nobody there to type: a pipeline that wanted this to go through says so with
 /// `--yes` rather than being surprised by a binary swap.
@@ -340,6 +399,27 @@ fn confirm_update() -> Result<bool> {
         anyhow::bail!("not a terminal — pass --yes to install without asking");
     }
     eprint!("install it? [y/N] ");
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+/// The same question for `--daemon`, naming the socket instead of a version.
+///
+/// It cannot name a version: the check is the daemon's, and it has not been
+/// asked yet. What it can name is *which* butai is about to be replaced, which
+/// is the part worth being sure about when the answer is a machine you are not
+/// sitting at.
+fn confirm_daemon_update(socket: &std::path::Path) -> Result<bool> {
+    use std::io::BufRead;
+
+    if !rustix::termios::isatty(std::io::stdin()) {
+        anyhow::bail!("not a terminal — pass --yes to update without asking");
+    }
+    eprintln!("this updates the daemon on {}, not this binary", socket.display());
+    eprint!("it will restart, dropping attached clients. go ahead? [y/N] ");
     std::io::stderr().flush()?;
 
     let mut line = String::new();

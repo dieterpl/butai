@@ -26,19 +26,20 @@ scripts/               release.sh, install.sh, screenshot tooling
 .github/workflows/     ci.yml, release.yml
 ```
 
-Four crates, and the dependency direction is the point of the split:
+Five crates, and the dependency direction is the point of the split:
 
 | Crate | Holds | Depends on |
 | --- | --- | --- |
 | `butai-protocol` | `ClientMsg` / `ServerMsg`, `Command`, the REST DTOs, length-prefix framing, `~/.butai` path resolution, and `names::BINARIES` — every name this program has shipped under | nothing in the workspace |
-| `butai-server` | the daemon. The core actor, terminal panes and their PTY threads, the VT emulator, cell-run rendering, the git status cache and `git` process execution, the HTTP facade, telemetry | `butai-protocol` |
-| `butai-client` | the terminal client. Chrome geometry and row models, the keymap, palettes, the hit registry, ssh dialling, clipboard, terminal restore | `butai-protocol`, `butai-server` (for the relay path) |
-| `butai` | the binary. Clap command tree, exit codes, `proxy`, `standalone`, the ssh handoff | all three |
+| `butai-server` | the daemon. The core actor, terminal panes and their PTY threads, the VT emulator, cell-run rendering, the git status cache and `git` process execution, the HTTP facade, telemetry | `butai-protocol`, `butai-update` |
+| `butai-update` | the self-updater. The GitHub release, the artifact this build is, `SHA256SUMS`, the swap and the exec. The only outbound network in the tree | nothing in the workspace |
+| `butai-client` | the terminal client. Chrome geometry and row models, the keymap, palettes, the hit registry, ssh dialling, clipboard, terminal restore | `butai-protocol`, `butai-update` |
+| `butai` | the binary. Clap command tree, exit codes, `proxy`, `standalone`, the ssh handoff | all four |
 
 `crates/butai-server/tests/` holds the two end-to-end suites; every other test
-lives in a `#[cfg(test)] mod tests` beside the code it covers. Roughly: 46 tests
-in `butai-protocol`, 191 in `butai-server`, 666 in `butai-client`, 46 in
-`butai`, plus 33 e2e HTTP tests and 16 e2e socket tests.
+lives in a `#[cfg(test)] mod tests` beside the code it covers. Roughly: 26 tests
+in `butai-protocol`, 198 in `butai-server`, 512 in `butai-client`, 28 in
+`butai`, 16 in `butai-update`, plus 39 e2e HTTP tests and 19 e2e socket tests.
 
 [`architecture.md`](architecture.md) is the map of what those crates *do*; this
 page is only about building and checking them.

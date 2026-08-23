@@ -553,6 +553,7 @@ anyway. See [remote.md](remote.md).
 butai update           # check, ask, install, restart the daemon onto it
 butai update --check   # report what is available and change nothing
 butai update --yes     # install without asking (implied by --quiet)
+butai update --daemon  # make the daemon on --socket update *itself*
 ```
 
 The deliberate form of the question the workbench raises at launch. Both end in
@@ -580,7 +581,7 @@ updated 1.0.0 -> 1.1.0
 ```
 
 **Which artifact it takes is decided at compile time, not runtime.** A release
-publishes seven tarballs, one per target, and `crates/butai-client/build.rs`
+publishes seven tarballs, one per target, and `crates/butai-update/build.rs`
 bakes this build's own target triple in — so a musl build asks for the musl
 tarball because it *is* the musl build. `scripts/install.sh` has to guess with
 `uname` and `ldd --version`; it runs before any butai exists and has no better
@@ -611,6 +612,50 @@ Everything about *when it asks on its own* — the launch check, the six-hourly
 one, and the two answers — is `[update]` in
 [configuration.md](configuration.md#update). Inside the workbench, `:update`
 opens the same question.
+
+### `--daemon`: updating a butai you are not on
+
+Everything above updates *this* binary. `--daemon` updates the daemon on
+`--socket`/`$BUTAI_SOCKET` instead, by asking it to do the whole job itself —
+check, download, verify, swap, restart:
+
+```sh
+butai --socket ~/.butai/forwarded.sock update --daemon
+ssh workhorse butai update --daemon --yes
+```
+
+This is the case the local updater cannot reach. A workbench attached to a
+daemon on another machine is *two* butais, and updating the one in front of you
+leaves the one doing the work exactly as it was — the version skew the updater
+exists to end. Inside the workbench, `:update` on a tab from another machine
+raises this question instead of the local one, for the same reason.
+
+**It has to be allowed on the far side:** `[update] allow_remote = true` in that
+machine's `~/.butai/config.toml`. Off by default, because the socket's only
+access control is the `0700` on its directory, and "can reach the daemon" is a
+weaker claim than "may replace the program this machine runs". An unconfigured
+daemon answers `400` and names the key.
+
+There is no `--daemon --check`: it is a clap conflict, and deliberately. A check
+the daemon answers and something else acts on is a version that can change in
+between, so the daemon takes one request and reports what it did. That is also
+why the confirmation names the socket rather than a version — nothing on this
+side knows one yet.
+
+```
+this updates the daemon on /home/you/.butai/butai.sock, not this binary
+it will restart, dropping attached clients. go ahead? [y/N] y
+asking the daemon on /home/you/.butai/butai.sock to update itself
+daemon updating 1.0.0 -> 1.1.0
+it is restarting; your workspaces are saved and come back
+```
+
+The restart is an ordinary `kill-server`: workspaces are snapshotted before
+anything is torn down and restored by the build that comes up. Attached clients
+are detached with the same reason any shutdown uses, so a workbench keeps the
+cells it had and reconnects rather than blanking the screen.
+
+Under `--json`, the daemon's own `UpdateDto`: `current`, `latest`, `updating`.
 
 ## Process modes
 
@@ -881,7 +926,8 @@ of them takes the stage; you never divide a pane.
 |---|---|
 | entry point, exit-code plumbing | `crates/butai/src/main.rs` |
 | the command tree, global flags, `ls`, `kill-session`, `kill-server`, `whoami`, `update` | `crates/butai/src/cli/mod.rs` |
-| the updater itself: the check, the download, the swap, the restart | `crates/butai-client/src/update.rs`, `crates/butai-client/build.rs` |
+| the updater itself: the check, the download, the swap, the restart | `crates/butai-update/src/lib.rs`, `crates/butai-update/build.rs` |
+| `--daemon`: the request, and the daemon that answers it by restarting | `crates/butai/src/cli/mod.rs` (`update_daemon`), `crates/butai-server/src/core.rs`, `daemon.rs` |
 | target grammar and parsing | `crates/butai/src/target.rs` |
 | target resolution, `pane ls` / `read` / `send`, key names, self-target refusal | `crates/butai/src/cli/pane.rs` |
 | `agent` verbs, `--until`, the wait loop, spawn readiness | `crates/butai/src/cli/agent.rs` |

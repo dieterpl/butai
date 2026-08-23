@@ -286,6 +286,26 @@ pub struct StackDto {
     pub containers: Vec<ContainerDto>,
 }
 
+/// What a daemon did when it was asked to update itself.
+///
+/// The answer to `POST /v1/update`, and the only place the versions are
+/// reported: the detach that follows deliberately carries the ordinary
+/// `DETACH_SERVER_SHUTDOWN` reason, because clients match on that string to
+/// tell "the daemon is restarting, keep your cells" from "your pane is gone"
+/// — see [`crate::ServerMsg::Detached`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "protocol.ts"))]
+pub struct UpdateDto {
+    /// The version the daemon is running as it answers.
+    pub current: String,
+    /// The latest published version, when the check reached GitHub.
+    pub latest: Option<String>,
+    /// Whether anything is happening. `false` means `current` was already the
+    /// latest and nothing was changed; `true` means a verified binary is in
+    /// place and this daemon is going down to come back on it.
+    pub updating: bool,
+}
+
 /// Machine telemetry (the SYSTEM rail), sampled ~every 2s.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "protocol.ts"))]
@@ -1706,6 +1726,15 @@ pub enum ApiRequest {
         from: Option<String>,
         to: String,
     },
+    /// Update the daemon itself: check the release, download it, verify it,
+    /// swap the binary and restart onto it.
+    ///
+    /// Refused unless `[update] allow_remote` is set, because anything that
+    /// can reach the socket could otherwise replace the program the machine
+    /// runs. One request rather than a check and an install, because a check
+    /// whose answer is acted on separately is a version that can change in
+    /// between.
+    Update,
 }
 
 /// The core actor's reply, mapped to an HTTP status + JSON body by the router.
@@ -1751,6 +1780,11 @@ pub enum ApiReply {
     /// 202: the operation is still running. Poll `GET .../git/op` or watch the
     /// `git_op` SSE event for the outcome.
     Accepted(GitOpDto),
+    /// 200 when nothing was to be done, **202** when the daemon is going down
+    /// to come back on a new binary. 202 because by the time this is read the
+    /// work is accepted but not finished — the same reading as
+    /// [`ApiReply::Accepted`].
+    Update(UpdateDto),
     /// 200 with `{"ok":true}`.
     Ok,
     /// 201 with `{"id":<n>}`.

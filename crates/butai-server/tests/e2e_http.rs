@@ -2047,3 +2047,53 @@ async fn the_event_stream_compresses_and_still_streams() {
     assert!(text.contains("data: "), "no record inflated out of the prefix: {text:?}");
     assert!(text.contains("\"event\""), "record is not an ApiEvent: {text:?}");
 }
+
+/// A daemon that is not allowed to update itself says so, and says which key
+/// turns it on.
+///
+/// The default is the interesting half. The socket's only access control is the
+/// `0700` on its directory, and over a forward or `butai proxy` the far end is
+/// whoever holds the ssh session — "can reach the daemon" is a much weaker
+/// claim than "may replace the program this machine runs", so the two are only
+/// the same set when the machine's owner says so.
+#[tokio::test]
+async fn a_daemon_refuses_to_update_itself_unless_the_config_says_it_may() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = start_daemon(&tmp).await;
+
+    let (status, body) = http(&socket, "POST", "/v1/update", Some("")).await;
+    assert_eq!(status, 400, "an unconfigured daemon must refuse: {body}");
+    assert!(
+        body.contains("allow_remote"),
+        "the refusal has to name the key that changes it: {body}"
+    );
+}
+
+/// With the gate open the updater actually runs — and stops at the first thing
+/// it checks, because a test binary lives under `target/`.
+///
+/// That is what makes this test deterministic and offline: `check()` calls
+/// `writable_install_path()` before it opens a socket to GitHub, and cargo owns
+/// anything in a target directory. So the assertion is "the gate opened and the
+/// updater got as far as looking at itself", which is the half that can break
+/// here. The half that needs a real release is verified by hand.
+#[tokio::test]
+async fn an_allowed_update_reaches_the_updater_and_refuses_to_replace_a_cargo_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("butai.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut config = Config::with_defaults();
+    config.general.default_shell = Some("/bin/sh".into());
+    config.update.allow_remote = true;
+    tokio::spawn(butai_server::daemon::serve(listener, config, None));
+
+    let (status, body) = http(&socket, "POST", "/v1/update", Some("")).await;
+    assert_eq!(status, 500, "the updater ran and failed on its own terms: {body}");
+    assert!(
+        body.contains("cargo"),
+        "a build cargo owns is the refusal this run should hit: {body}"
+    );
+    // And the daemon is still there: a failed update changes nothing.
+    let (status, _) = http(&socket, "GET", "/v1/workspaces", None).await;
+    assert_eq!(status, 200, "a refused update must not take the daemon down");
+}

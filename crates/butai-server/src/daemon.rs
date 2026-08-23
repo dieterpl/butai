@@ -20,7 +20,7 @@ pub fn run(socket_path: &Path) -> Result<()> {
     let log_dir = paths::log_dir();
     fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "daemon.log");
-    let (writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let (writer, log_guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_env_filter(
@@ -30,7 +30,7 @@ pub fn run(socket_path: &Path) -> Result<()> {
         .init();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let restart_into = rt.block_on(async move {
         let dir = socket_path.parent().context("socket path has no parent")?;
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         restrict_dir_permissions(dir)?;
@@ -57,13 +57,39 @@ pub fn run(socket_path: &Path) -> Result<()> {
             tracing::warn!("config: {w}");
         }
 
-        serve(listener, config, Some(paths::session_state_path())).await;
+        let restart_into = serve(listener, config, Some(paths::session_state_path())).await;
 
         let _ = fs::remove_file(socket_path);
         drop(lock_file); // releases the flock
-        info!("daemon exit");
-        Ok(())
-    })
+        match &restart_into {
+            Some(staged) => info!("update: installing {} and restarting", staged.version),
+            None => info!("daemon exit"),
+        }
+        Ok::<_, anyhow::Error>(restart_into)
+    })?;
+
+    // Outside the runtime, and after the log guard goes: `tracing_appender`'s
+    // non-blocking writer is drained by dropping its guard, and `exec` drops
+    // nothing — so the line above, which is the whole record of an unattended
+    // update, would never reach the file.
+    drop(rt);
+    drop(log_guard);
+
+    // Nothing of this daemon is left holding the socket, the lock or the log,
+    // and the session snapshot is on disk. Only now can the binary be replaced
+    // and this process become the new one.
+    //
+    // `restart` execs with our own arguments, so a daemon started as
+    // `butai --socket X daemon` comes back on the same socket. It does not
+    // return; an error means the exec itself failed, and by then the swap has
+    // happened, so the next plain `butai` starts the new build and restores the
+    // session.
+    if let Some(staged) = restart_into {
+        let install = staged.install_path().to_path_buf();
+        butai_update::swap(&staged)?;
+        return Err(butai_update::restart(&install));
+    }
+    Ok(())
 }
 
 fn restrict_dir_permissions(dir: &Path) -> Result<()> {
@@ -72,9 +98,27 @@ fn restrict_dir_permissions(dir: &Path) -> Result<()> {
     fs::set_permissions(dir, perms).with_context(|| format!("chmod 700 {}", dir.display()))
 }
 
+/// How long to let in-flight replies reach their clients before this process
+/// is replaced.
+///
+/// Only spent on the update path, and only because of one reply: the 202 for
+/// `POST /v1/update` is written by a hyper task, and `exec` does not wait for
+/// it. Everything else about the shutdown is already ordered — clients are
+/// detached and the session is snapshotted before the core loop returns.
+const RESTART_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Accept loop + core actor. Public so integration tests can run a daemon
 /// on a temp socket in-process.
-pub async fn serve(listener: UnixListener, config: Config, session_store: Option<PathBuf>) {
+///
+/// Returns the binary this daemon stopped in order to become, when it stopped
+/// for a self-update — see [`run`], which is the only caller that acts on it.
+/// `butai standalone` ignores it, and turns the request off in its config
+/// rather than relying on that.
+pub async fn serve(
+    listener: UnixListener,
+    config: Config,
+    session_store: Option<PathBuf>,
+) -> Option<butai_update::Staged> {
     let (event_tx, event_rx) = unbounded_channel::<Event>();
     // PTY output rides a separate bounded channel so a flooding pane throttles
     // its own reader thread instead of burying control events on `event_tx`.
@@ -126,18 +170,26 @@ pub async fn serve(listener: UnixListener, config: Config, session_store: Option
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     tokio::pin!(core_task);
-    tokio::select! {
-        _ = &mut core_task => {}
+    let restart_into = tokio::select! {
+        r = &mut core_task => r.ok().flatten(),
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT: shutting down");
             let _ = event_tx.send(Event::Shutdown);
-            let _ = core_task.await;
+            core_task.await.ok().flatten()
         }
         _ = async { match sigterm.as_mut() { Some(s) => { s.recv().await; } None => std::future::pending().await } } => {
             info!("SIGTERM: shutting down");
             let _ = event_tx.send(Event::Shutdown);
-            let _ = core_task.await;
+            core_task.await.ok().flatten()
         }
-    }
+    };
     accept_task.abort();
+    // The client that asked for the update is still waiting on its 202, on a
+    // connection this process is about to `exec` out from under. Held here
+    // rather than before the `exec` so the accept loop is already down and no
+    // new client can arrive into the gap.
+    if restart_into.is_some() {
+        tokio::time::sleep(RESTART_GRACE).await;
+    }
+    restart_into
 }

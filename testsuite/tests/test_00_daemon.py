@@ -51,6 +51,24 @@ def second_daemon_refuses_the_same_home(ctx):
 
 
 @test(profile="standard", tags=("daemon",))
+def a_daemon_refuses_to_update_itself_unless_configured(ctx):
+    """`POST /v1/update` is off unless `[update] allow_remote` says otherwise.
+
+    The socket's only access control is the `0700` on its directory, and over a
+    forward or `butai proxy` the far end is whoever holds the ssh session. That
+    is a much weaker claim than "may replace the program this machine runs", so
+    the default has to be no, and the refusal has to say what changes it.
+    """
+    d = ctx.daemon()
+    ctx.cover("POST /v1/update")
+
+    result = d.http.post("/v1/update")
+    assert result.status == 400, f"{result.status}: {result.text}"
+    assert "allow_remote" in result.text, f"the refusal must name the key: {result.text}"
+    d.assert_healthy()
+
+
+@test(profile="standard", tags=("daemon",))
 def a_stale_socket_file_does_not_block_startup(ctx):
     """After a SIGKILL the socket inode survives; the next daemon must remove it."""
     d = ctx.daemon(start=False)

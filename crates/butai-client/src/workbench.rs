@@ -968,6 +968,31 @@ pub async fn run(
                         update_offer = None;
                         dirty = true;
                     }
+                    Flow::UpdateDaemon => {
+                        match ask_daemon_to_update(&daemons, &hosts, &view).await {
+                            Ok(dto) => {
+                                view.flash = Some(match (&dto.latest, dto.updating) {
+                                    (Some(v), true) => {
+                                        format!("daemon updating {} -> {v}", dto.current)
+                                    }
+                                    _ => format!("daemon is on {}, the latest", dto.current),
+                                });
+                            }
+                            Err(e) => view.flash = Some(format!("update: {e:#}")),
+                        }
+                        dirty = true;
+                    }
+                    // `:update` means "update the butai this tab is looking at".
+                    // On a tab from another machine that is the daemon over
+                    // there, and updating this binary instead would leave it
+                    // exactly as it was — the version skew the updater exists to
+                    // end. `active_host` borrows from `hosts`, not `view`, so
+                    // the overlay can go up in the same breath.
+                    Flow::CheckUpdate if active_host(&daemons, &hosts, &view).is_some() => {
+                        let host = active_host(&daemons, &hosts, &view);
+                        view.overlay = host.map(update_daemon_overlay);
+                        dirty = true;
+                    }
                     Flow::CheckUpdate => {
                         match &update_offer {
                             // Already know about one: reopen the question
@@ -2074,6 +2099,41 @@ fn update_overlay(version: &str) -> Overlay {
     })
 }
 
+/// Ask the active tab's daemon to update itself.
+///
+/// The whole job goes over in one request — check, download, verify, swap,
+/// restart — because the daemon is the only thing that can do any of it for a
+/// machine this client is not on. It answers before it goes down, so what comes
+/// back says what it is about to do; the detach that follows is an ordinary
+/// server shutdown, and the stage keeps its cells and reconnects the way it
+/// does for any restart.
+async fn ask_daemon_to_update(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &View,
+) -> Result<butai_protocol::api::UpdateDto> {
+    let d = active_daemon(daemons, hosts, view);
+    let daemon = daemons.get(d).context("no daemon behind the active tab")?;
+    let body = daemon.api.post("/v1/update", &serde_json::Value::Null).await?;
+    serde_json::from_slice(&body)
+        .with_context(|| format!("parse the daemon's answer: {}", String::from_utf8_lossy(&body)))
+}
+
+/// The same box for a daemon on another machine.
+///
+/// No version in it, because nothing here has asked yet — the far daemon does
+/// its own check, and one it answers separately is a version that can change
+/// between the answer and the install. What the box can name is the machine,
+/// which is the part worth being sure about.
+fn update_daemon_overlay(host: &str) -> Overlay {
+    Overlay::Confirm(chrome::ConfirmOverlay {
+        title: "UPDATE".into(),
+        header: format!("update the daemon on {host}? it restarts, and this tab drops"),
+        yes: false,
+        kind: chrome::ConfirmKind::UpdateDaemon { host: host.to_string() },
+    })
+}
+
 /// Ask GitHub whether there is a newer release, off the event loop.
 ///
 /// Same shape as [`spawn_git_refresh`], and for the same reason its doc comment
@@ -2296,6 +2356,19 @@ fn active_ws_key(
 /// Which daemon the active tab belongs to.
 fn active_daemon(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> usize {
     tab_index(daemons, hosts).get(view.tab).map(|(d, _)| *d).unwrap_or(0)
+}
+
+/// The machine the active tab is on, or `None` when it is this one.
+///
+/// `hosts` is indexed by daemon and holds `None` for the local daemon, which is
+/// the distinction `:update` turns on: updating "butai" from a tab on another
+/// machine means the daemon over there, not this binary.
+fn active_host<'a>(
+    daemons: &[Daemon],
+    hosts: &'a [Option<String>],
+    view: &View,
+) -> Option<&'a str> {
+    hosts.get(active_daemon(daemons, hosts, view))?.as_deref()
 }
 
 /// Carry out what an overlay chose.
@@ -4400,6 +4473,10 @@ enum Flow {
     DeclineUpdate(String),
     /// `:update` — ask now, whatever the file says, and say what came back.
     CheckUpdate,
+    /// `:update` on a tab from another machine: hand the whole thing to the
+    /// daemon there. Stays in the loop, unlike [`Flow::Update`] — nothing local
+    /// is being replaced, so the terminal never has to be given back.
+    UpdateDaemon,
     /// Open the agent picker; the list comes from the daemon, so the loop
     /// fetches it rather than the key handler.
     PickAgent,
@@ -5918,6 +5995,7 @@ fn confirm(view: &mut View) -> Flow {
         // recorded so it goes through this time.
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
         chrome::ConfirmKind::Update { .. } => Flow::Update,
+        chrome::ConfirmKind::UpdateDaemon { .. } => Flow::UpdateDaemon,
         chrome::ConfirmKind::MenuAction => match view.pending_menu_action.take() {
             Some(action) => {
                 view.confirmed_menu_action = Some(action);
@@ -9428,6 +9506,39 @@ mod tests {
         let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
         assert!(matches!(&flow, Flow::Git(GitAction::Discard(p)) if p == "u.rs"), "{flow:?}");
         assert!(view.overlay.is_none(), "the box should have closed");
+    }
+
+    /// Turning down an update *for another machine* records nothing.
+    ///
+    /// `declined_version` is this client's file about this client's binary, and
+    /// a version it has never been told. The remote box is a different question
+    /// with a different `no`, which is why it is its own `ConfirmKind` rather
+    /// than a flag on the local one — and why its header names the host where
+    /// the local one names a version.
+    #[test]
+    fn declining_a_remote_update_records_nothing() {
+        let mut view =
+            View { overlay: Some(update_daemon_overlay("workhorse")), ..Default::default() };
+        let Some(Overlay::Confirm(c)) = &view.overlay else { panic!("no confirm box") };
+        assert!(!c.yes, "it opens on no, like every other confirm box");
+        assert!(c.header.contains("workhorse"), "the box has to name the machine: {}", c.header);
+        assert!(
+            !c.header.contains(crate::update::CURRENT),
+            "this client's own version says nothing about the far daemon's: {}",
+            c.header
+        );
+
+        // `no` is a bare `Continue` — the local box's `no` carries a version out
+        // to be written down, and there is nothing to write here.
+        let flow = handle_overlay_key(key(event::KeyCode::Char('n')), &mut view);
+        assert!(matches!(flow, Flow::Continue), "a remote no must record nothing: {flow:?}");
+        assert!(view.overlay.is_none());
+
+        // And yes asks the daemon, without leaving the loop: nothing local is
+        // being replaced, so the terminal is never given back.
+        view.overlay = Some(update_daemon_overlay("workhorse"));
+        let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
+        assert!(matches!(flow, Flow::UpdateDaemon), "{flow:?}");
     }
 
     /// The update prompt's two answers mean different things from every other

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/butai-protocol",
+    "crates/butai-update",
     "crates/butai-server",
     "crates/butai-client",
     "crates/butai",
@@ -21,6 +22,7 @@ homepage = "https://github.com/dieterpl/butai"
 # with "all dependencies must have a version requirement specified". Bump these
 # with `workspace.package.version`.
 butai-protocol = { path = "crates/butai-protocol", version = "1.1.1" }
+butai-update = { path = "crates/butai-update", version = "1.1.1" }
 butai-server = { path = "crates/butai-server", version = "1.1.1" }
 butai-client = { path = "crates/butai-client", version = "1.1.1" }
 

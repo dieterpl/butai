@@ -1,0 +1,29 @@
+[package]
+name = "butai-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "butai's self-updater: the GitHub release, its checksums, and the binary swap."
+# Bakes the target triple in as `BUTAI_TARGET`, so the updater asks the release
+# for the artifact this build actually is rather than guessing from `uname`.
+# See `build.rs`.
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+
+# The only outbound network in the whole tree: HTTPS to the GitHub release, the
+# checksum it publishes, and the one file worth taking out of the tarball.
+ureq.workspace = true
+sha2.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+[lints]
+workspace = true

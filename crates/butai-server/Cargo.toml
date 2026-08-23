@@ -9,6 +9,7 @@ description = "The butai daemon: pane ownership, terminal emulation, headless re
 
 [dependencies]
 butai-protocol.workspace = true
+butai-update.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

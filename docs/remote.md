@@ -420,6 +420,40 @@ at a feature, and none of them point at the version. Because `server_version`
 rides the framed Hello, the notice appears when a pane is put on the stage rather
 than at connect time.
 
+### Ending the skew from this side
+
+The notice says `restart it: butai kill-server`, and that is the fix when the
+far daemon is merely stale — an old build left running across an upgrade. It is
+not the fix when the far *binary* is old, because a restart brings the same one
+back up. That machine needs updating, and updating the butai in front of you
+does not touch it: a remote session is two butais, and the one doing the work
+is over there.
+
+`POST /v1/update` is the daemon updating itself, so it reaches a machine you are
+not on. Three ways to say it:
+
+```sh
+butai --socket ~/.butai/forwarded.sock update --daemon
+ssh workhorse butai update --daemon --yes
+curl -s --unix-socket "$S" -XPOST http://d/v1/update
+```
+
+and inside the workbench, `:update` on a tab from another machine asks about
+*that* machine rather than this one — the confirm box names the host.
+
+It has to be allowed on the far side: `[update] allow_remote = true` in that
+machine's `~/.butai/config.toml`, off by default. The socket's only access
+control is the `0700` on its directory, and over a forward or `butai proxy` the
+far end is whoever holds the ssh session — a weaker claim than "may replace the
+program this machine runs".
+
+The restart is an ordinary `kill-server`: workspaces are snapshotted before
+anything is torn down and restored by the build that comes up. Clients are
+detached with the same reason any shutdown uses, which is what makes this
+survivable from a tab — the stage keeps the cells it had under an away notice
+and reconnects on its own clock, exactly as it does for a machine that went to
+sleep. See [When a machine goes away](#when-a-machine-goes-away).
+
 Both directions skip what they do not understand. An undecodable frame is
 skipped, not fatal — dropping the connection over one turns "one release behind"
 into a reconnect loop, and a real session was caught doing that 25 times, looking
@@ -530,6 +564,9 @@ anything reachable from elsewhere. See
 | The ssh handoff: DA2 probe and the APC | `crates/butai/src/handoff.rs` |
 | `butai proxy` | `crates/butai/src/proxy.rs` |
 | `butai standalone`'s private socket | `crates/butai/src/standalone.rs` |
+| The daemon updating itself: the release, the checksum, the swap, the exec | `crates/butai-update/src/lib.rs` |
+| `POST /v1/update`: the gate, the download, the restart | `crates/butai-server/src/core.rs`, `daemon.rs` |
+| `butai update --daemon`, and `:update` on a remote tab | `crates/butai/src/cli/mod.rs`, `crates/butai-client/src/workbench.rs` |
 | APC parsing, `ssh_dial_back`, argument splitting | `crates/butai-server/src/pane/terminal.rs` |
 | `remote_announce` emission | `crates/butai-server/src/core.rs` |
 | `RemoteAnnounceDto` | `crates/butai-protocol/src/api.rs` |

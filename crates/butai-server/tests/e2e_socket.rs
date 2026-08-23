@@ -1286,3 +1286,103 @@ async fn one_notch_of_the_wheel_is_three_lines() {
         before - top(&screen)
     );
 }
+
+/// A client that is up when the daemon restarts is told so with the *one*
+/// reason string that means "hold your cells, I am coming back".
+///
+/// `DETACH_SERVER_SHUTDOWN` is load-bearing rather than decorative. The
+/// workbench matches on it (`Detached { reason } if reason != …` clears the
+/// stage, this one marks it lost and keeps the frame), so it is what separates
+/// "the daemon is restarting" from "your pane is gone". A restart that invented
+/// a more descriptive reason — `"restarting onto 1.2.0"` is the tempting one —
+/// would blank every attached client at the exact moment it should be holding
+/// the screen. Nothing else pins the string, so this does.
+///
+/// It also does the restart the way a self-updating daemon does: the *same*
+/// socket path, not a second one. Every other restore test starts daemon #2 on
+/// a fresh socket, which never exercises rebinding a path a dead daemon left
+/// behind — the `remove_file` in `daemon::run`, stood in for here.
+#[tokio::test]
+async fn a_restart_detaches_viewers_with_the_reason_that_means_it_is_coming_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("session.json");
+    let socket = tmp.path().join("butai.sock");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+
+    start_daemon_with_store(&socket, Some(store.clone())).await;
+
+    // A workspace on a real directory, so there is something for the restore to
+    // come back to, and a pane with output on it worth keeping.
+    let mut ctl = connect(&socket).await;
+    send(
+        &mut ctl,
+        &ClientMsg::Hello {
+            proto_version: PROTOCOL_VERSION,
+            encoding: Encoding::Json,
+            cols: 80,
+            rows: 24,
+            target: AttachTarget::Default,
+            cwd: proj.clone(),
+        },
+    )
+    .await;
+    loop {
+        if let ServerMsg::Hello { session, .. } = recv(&mut ctl).await {
+            assert!(session.is_some(), "landed on a workspace");
+            break;
+        }
+    }
+    let pane = stage_pane(&socket, 1).await;
+    let (mut viewer, mut screen) = watch_pane(&socket, pane).await;
+    for msg in type_line("echo RESTART_MARKER") {
+        send(&mut viewer, &msg).await;
+    }
+    await_text(&mut viewer, &mut screen, "RESTART_MARKER").await;
+
+    // The teardown a self-update ends with, and the one `butai update` already
+    // drives from outside.
+    send(&mut ctl, &ClientMsg::Command(Command::KillServer)).await;
+
+    // What the viewer — a client that was up throughout — is told.
+    let mut reason = None;
+    while let Some(msg) = recv_opt(&mut viewer).await {
+        if let ServerMsg::Detached { reason: r } = msg {
+            reason = Some(r);
+            break;
+        }
+    }
+    assert_eq!(
+        reason.as_deref(),
+        Some(butai_protocol::DETACH_SERVER_SHUTDOWN),
+        "a restart has to be announced with the reason clients match on, or every \
+         attached workbench clears its stage instead of holding it"
+    );
+
+    // Wait for the old daemon to finish: the snapshot is written on the way
+    // out, and rebinding before it lets go is a race, not a test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(&socket).await.is_ok() {
+        assert!(tokio::time::Instant::now() < deadline, "the daemon never stopped answering");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Same socket path, the way `daemon::run` comes back onto it: the file the
+    // dead daemon left is stale, so it goes before the bind.
+    std::fs::remove_file(&socket).ok();
+    start_daemon_with_store(&socket, Some(store.clone())).await;
+
+    // The workspace is back, under its directory's name…
+    let mut ctl2 = connect(&socket).await;
+    send(&mut ctl2, &hello(AttachTarget::Control)).await;
+    let ServerMsg::Hello { .. } = recv(&mut ctl2).await else { panic!("expected hello") };
+    send(&mut ctl2, &ClientMsg::Command(Command::ListSessions)).await;
+    let ServerMsg::SessionList(list) = recv(&mut ctl2).await else { panic!("expected a list") };
+    assert_eq!(list.len(), 1, "one workspace restored onto the same socket");
+    assert_eq!(list[0].name, "proj", "restored under its directory name");
+
+    // …and so is what was on the pane, which is what makes holding the old
+    // frame honest rather than a stale picture.
+    let seen = await_stage_text(&socket, 1, "RESTART_MARKER").await;
+    assert!(seen.contains("RESTART_MARKER"), "the pane came back without its output: {seen}");
+}

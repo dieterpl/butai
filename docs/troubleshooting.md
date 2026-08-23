@@ -494,7 +494,9 @@ directory paths verbatim.
 | Exit codes | `crates/butai/src/exit.rs` |
 | Frame skipping and the bad-frame cap | `crates/butai-protocol/src/framing.rs`, `crates/butai-server/src/client_conn.rs` |
 | Theme resolution and its warning | `crates/butai-client/src/theme.rs` |
-| The update check, download, swap and restart | `crates/butai-client/src/update.rs` |
+| The update check, download, swap and restart | `crates/butai-update/src/lib.rs` |
+| Stopping the daemon before the swap (the client's half) | `crates/butai-client/src/update.rs` |
+| A daemon updating itself: the gate, the download, the restart | `crates/butai-server/src/core.rs`, `daemon.rs` |
 | `[keys]` dispatch through the prefix | `crates/butai-client/src/keymap.rs`, `workbench.rs` (`handle_prefix`) |
 | Agent markers and pattern overrides | `crates/butai-server/src/pane/terminal.rs` |
 | Resume, `spoke`, and the retry window | `crates/butai-server/src/core.rs` |

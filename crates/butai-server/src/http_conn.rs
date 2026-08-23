@@ -157,6 +157,8 @@ async fn route(
         (&Method::GET, ["v1", "system"]) => call(&events, ApiRequest::System).await,
         (&Method::GET, ["v1", "agents"]) => call(&events, ApiRequest::AgentTypes).await,
         (&Method::GET, ["v1", "usage"]) => call(&events, ApiRequest::Usage).await,
+        // -- the daemon itself --
+        (&Method::POST, ["v1", "update"]) => call(&events, ApiRequest::Update).await,
         (&Method::GET, ["v1", "fs"]) => {
             call(&events, ApiRequest::BrowseFs { path: query_get(&query, "path") }).await
         }
@@ -881,6 +883,13 @@ fn reply_to_response(reply: ApiReply) -> Response<ResBody> {
         ApiReply::Conflict(v) => json(StatusCode::OK, &v),
         ApiReply::GitOp(v) => json(StatusCode::OK, &v),
         ApiReply::Accepted(v) => json(StatusCode::ACCEPTED, &v),
+        // 202 when it is going to happen: a daemon that answers this is about
+        // to stop and come back on the new binary, so the work is accepted and
+        // not yet done. Nothing to do is a plain 200.
+        ApiReply::Update(v) => {
+            let code = if v.updating { StatusCode::ACCEPTED } else { StatusCode::OK };
+            json(code, &v)
+        }
         ApiReply::Ok => json(StatusCode::OK, &serde_json::json!({ "ok": true })),
         ApiReply::Created(id) => json(StatusCode::CREATED, &serde_json::json!({ "id": id })),
         ApiReply::NotFound(m) => json(StatusCode::NOT_FOUND, &err_obj(&m)),

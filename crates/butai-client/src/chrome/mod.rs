@@ -1942,6 +1942,14 @@ pub enum ConfirmKind {
     /// dropping the overlay. `esc` still dismisses without answering, and that
     /// is the way to be asked again next launch.
     Update { version: String },
+    /// The daemon this tab is attached to should update *itself*.
+    ///
+    /// A different question from [`ConfirmKind::Update`], not a parameter of
+    /// it, because it is about a different machine: the version is unknown
+    /// here (the far daemon does its own check), and `no` means "not now" with
+    /// nothing to record — `declined_version` is this client's file, about this
+    /// client's binary.
+    UpdateDaemon { host: String },
 }
 
 /// A titled list with a cursor.
