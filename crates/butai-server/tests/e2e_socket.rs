@@ -1095,6 +1095,13 @@ async fn a_shell_process_is_named_by_its_full_command() {
 
     let pane = stage_pane(&socket, 1).await;
     let (mut c1, mut screen) = watch_pane(&socket, pane).await;
+    // Wait for the prompt before typing. Every other test here types `echo
+    // MARKER` and waits for MARKER, which the command prints on a line of its
+    // own — so a prompt that lands mid-echo cannot hide it. `sleep` prints
+    // nothing, so the echo of what was typed is the only place "sleep 41" ever
+    // appears, and a prompt drawn between two keystrokes splits it: CI has
+    // caught `sle$ ep 41`, which contains the needle nowhere.
+    await_text(&mut c1, &mut screen, "$").await;
     // A command with an argument: the row used to read a bare "sleep".
     for msg in type_line("sleep 41") {
         send(&mut c1, &msg).await;
