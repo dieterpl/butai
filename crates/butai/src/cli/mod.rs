@@ -295,6 +295,28 @@ fn update(socket: &std::path::Path, out: &Out, check_only: bool, assume_yes: boo
         return Ok(crate::exit::OK);
     }
 
+    // Ahead of the question, because neither answer to it could be honoured.
+    //
+    // Stopping this daemon means killing every workspace, and one of those
+    // panes is the one this command is typing into — so the `kill-server`
+    // below would kill *this process*, between staging the new binary and
+    // putting it in place. The daemon would be gone, the binary unchanged, and
+    // nothing left running to restart it: every other client then sits on
+    // "reconnecting" forever, because a client connects to a daemon and never
+    // spawns one. `scripts/install.sh` has refused this since it was written
+    // and points at this command, which is why this command has to refuse too.
+    //
+    // `--check` is deliberately above this: reporting what is available costs
+    // nobody anything, wherever it is run from.
+    if butai_client::inside_daemon(socket) {
+        anyhow::bail!(
+            "this would stop the daemon that owns the pane you are typing in, \
+             killing this command halfway. run `butai update --daemon` — the \
+             daemon updates itself and restarts, and this pane comes back with \
+             it — or run `butai update` from outside butai"
+        );
+    }
+
     if !assume_yes && !confirm_update()? {
         // Deliberately not written to `declined_version`: a command you typed
         // and then answered no to means "not now", and silencing this version

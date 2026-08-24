@@ -76,6 +76,21 @@ pub fn guard_against_nesting(target: Option<&Path>) -> Result<()> {
     }
 }
 
+/// Whether this process is running in a pane of the daemon on `socket`.
+///
+/// The same `$BUTAI` [`guard_against_nesting`] reads, asked for a different
+/// reason. That one is about *attaching*: the cost of getting it wrong is a
+/// confusing workbench inside a workbench. This is for the commands that
+/// **stop** a daemon, where the cost is a command killed halfway through its
+/// own work — `kill-server` tears down every workspace, which kills the pane
+/// the command is typing into, along with the command.
+pub fn inside_daemon(socket: &Path) -> bool {
+    match std::env::var_os("BUTAI").filter(|v| !v.is_empty()) {
+        Some(inside) => same_socket(Path::new(&inside), socket),
+        None => false,
+    }
+}
+
 /// Whether two paths name the same daemon socket.
 ///
 /// Canonicalized when both resolve, so the same socket reached by different
@@ -248,4 +263,46 @@ async fn ensure_workspace(socket: &Path, target: &AttachTarget) -> Result<()> {
     }
     api.post("/v1/workspaces", &body).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command that stops a daemon has to know when it is standing on the
+    /// branch it is cutting.
+    ///
+    /// `butai update` stages a binary, stops the daemon, then swaps and
+    /// restarts. Run from a pane of that same daemon, the stop kills every
+    /// workspace — including the pane — so the process dies between staging and
+    /// swapping: the daemon is gone, the binary is unchanged, and nothing is
+    /// left to restart it. Attached clients then wait on "reconnecting"
+    /// forever, because a client connects to a daemon and never spawns one.
+    #[test]
+    fn a_command_can_tell_it_is_inside_the_daemon_it_would_stop() {
+        let _guard = env_lock();
+        let sock = std::path::PathBuf::from("/run/user/1000/butai/butai.sock");
+
+        std::env::remove_var("BUTAI");
+        assert!(!inside_daemon(&sock), "outside butai, nothing to refuse");
+
+        std::env::set_var("BUTAI", &sock);
+        assert!(inside_daemon(&sock), "a pane of this very daemon");
+
+        // Another daemon is somebody else's to stop, and stopping it does not
+        // touch this pane — that is the case `--socket` exists for.
+        std::env::set_var("BUTAI", "/tmp/other/butai.sock");
+        assert!(!inside_daemon(&sock), "a pane of a different daemon is fine");
+
+        // An empty value is not a pane, it is a leftover.
+        std::env::set_var("BUTAI", "");
+        assert!(!inside_daemon(&sock));
+        std::env::remove_var("BUTAI");
+    }
+
+    /// `set_var` is process-global; these tests must not run beside each other.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }

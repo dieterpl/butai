@@ -58,6 +58,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time. `a_restart_detaches_viewers_with_the_reason_that_means_it_is_coming_back`
   covers them.
 
+- **`butai update` from inside a butai pane destroyed the daemon and did not
+  come back.** It staged the new binary, sent `kill-server`, and the daemon
+  tore down every workspace — including the pane the command itself was running
+  in, which killed the command between staging the binary and putting it in
+  place. The rename never happened and neither did the restart: daemon gone,
+  binary unchanged, and nothing left running to start one. Any other client then
+  sat on "reconnecting" forever, because a client connects to a daemon and never
+  spawns one.
+
+  It now refuses, ahead of both the question and the download, and points at the
+  two ways that work: `butai update --daemon`, where the daemon updates *itself*
+  and execs into the new build with the pane restored around it, or the same
+  command from outside butai. `--check` is unaffected — reporting what is
+  available costs nobody anything, wherever it is run.
+
+  `scripts/install.sh` has refused this since it was written, and told you to run
+  `butai update` instead. That was the one path with no guard.
+
+- **Reconnecting got slower the longer a client stayed open.** The event
+  stream's backoff doubled on every drop and nothing ever lowered it, so a
+  workbench open all day sat permanently at the ten-second ceiling: every daemon
+  restart under it — `butai update`, `kill-server`, a daemon updating itself —
+  spent the full ten seconds on "reconnecting", however healthy the daemon
+  already was. It now starts over after a stream that stayed up for five
+  seconds, which a flapping daemon never does, so a crash loop still backs off.
+  Measured on the same restart: 1.6s to 0.5s.
+
 ## [1.1.1] - 2026-08-23
 
 ### Fixed

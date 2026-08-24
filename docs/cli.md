@@ -605,6 +605,14 @@ Not a terminal and no `--yes` is an error rather than a silent install:
 error: not a terminal — pass --yes to install without asking
 ```
 
+**It refuses to run from inside a butai pane**, which is the one place it cannot
+finish. Stopping the daemon kills every workspace, and one of those panes is the
+one you are typing in — so the command dies between staging the new binary and
+putting it in place, leaving the daemon stopped, the binary unchanged, and
+nothing running to start another. Use [`--daemon`](#--daemon-updating-a-butai-you-are-not-on)
+from in there instead: the daemon updates itself, and the pane comes back with
+it. `--check` is allowed anywhere.
+
 Under `--json`, the same answers as a body: `current`, `latest`, `target`,
 `asset`, `install_path`, `update_available`.
 
@@ -629,6 +637,12 @@ daemon on another machine is *two* butais, and updating the one in front of you
 leaves the one doing the work exactly as it was — the version skew the updater
 exists to end. Inside the workbench, `:update` on a tab from another machine
 raises this question instead of the local one, for the same reason.
+
+It is also the answer **from inside a butai pane**, on any machine. Plain
+`butai update` cannot finish there — the daemon it stops owns the pane it is
+running in — but this can, because the process doing the work is the daemon
+itself: it answers, stops, swaps and execs into the new build, and the session
+comes back around you.
 
 **It has to be allowed on the far side:** `[update] allow_remote = true` in that
 machine's `~/.butai/config.toml`. Off by default, because the socket's only

@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use butai_protocol::api::{
@@ -44,6 +44,18 @@ const MAX_SSE_RECORD: usize = 8 * 1024 * 1024;
 
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// How long a stream has to have stayed up before the drop that ends it counts
+/// as a fresh problem rather than a continuing one.
+///
+/// The backoff exists for a daemon that is not answering, and it should climb
+/// for as long as that is true. A daemon that answered, served a stream for a
+/// while and then went — a restart, an update, a `kill-server` — is a different
+/// event, and making the client that was watching it wait out a ceiling it
+/// reached hours ago is the reconnect feeling broken. Long enough that a daemon
+/// flapping on a crash loop still backs off, because five seconds of stream is
+/// not a flap.
+const STABLE_STREAM: Duration = Duration::from_secs(5);
 
 /// What the event-stream task reports upward.
 ///
@@ -199,7 +211,9 @@ fn spawn_event_stream(socket: PathBuf) -> UnboundedReceiver<DaemonEvent> {
     tokio::spawn(async move {
         let mut backoff = BACKOFF_MIN;
         loop {
-            match read_events(&socket, &tx).await {
+            let mut connected = false;
+            let started = Instant::now();
+            match read_events(&socket, &tx, &mut connected).await {
                 // A clean end still means the daemon went away; the stream is
                 // infinite by design.
                 Ok(()) => {
@@ -213,8 +227,8 @@ fn spawn_event_stream(socket: PathBuf) -> UnboundedReceiver<DaemonEvent> {
                     }
                 }
             }
+            backoff = next_backoff(backoff, connected, started.elapsed());
             tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(BACKOFF_MAX);
             if tx.is_closed() {
                 return;
             }
@@ -223,8 +237,32 @@ fn spawn_event_stream(socket: PathBuf) -> UnboundedReceiver<DaemonEvent> {
     rx
 }
 
+/// How long to wait before the next attempt, given how the last one went.
+///
+/// **Reset on a stream that had been up**, which is the whole point of the
+/// function. Without it `backoff` only ever grows: a client that has been open
+/// all day has long since reached [`BACKOFF_MAX`], and a daemon restarting
+/// under it — the ordinary end of `butai update`, `kill-server`, or a daemon
+/// updating itself — leaves the workbench sitting on "reconnecting" for the
+/// full ten seconds, every time, for the rest of the session. The stage's own
+/// retry is on a one-second clock and cannot help: it has nothing to reopen
+/// until this stream says the daemon is back.
+fn next_backoff(previous: Duration, connected: bool, up_for: Duration) -> Duration {
+    if connected && up_for >= STABLE_STREAM {
+        return BACKOFF_MIN;
+    }
+    (previous * 2).min(BACKOFF_MAX)
+}
+
 /// One pass over the event stream: connect, announce, then pump until it ends.
-async fn read_events(socket: &Path, tx: &UnboundedSender<DaemonEvent>) -> Result<()> {
+///
+/// `connected` is set once the daemon has answered `/v1/events`, so the caller
+/// can tell a stream that was serving from one that never started.
+async fn read_events(
+    socket: &Path,
+    tx: &UnboundedSender<DaemonEvent>,
+    connected: &mut bool,
+) -> Result<()> {
     let stream = crate::conn::connect_existing(socket).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
@@ -242,6 +280,7 @@ async fn read_events(socket: &Path, tx: &UnboundedSender<DaemonEvent>) -> Result
     if res.status() != StatusCode::OK {
         anyhow::bail!("daemon answered /v1/events with {}", res.status());
     }
+    *connected = true;
     if tx.send(DaemonEvent::Connected).is_err() {
         return Ok(());
     }
@@ -381,5 +420,45 @@ mod tests {
         assert!(state.workspace(SessionId(1)).is_some());
         state.apply(&ApiEvent::Workspaces(vec![]));
         assert!(state.workspace(SessionId(1)).is_none(), "stale rail outlived its tab");
+    }
+
+    /// The backoff has to come back down, or reconnecting gets slower the
+    /// longer a client stays open.
+    ///
+    /// It only ever grew before this: `backoff` climbed on every drop and
+    /// nothing lowered it, so a workbench open all day sat permanently at
+    /// [`BACKOFF_MAX`]. Every daemon restart under it — `butai update`,
+    /// `kill-server`, a daemon updating itself — then spent the full ten
+    /// seconds on "reconnecting", however healthy the daemon already was.
+    #[test]
+    fn a_stream_that_had_been_up_starts_the_backoff_over() {
+        // A daemon that is simply not there: keep climbing, and stop at the cap.
+        let mut b = BACKOFF_MIN;
+        for _ in 0..10 {
+            b = next_backoff(b, false, Duration::ZERO);
+        }
+        assert_eq!(b, BACKOFF_MAX, "a daemon that never answers has to back off");
+
+        // Then it answers, serves for a while, and goes — a restart. The next
+        // attempt is the *short* wait, not the ceiling this client had reached.
+        assert_eq!(
+            next_backoff(b, true, STABLE_STREAM),
+            BACKOFF_MIN,
+            "a restart under a long-open client must not inherit its backoff"
+        );
+    }
+
+    /// A daemon accepting and dropping in a loop is still a daemon to back off
+    /// from — resetting on the connection alone would spin at 250ms forever.
+    #[test]
+    fn a_flapping_daemon_still_backs_off() {
+        let short = STABLE_STREAM - Duration::from_millis(1);
+        assert_eq!(
+            next_backoff(BACKOFF_MIN, true, short),
+            BACKOFF_MIN * 2,
+            "connecting is not enough; it has to have stayed up"
+        );
+        // And a connect that failed outright never resets, however long it hung.
+        assert_eq!(next_backoff(BACKOFF_MIN, false, Duration::from_secs(60)), BACKOFF_MIN * 2);
     }
 }
