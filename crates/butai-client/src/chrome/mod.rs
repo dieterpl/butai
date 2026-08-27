@@ -143,27 +143,75 @@ pub struct StageDown<'a> {
     pub has_frame: bool,
 }
 
+/// One workspace on one machine, for BOOTH's fleet.
+///
+/// **Including the ones with nothing running in them.** The fleet used to be
+/// built by walking the agent list and emitting a header whenever the workspace
+/// changed, which meant a project with no agents produced no rows at all — so
+/// the one page listing every project on every machine could not show you the
+/// projects you had not started anything in, which are exactly the ones you
+/// want to start something in.
+#[derive(Debug, Clone, Copy)]
+pub struct SpaceRow<'a> {
+    pub name: &'a str,
+    /// Its id on its own daemon. What going there and spawning into it both
+    /// need: two machines routinely have a project of the same name open, so
+    /// the name is left to the drawing and this is what anything acting on it
+    /// resolves through — the same split [`AllAgentRow`] already makes.
+    pub id: SessionId,
+    pub daemon: usize,
+    /// This project's agents, as a window onto the fleet list.
+    ///
+    /// A slice rather than a count, because a folded row draws their sprites.
+    /// `all_agent_rows` walks daemons and then tabs in the order this list is
+    /// built in, so one project's agents are contiguous in it and this borrows
+    /// rather than copies.
+    pub agents: &'a [AllAgentRow<'a>],
+    /// Where those agents start in the fleet list — what an agent row's `sel`
+    /// is counted from.
+    pub first: usize,
+    /// The agent `a` starts here: the project's own `[agents] autostart`, then
+    /// the client's pin. `None` when neither names one and the picker is the
+    /// answer.
+    pub preferred: Option<&'a str>,
+    /// Its chip's index in the flattened tab bar.
+    ///
+    /// Carried rather than looked up, because going to a project and opening
+    /// its menu both need it and both would otherwise search the tab list by
+    /// id — the search this row already did. It is sound because the fleet and
+    /// the tab bar are built by walking daemons and then tabs in one order, so
+    /// this is that walk's running count.
+    pub tab: usize,
+}
+
 /// A row of the BOOTH page's fleet column.
 ///
 /// Headers are in the same list as agents so the painter and the hit-test walk
 /// one sequence and cannot disagree about which y is which row — the bug that
-/// every "draw it twice" list eventually has.
+/// every "draw it twice" list eventually has. It is also why folding lives in
+/// this list rather than in the drawing: a folded row is *absent* here, so
+/// nothing downstream needs to know it exists.
 #[derive(Debug, Clone, Copy)]
 pub enum BoothRow<'a> {
     Machine {
         label: &'a str,
         agents: usize,
         daemon: usize,
+        /// Its projects are hidden.
+        folded: bool,
     },
     Space {
-        name: &'a str,
+        space: SpaceRow<'a>,
+        /// The machine it is on, so a fold key and a route can be built from
+        /// the row without going back to the machine list for the label.
+        machine: &'a str,
+        /// Its agents are hidden, and it draws their sprites instead.
+        folded: bool,
     },
-    /// `sel` is the row's index among agents *only*, which is what
-    /// `all_agents_sel` counts and what `j`/`k` walk.
-    Agent {
-        row: AllAgentRow<'a>,
-        sel: usize,
-    },
+    /// `sel` is the row's index in the *fleet list* — what [`booth_tray`]'s
+    /// copies carry and what [`fleet_route`](crate::workbench) resolves.
+    /// The cursor counts rows of this list, not agents; see [`View::booth_sel`].
+    Agent { row: AllAgentRow<'a>, sel: usize },
 }
 
 /// Everything one paint reads.
@@ -185,6 +233,12 @@ pub struct Scene<'a> {
     /// Every agent on every connected daemon, for the ALL AGENTS panel and for
     /// the BOOTH page's fleet column — the same list at two sizes.
     pub all_agents: &'a [AllAgentRow<'a>],
+    /// Every workspace open on every connected daemon, for BOOTH's fleet.
+    ///
+    /// Beside `all_agents` rather than derived from it, because the fleet lists
+    /// the projects with nothing running in them too — and those are exactly the
+    /// ones the agent list cannot name. Empty on every other page.
+    pub spaces: &'a [SpaceRow<'a>],
     /// Every connected daemon and its telemetry, for the BOOTH page's compute
     /// column. Empty on every other page, which asks only `system` and only
     /// about the active tab's machine.
@@ -224,6 +278,7 @@ impl<'a> Scene<'a> {
             workspace: None,
             system,
             all_agents: &[],
+            spaces: &[],
             machines: &[],
             files: None,
             docs: None,
@@ -1979,6 +2034,19 @@ pub enum ListKind {
     /// 2!"` is the kind of thing that works until a badge changes shape.
     Space,
     SpawnAgent,
+    /// Spawn into a *named* workspace on a named daemon, rather than into the
+    /// tab the view happens to be on.
+    ///
+    /// BOOTH's fleet is a list of every project on every machine, so "the
+    /// active workspace" is the wrong workspace there by construction. It also
+    /// carries no `d`: pinning is a client-wide default, and pinning one
+    /// globally from *a project's* picker is a different act with the same
+    /// keystroke. A project that wants its own agent says so in its own
+    /// `.butai.toml`, which is where [`SpaceRow::preferred`] reads it from.
+    SpawnAgentIn {
+        daemon: usize,
+        workspace: SessionId,
+    },
     /// Check out the chosen branch. The current one is marked in the row and
     /// choosing it is a no-op the daemon shrugs off.
     Branch,
@@ -2192,6 +2260,83 @@ pub enum Focus {
     Stage,
 }
 
+/// What BOOTH has folded away, and which machines have their gauges out.
+///
+/// **Keyed by name, not by position.** A daemon's index in the connection list
+/// moves when an earlier host drops, and folding by index would hand the fold
+/// belonging to the machine that went away to whichever one took its slot.
+///
+/// It lives in the [`View`] and nowhere else. A fold is a view preference in
+/// exactly the sense the DIFF page's folds are, and neither is written to the
+/// config file: `Z` puts the whole fleet back to an index in one key, which is
+/// what persisting it would have bought.
+#[derive(Debug, Clone, Default)]
+pub struct Folds {
+    /// Machines whose projects are hidden, by label.
+    machines: BTreeSet<String>,
+    /// Projects whose agents are hidden, by machine label and workspace id.
+    ///
+    /// The pair, because an id is only unique on its own daemon and two
+    /// machines routinely have a project of the same name open — the same
+    /// reason [`AllAgentRow`] carries `workspace_id` beside the name.
+    spaces: BTreeSet<(String, SessionId)>,
+    /// Machines showing their whole SYSTEM gauge stack in COMPUTE, by label.
+    ///
+    /// The inverse sense of the other two: a machine is a summary row until it
+    /// is asked for, because the column's job is choosing between machines and
+    /// the gauges are what you look at once you have chosen.
+    expanded: BTreeSet<String>,
+}
+
+impl Folds {
+    pub fn machine_folded(&self, label: &str) -> bool {
+        self.machines.contains(label)
+    }
+
+    pub fn space_folded(&self, machine: &str, id: SessionId) -> bool {
+        self.spaces.contains(&(machine.to_string(), id))
+    }
+
+    pub fn machine_expanded(&self, label: &str) -> bool {
+        self.expanded.contains(label)
+    }
+
+    pub fn toggle_machine(&mut self, label: &str) {
+        toggle(&mut self.machines, label.to_string());
+    }
+
+    pub fn toggle_space(&mut self, machine: &str, id: SessionId) {
+        toggle(&mut self.spaces, (machine.to_string(), id));
+    }
+
+    pub fn toggle_expanded(&mut self, label: &str) {
+        toggle(&mut self.expanded, label.to_string());
+    }
+
+    /// Fold every project, or open every project — whichever leaves more of the
+    /// fleet visible than it is now. The DIFF page's `Z`, against a two-level
+    /// tree: it folds *projects* and leaves the machines open, because that is
+    /// the reading the key exists for — every machine, every project, what is
+    /// running in each, in one screen. Folding the machines as well would hide
+    /// the projects it is there to show you.
+    pub fn toggle_all_spaces(&mut self, every: &[(String, SessionId)]) {
+        if every.iter().all(|k| self.spaces.contains(k)) {
+            self.spaces.clear();
+        } else {
+            self.spaces = every.iter().cloned().collect();
+        }
+        self.machines.clear();
+    }
+}
+
+fn toggle<T: Ord>(set: &mut BTreeSet<T>, key: T) {
+    if set.contains(&key) {
+        set.remove(&key);
+    } else {
+        set.insert(key);
+    }
+}
+
 /// Everything about the view that belongs to *this* client — where the cursor
 /// is, what it is looking at, how wide it made the rails.
 ///
@@ -2204,8 +2349,20 @@ pub struct View {
     pub agent_sel: usize,
     pub proc_sel: usize,
     pub changes_sel: usize,
-    /// Cursor in BOOTH's FLEET list.
-    pub all_agents_sel: usize,
+    /// Cursor in BOOTH's FLEET list, as an index into the **visible** row list
+    /// [`booth_rows`] builds — machines and projects included, folded-away rows
+    /// excluded.
+    ///
+    /// It counted agents only, back when a header was a thing you could not put
+    /// a cursor on. Starting a session belongs to a project and going somewhere
+    /// belongs to a project, so the cursor has to be able to sit on one — and
+    /// the agent under the cursor is *derived* from the row rather than tracked
+    /// beside it, because two indices that have to agree are two indices that
+    /// eventually do not. [`booth_selected`] and [`booth_preview`] are the only
+    /// two readings of it.
+    pub booth_sel: usize,
+    /// What BOOTH has folded away, and which machines are showing their gauges.
+    pub folds: Folds,
     pub zen: bool,
     pub geom: RailGeom,
     /// Which interfaces the SYSTEM rail draws. Read from `[ui] net` and held
@@ -2236,6 +2393,10 @@ pub struct View {
     /// Its own offset rather than a cursor, because the column has nothing to
     /// select: it is read, not walked, so the wheel moves it and `j`/`k` stay
     /// with the fleet list where the selection lives.
+    ///
+    /// Still counted in machines rather than rows, so an expanded machine's
+    /// gauges cannot be scrolled to start halfway down the stack — the rule
+    /// that put a GPU under the wrong name.
     pub booth_compute_scroll: usize,
     /// A destructive git-menu row waiting on its confirm box.
     pub pending_menu_action: Option<crate::git_menu::GitAction>,
@@ -2298,7 +2459,8 @@ impl Default for View {
             agent_sel: 0,
             proc_sel: 0,
             changes_sel: 0,
-            all_agents_sel: 0,
+            booth_sel: 0,
+            folds: Folds::default(),
             zen: false,
 
             net: NetSelect::default(),
@@ -3189,28 +3351,88 @@ pub fn booth_columns(stage_box: LRect) -> BoothColumns {
 /// agents, and banding plus hysteresis only brought that to 169, because
 /// damping changes *when* a row moves and not *how far*. Attention
 /// is surfaced by [`booth_tray`] copying rows upward instead.
+///
+/// **Driven by the machine and project lists, not by the agents.** Walking the
+/// agents emitted a header only where one existed to sit above, so a machine
+/// with nothing open and a project with nothing running were both invisible —
+/// on the page whose whole job is showing you every machine and every project.
+/// Folding cannot reorder anything either, because a folded row is simply not
+/// emitted and the ones around it keep the positions they had.
 pub fn booth_rows<'a>(
-    all: &'a [AllAgentRow<'a>],
+    spaces: &'a [SpaceRow<'a>],
     machines: &'a [MachineRow<'a>],
+    folds: &Folds,
 ) -> Vec<BoothRow<'a>> {
     let mut out = Vec::new();
-    let mut d = None;
-    let mut space: Option<&str> = None;
-    for (sel, row) in all.iter().enumerate() {
-        if d != Some(row.daemon) {
-            d = Some(row.daemon);
-            space = None;
-            let label = machines.get(row.daemon).map(|m| m.label).unwrap_or("local");
-            let agents = all.iter().filter(|r| r.daemon == row.daemon).count();
-            out.push(BoothRow::Machine { label, agents, daemon: row.daemon });
+    for (daemon, m) in machines.iter().enumerate() {
+        let mine = spaces.iter().filter(|s| s.daemon == daemon);
+        let agents = mine.clone().map(|s| s.agents.len()).sum();
+        let folded = folds.machine_folded(m.label);
+        out.push(BoothRow::Machine { label: m.label, agents, daemon, folded });
+        if folded {
+            continue;
         }
-        if space != Some(row.workspace) {
-            space = Some(row.workspace);
-            out.push(BoothRow::Space { name: row.workspace });
+        for space in mine {
+            let folded = folds.space_folded(m.label, space.id);
+            out.push(BoothRow::Space { space: *space, machine: m.label, folded });
+            if folded {
+                continue;
+            }
+            for (i, row) in space.agents.iter().enumerate() {
+                out.push(BoothRow::Agent { row: *row, sel: space.first + i });
+            }
         }
-        out.push(BoothRow::Agent { row: *row, sel });
     }
     out
+}
+
+/// The agent the cursor is on, as an index into the fleet list — `None` when it
+/// is on a machine or a project.
+///
+/// The one reading of [`View::booth_sel`] that anything acting on an agent goes
+/// through: `x`, the row menu and `enter` all ask this rather than keeping an
+/// agent index of their own beside the cursor.
+pub fn booth_selected(rows: &[BoothRow<'_>], sel: usize) -> Option<usize> {
+    match rows.get(sel)? {
+        BoothRow::Agent { sel, .. } => Some(*sel),
+        _ => None,
+    }
+}
+
+/// The agent the middle column shows, as an index into the fleet list.
+///
+/// On an agent row, that agent. **On a project row, the agent in it that most
+/// needs you** — so walking the fleet is a fly-over of each project's screen
+/// rather than a cursor that keeps pointing the pane at somewhere it has left.
+/// A project with nothing running, and a machine row, preview nothing: there is
+/// no honest answer and the stage says so.
+///
+/// Ranked by [`tray_rank`] and stable, for the reason the tray is: the pick
+/// decides which of a project's screens you are shown, and one that re-broke
+/// its own ties every tick would flick between two agents while you read.
+pub fn booth_preview(rows: &[BoothRow<'_>], sel: usize) -> Option<usize> {
+    match rows.get(sel)? {
+        BoothRow::Agent { sel, .. } => Some(*sel),
+        BoothRow::Space { space, .. } => space
+            .agents
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, a)| tray_rank(a.agent).unwrap_or(u8::MAX))
+            .map(|(i, _)| space.first + i),
+        BoothRow::Machine { .. } => None,
+    }
+}
+
+/// Every project on every machine, as fold keys — what `Z` needs to decide
+/// whether it is folding or unfolding.
+pub fn booth_space_keys(
+    spaces: &[SpaceRow<'_>],
+    machines: &[MachineRow<'_>],
+) -> Vec<(String, SessionId)> {
+    spaces
+        .iter()
+        .filter_map(|s| machines.get(s.daemon).map(|m| (m.label.to_string(), s.id)))
+        .collect()
 }
 
 /// How loudly a tray row is asking, lowest first. `None` means it is not asking
@@ -3266,10 +3488,21 @@ pub fn booth_tray<'a>(all: &'a [AllAgentRow<'a>]) -> Vec<(usize, &'a AllAgentRow
 /// The per-row jump button on BOOTH's fleet list.
 pub const FLEET_OPEN_LABEL: &str = "[open]";
 
+/// A project row's start button, with no room to say what it starts.
+pub const FLEET_ADD_LABEL: &str = "[+]";
+
 /// The narrowest fleet column that can afford the button: enough for the
 /// sprite, a few columns of title and the label itself. Below it the row is all
 /// title and the two-step click is the only way, which is what it was before.
 const FLEET_OPEN_MIN_W: u16 = SPRITE_W as u16 + 8 + FLEET_OPEN_LABEL.len() as u16;
+
+/// Cells one level of the fleet's tree costs — a machine's projects sit under
+/// its mark, and its agents under theirs.
+const FLEET_INDENT: u16 = 2;
+
+/// The shortest a project's name gets before the row drops a field to its right
+/// rather than squeezing the name further.
+const FLEET_MIN_NAME: u16 = 6;
 
 /// Where `[open]` sits on a fleet row — right-aligned, and the same span the
 /// drawing and the hit-test both read.
@@ -3283,20 +3516,86 @@ pub fn fleet_open_span(area: LRect) -> Option<(u16, u16)> {
     Some((end.saturating_sub(FLEET_OPEN_LABEL.len() as u16), end))
 }
 
-/// Which fleet row is at `y`, as an *agent* index — the same number
-/// `view.all_agents_sel` holds.
+/// Everything a project row puts on screen, resolved once.
 ///
-/// Resolved through the identical scroll arithmetic the drawing uses, and
-/// against the same header-interleaved row list, because BOOTH's list is not a
-/// flat one: machine and workspace headers sit between the agents, so the
-/// row under the pointer and the selection index are different numbers and
-/// only this mapping relates them. A header resolves to `None` rather than to
-/// the agent above or below it — clicking a machine's name is not a request to
-/// open somebody's agent.
+/// The painter draws from this and the hit-test reads it, so a click cannot land
+/// on a field the row did not draw — the same reason the machine and project
+/// headers live in [`booth_rows`]' one sequence rather than being drawn on the
+/// side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceLayout {
+    /// The fold mark, `v` or `>`.
+    pub mark_x: u16,
+    /// The name — the span that goes to that workspace.
+    pub name: (u16, u16),
+    /// Where a folded row draws its agents' sprites, if it has room.
+    pub sprites: Option<(u16, u16)>,
+    /// The start button and what it says.
+    pub add: Option<((u16, u16), String)>,
+}
+
+/// Lay out one project row inside the fleet column.
+///
+/// Right to left, because everything on the right is a control and the name is
+/// the only thing that can be shortened without losing one. The start button
+/// names its agent when the row can spell it and falls back to `[+]` when it
+/// cannot — the AGENTS rail's own rule, for its own reason: a button that
+/// spawns on a single click with nothing in between is the only place you can
+/// see what that click is about to do.
+pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool) -> SpaceLayout {
+    let end = area.x + area.width;
+    let mark_x = area.x + FLEET_INDENT;
+    let name_x = mark_x + 2;
+    let floor = name_x + FLEET_MIN_NAME;
+
+    let full = space.preferred.map(|p| format!("[+ {p}]"));
+    let add = full
+        .filter(|l| end.saturating_sub(l.chars().count() as u16) > floor)
+        .or_else(|| {
+            (end.saturating_sub(FLEET_ADD_LABEL.len() as u16) > floor)
+                .then(|| FLEET_ADD_LABEL.to_string())
+        })
+        .map(|l| {
+            let w = l.chars().count() as u16;
+            ((end - w, end), l)
+        });
+
+    // The right edge of everything left of the button.
+    let right = add.as_ref().map(|((x, _), _)| *x).unwrap_or(end);
+
+    // A folded project draws its agents' sprites where its agent rows were.
+    // Three ASCII cells each and a space, which is the whole reason folding is
+    // affordable here: it costs you the titles and the buttons, not the states.
+    let sprites = (folded && !space.agents.is_empty())
+        .then(|| {
+            let cell = SPRITE_W as u16 + 1;
+            let room = right.saturating_sub(floor + 1);
+            let fits = (room / cell).min(space.agents.len() as u16);
+            (fits > 0).then(|| {
+                let w = fits * cell - 1;
+                (right - 1 - w, right - 1)
+            })
+        })
+        .flatten();
+
+    let name_end = sprites.map(|(x, _)| x).unwrap_or(right).saturating_sub(1).max(name_x);
+    SpaceLayout { mark_x, name: (name_x, name_end), sprites, add }
+}
+
+/// Which fleet row is at `y`, as an index into `rows`.
+///
+/// Resolved through the identical scroll arithmetic the drawing uses, against
+/// the identical row list, because BOOTH's list is not a flat one: machine and
+/// project rows sit between the agents, and folding takes rows out of it
+/// altogether. Both walk one sequence or neither can be trusted.
+///
+/// A machine or project row answers now, where it used to resolve to `None`.
+/// That is not the old rule being dropped — it is the cursor no longer being an
+/// agent index. What a press on one *means* is still decided per field, by
+/// [`space_layout`] and by [`fleet_open_span`].
 pub fn booth_fleet_row_at(
     cols: &BoothColumns,
-    all: &[AllAgentRow<'_>],
-    machines: &[MachineRow<'_>],
+    rows: &[BoothRow<'_>],
     sel: usize,
     x: u16,
     y: u16,
@@ -3305,18 +3604,9 @@ pub fn booth_fleet_row_at(
     if area.height == 0 || !area.contains(x, y) {
         return None;
     }
-    let rows = booth_rows(all, machines);
-    let visible = area.height as usize;
-    let cursor_at = rows
-        .iter()
-        .position(|r| matches!(r, BoothRow::Agent { sel: s, .. } if *s == sel))
-        .unwrap_or(0);
-    let first = scroll_for(cursor_at, visible, rows.len());
+    let first = scroll_for(sel, area.height as usize, rows.len());
     let i = first + (y - area.y) as usize;
-    match rows.get(i)? {
-        BoothRow::Agent { sel, .. } => Some(*sel),
-        _ => None,
-    }
+    (i < rows.len()).then_some(i)
 }
 
 /// Which agent the tray row at `y` is a copy *of* — an index into `all`, the
@@ -3375,8 +3665,9 @@ fn draw_booth_page(
 ) -> Painted {
     let cols = booth_columns(booth_area(width, geom));
     let focused = view.focus == Focus::AllAgents;
-    let rows = booth_rows(scene.all_agents, scene.machines);
+    let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
     let tray = booth_tray(scene.all_agents);
+    let preview = booth_preview(&rows, view.booth_sel);
     let mut out = Painted::default();
 
     // ---- fleet column ----
@@ -3415,7 +3706,7 @@ fn draw_booth_page(
                     // The tray holds copies, so it highlights the *selected
                     // agent's* copy rather than owning a cursor of its own —
                     // otherwise every waiting agent is two things you can select.
-                    let bg = theme.row_bg(*idx == view.all_agents_sel && focused);
+                    let bg = theme.row_bg(Some(*idx) == preview && focused);
                     fill_row(buf, area.x, y, bound, bg);
                     put_str(buf, area.x, y, &sprite, bound, Pen::new(color, bg));
                     let where_ = match row.host {
@@ -3450,71 +3741,122 @@ fn draw_booth_page(
             draw_section_sep(buf, cols.fleet_box, cols.fleet_sep, &label, color, theme.ground);
         }
 
-        // The fleet list, scrolled to keep the cursor in view. The cursor counts
-        // agents, so it is mapped back onto this header-interleaved list.
+        // The fleet list, scrolled to keep the cursor in view. The cursor is an
+        // index into this list, folds included, so there is nothing to map.
         let area = cols.fleet_rows;
         if area.height > 0 {
             let visible = area.height as usize;
-            let cursor_at = rows
-                .iter()
-                .position(
-                    |r| matches!(r, BoothRow::Agent { sel, .. } if *sel == view.all_agents_sel),
-                )
-                .unwrap_or(0);
-            let first = scroll_for(cursor_at, visible, rows.len());
+            let first = scroll_for(view.booth_sel, visible, rows.len());
             let bound = area.x + area.width;
             for (i, row) in rows.iter().skip(first).take(visible).enumerate() {
                 let y = area.y + i as u16;
+                let cursor = first + i == view.booth_sel && focused;
                 match row {
-                    BoothRow::Machine { label, agents, .. } => {
-                        fill_row(buf, area.x, y, bound, theme.ground);
+                    BoothRow::Machine { label, agents, folded, .. } => {
+                        let bg = theme.row_bg(cursor);
+                        fill_row(buf, area.x, y, bound, bg);
                         let n = agents.to_string();
                         let nw = n.chars().count() as u16;
+                        put_str(
+                            buf,
+                            area.x,
+                            y,
+                            if *folded { ">" } else { "v" },
+                            bound,
+                            Pen::new(theme.faint, bg),
+                        );
+                        let name_x = area.x + FLEET_INDENT;
                         let (text, moving) = marquee(
                             label,
-                            bound.saturating_sub(area.x + nw + 1) as usize,
+                            bound.saturating_sub(name_x + nw + 1) as usize,
                             view.tick,
                         );
                         out.wants_anim |= moving;
                         put_str(
                             buf,
-                            area.x,
+                            name_x,
                             y,
                             &text,
                             bound.saturating_sub(nw),
-                            Pen::new(theme.ink, theme.ground),
+                            Pen::new(theme.ink, bg),
                         );
+                        // A machine with nothing open says so where its count
+                        // goes. It is the machine you most want to know is
+                        // there — and a bare `0` reads as a machine that lost
+                        // its agents rather than one you have not opened.
+                        let (text, fg) = match agents {
+                            0 => ("nothing open".to_string(), theme.faint),
+                            _ => (n, theme.faint),
+                        };
+                        let w = text.chars().count() as u16;
+                        put_str(buf, bound.saturating_sub(w), y, &text, bound, Pen::new(fg, bg));
+                    }
+                    BoothRow::Space { space, folded, .. } => {
+                        let bg = theme.row_bg(cursor);
+                        fill_row(buf, area.x, y, bound, bg);
+                        let l = space_layout(area, space, *folded);
                         put_str(
                             buf,
-                            bound.saturating_sub(nw),
+                            l.mark_x,
                             y,
-                            &n,
+                            if *folded { ">" } else { "v" },
                             bound,
-                            Pen::new(theme.faint, theme.ground),
+                            Pen::new(theme.faint, bg),
                         );
-                    }
-                    BoothRow::Space { name } => {
-                        fill_row(buf, area.x, y, bound, theme.ground);
+                        let (nx, ne) = l.name;
                         let (text, moving) =
-                            marquee(name, bound.saturating_sub(area.x + 1) as usize, view.tick);
+                            marquee(space.name, ne.saturating_sub(nx) as usize, view.tick);
                         out.wants_anim |= moving;
-                        put_str(
-                            buf,
-                            area.x + 1,
-                            y,
-                            &text,
-                            bound,
-                            Pen::new(theme.muted, theme.ground),
-                        );
+                        // The name is brighter than a header used to be,
+                        // because it is now the thing you press to go there.
+                        put_str(buf, nx, y, &text, ne, Pen::new(theme.ink, bg));
+                        match l.sprites {
+                            Some((sx, se)) => {
+                                let mut x = sx;
+                                for a in space.agents {
+                                    if x + SPRITE_W as u16 > se {
+                                        break;
+                                    }
+                                    let (sprite, color, animating) =
+                                        sprite_for(a.agent, view.fast_tick, theme);
+                                    out.wants_fast_anim |= animating;
+                                    put_str(buf, x, y, &sprite, se, Pen::new(color, bg));
+                                    x += SPRITE_W as u16 + 1;
+                                }
+                            }
+                            // Nothing running, and nothing folded away either:
+                            // say which, because an empty row reads as a row
+                            // still loading.
+                            None if space.agents.is_empty() => {
+                                let room = ne.saturating_sub(nx) as usize;
+                                let used = space.name.chars().count().min(room) as u16;
+                                let x = nx + used + 1;
+                                put_str(
+                                    buf,
+                                    x,
+                                    y,
+                                    &ellipsize("no agents", ne.saturating_sub(x) as usize),
+                                    ne,
+                                    Pen::new(theme.faint, bg),
+                                );
+                            }
+                            None => {}
+                        }
+                        if let Some(((ax, ae), label)) = &l.add {
+                            // Brighter on the row the cursor is on, for the
+                            // reason `[open]` is: the one that answers `a` is
+                            // the one that should look pressable.
+                            let ink = if cursor { theme.accent } else { theme.faint };
+                            put_str(buf, *ax, y, label, *ae, Pen::new(ink, bg));
+                        }
                     }
-                    BoothRow::Agent { row, sel } => {
+                    BoothRow::Agent { row, .. } => {
                         let (sprite, color, animating) =
                             sprite_for(row.agent, view.fast_tick, theme);
                         out.wants_fast_anim |= animating;
-                        let cursor = *sel == view.all_agents_sel && focused;
                         let bg = theme.row_bg(cursor);
                         fill_row(buf, area.x, y, bound, bg);
-                        let x = area.x + 1;
+                        let x = area.x + FLEET_INDENT * 2;
                         put_str(buf, x, y, &sprite, bound, Pen::new(color, bg));
                         // `[open]` is right-aligned and the title stops short of
                         // it, so a long title cannot run under the button and
@@ -3553,7 +3895,7 @@ fn draw_booth_page(
     // Titled with the machine as well as the agent. Two projects routinely run
     // an agent of the same name, and on this page the two are one row apart, so
     // an unqualified title is how you type into the wrong host's pane.
-    let selected = scene.all_agents.get(view.all_agents_sel);
+    let selected = preview.and_then(|i| scene.all_agents.get(i));
     let title = match selected {
         Some(r) => {
             let machine = scene.machines.get(r.daemon).map(|m| m.label).unwrap_or("local");
@@ -3572,67 +3914,190 @@ fn draw_booth_page(
     // ---- compute column ----
     if cols.compute_box.width > 0 {
         draw_box(buf, cols.compute_box, " COMPUTE ", theme.rule, theme.ground);
-        let area = cols.compute_rows;
-        let bound = area.x + area.width;
-        // A name, then two rows per gauge. The column scrolls as a whole,
-        // because a machine is a block and splitting one across the fold would
-        // put a GPU under the wrong name.
-        let mut y = area.y;
-        let bottom = area.y + area.height;
-        for (i, m) in scene.machines.iter().enumerate().skip(view.booth_compute_scroll) {
-            if y >= bottom {
-                break;
-            }
-            // A machine that is away says so where its agent count goes, and
-            // its whole row drops to `faint`. Both halves are needed: the word
-            // is what you read, and the colour is what you notice without
-            // reading — these gauges go on animating from the last telemetry
-            // the machine sent, and a moving trace is a strong claim to be
-            // alive.
-            let n = if m.live { format!("{} agents", m.agents) } else { "away".to_string() };
-            let nw = n.chars().count() as u16;
-            let (text, moving) =
-                marquee(m.label, bound.saturating_sub(area.x + nw + 1) as usize, view.tick);
-            out.wants_anim |= moving;
-            put_str(
-                buf,
-                area.x,
-                y,
-                &text,
-                bound.saturating_sub(nw),
-                Pen::new(if m.live { theme.ink } else { theme.faint }, theme.ground),
-            );
-            put_str(
-                buf,
-                bound.saturating_sub(nw),
-                y,
-                &n,
-                bound,
-                Pen::new(if m.live { theme.faint } else { theme.attention }, theme.ground),
-            );
-            y += 1;
-            // The same gauges the SYSTEM rail draws, against this machine's own
-            // telemetry. One renderer, so the two cannot drift.
-            let gauges = LRect::new(area.x, y, area.width, bottom.saturating_sub(y));
-            if gauges.height > 0 {
-                // The renderer's own answer, not a recomputation: this
-                // arithmetic was `2 + gpus` back when a gauge was one row and
-                // network did not exist, then `n * GAUGE_H` until the network
-                // gauge stopped being the same height as the rest. Every version
-                // of it could disagree with what was drawn; asking cannot. It
-                // already stops on whole gauges, which is what keeps the next
-                // machine's name off the previous one's trace.
-                let gs = system_gauges(m.sys, &view.net, &view.disks);
-                y += draw_system(buf, gauges, m.sys, &gs, theme);
-            }
-            // A blank row between machines, except after the last.
-            if i + 1 < scene.machines.len() {
-                y += 1;
-            }
-        }
+        out.wants_anim |= draw_compute(buf, cols.compute_rows, scene.machines, view, theme);
     }
 
     out
+}
+
+/// Cells the level meter takes on a COMPUTE summary row.
+const COMPUTE_METER_W: u16 = 6;
+
+/// The shortest a machine's name is allowed to get before the row starts
+/// dropping the fields to its right instead of squeezing it further.
+const COMPUTE_MIN_NAME: u16 = 6;
+
+/// Rows one machine takes in COMPUTE.
+///
+/// One, until it is expanded: then its summary, its whole gauge stack, and a
+/// blank to keep the next machine's name off the last trace. The drawing and
+/// the hit test both ask this rather than each doing the arithmetic, which is
+/// the same discipline `draw_system` returning its own row count already keeps.
+pub fn compute_machine_h(m: &MachineRow<'_>, view: &View) -> u16 {
+    if !view.folds.machine_expanded(m.label) {
+        return 1;
+    }
+    1 + system_rows_used(&system_gauges(m.sys, &view.net, &view.disks)) + 1
+}
+
+/// Which machine's block contains `y`, as an index into `machines`.
+///
+/// Answers for the gauge rows as well as the summary, because a press on a
+/// machine's own trace meaning nothing — while the name one row up folds it —
+/// is a dead zone the pointer has no way to know about.
+pub fn booth_compute_machine_at(
+    cols: &BoothColumns,
+    machines: &[MachineRow<'_>],
+    view: &View,
+    x: u16,
+    y: u16,
+) -> Option<usize> {
+    let area = cols.compute_rows;
+    if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+        return None;
+    }
+    let mut top = area.y;
+    for (i, m) in machines.iter().enumerate().skip(view.booth_compute_scroll) {
+        let h = compute_machine_h(m, view);
+        if y < top + h {
+            return Some(i);
+        }
+        top += h;
+    }
+    None
+}
+
+/// COMPUTE: one row per machine, and the gauges under whichever ones are open.
+///
+/// The column used to draw the SYSTEM rail's whole stack per machine, which is
+/// twelve to twenty rows for a workstation — right for the rail, which describes
+/// the one machine you are working on, and wrong here, where the question is
+/// which of four machines is in trouble and the answer did not fit on screen.
+///
+/// So a machine is a line: what it is, how many agents it is running, and
+/// [`machine_pressure`] — the worst of its four readings, named. Nothing is
+/// lost, because `z` expands one back to the stack, drawn by the same
+/// [`draw_system`] the rail uses.
+///
+/// Returns whether anything is marquee-scrolling.
+fn draw_compute(
+    buf: &mut Buffer,
+    area: LRect,
+    machines: &[MachineRow<'_>],
+    view: &View,
+    theme: &Theme,
+) -> bool {
+    let mut anim = false;
+    let bottom = area.y + area.height;
+    let mut y = area.y;
+
+    for m in machines.iter().skip(view.booth_compute_scroll) {
+        if y >= bottom {
+            break;
+        }
+        let expanded = view.folds.machine_expanded(m.label);
+        anim |= draw_compute_summary(buf, area, y, m, expanded, view, theme);
+        y += 1;
+        if !expanded {
+            continue;
+        }
+        // Indented, so the block visibly belongs to the name above it rather
+        // than reading as four more machines.
+        let gauges =
+            LRect::new(area.x + 2, y, area.width.saturating_sub(2), bottom.saturating_sub(y));
+        if gauges.height > 0 {
+            // The renderer's own answer, not a recomputation: this arithmetic
+            // was `2 + gpus` back when a gauge was one row and network did not
+            // exist, then `n * GAUGE_H` until the network gauge stopped being
+            // the same height as the rest. Every version of it could disagree
+            // with what was drawn; asking cannot. It already stops on whole
+            // gauges, which is what keeps the next machine's name off the
+            // previous one's trace.
+            let gs = system_gauges(m.sys, &view.net, &view.disks);
+            y += draw_system(buf, gauges, m.sys, &gs, theme);
+        }
+        y += 1;
+    }
+    anim
+}
+
+/// One machine's line: `v local     4 ███░░░ CPU 41%`.
+///
+/// Laid out from the right, because every field on that side is a reading and
+/// the name is the one thing that can be shortened without losing a fact. When
+/// even that runs out the fields drop outward-in — the meter first, since it is
+/// the percentage drawn twice, then the agent count. The reading itself never
+/// goes: a row that cannot say how loaded a machine is has no reason to exist.
+fn draw_compute_summary(
+    buf: &mut Buffer,
+    area: LRect,
+    y: u16,
+    m: &MachineRow<'_>,
+    expanded: bool,
+    view: &View,
+    theme: &Theme,
+) -> bool {
+    let bound = area.x + area.width;
+    fill_row(buf, area.x, y, bound, theme.ground);
+
+    // A machine that is away keeps its last agent count out of the row and says
+    // the word instead, in the colour you notice without reading. Its gauges
+    // would go on animating from telemetry nobody is taking any more, and a
+    // moving trace is a strong claim to be alive — so there is no meter either.
+    let (value, value_fg) = match m.live {
+        true => {
+            let p = machine_pressure(m.sys, &view.disks);
+            (format!("{} {:>3.0}%", p.label, p.pct), theme.role(load_role(p.pct)))
+        }
+        false => ("away".to_string(), theme.attention),
+    };
+    let vw = value.chars().count() as u16;
+    let value_x = bound.saturating_sub(vw);
+    put_str(buf, value_x, y, &value, bound, Pen::new(value_fg, theme.ground));
+
+    let name_x = area.x + 2;
+    let mut next = value_x; // left edge of the leftmost right-hand field so far
+
+    if m.live && next >= name_x + COMPUTE_MIN_NAME + COMPUTE_METER_W + 2 {
+        let p = machine_pressure(m.sys, &view.disks);
+        let meter_x = next - 1 - COMPUTE_METER_W;
+        draw_meter(buf, meter_x, y, COMPUTE_METER_W, p.pct, theme.role(load_role(p.pct)), theme);
+        next = meter_x;
+    }
+
+    let count = if m.live { m.agents.to_string() } else { "·".to_string() };
+    let cw = count.chars().count() as u16;
+    if next > name_x + COMPUTE_MIN_NAME + cw {
+        let count_x = next - 1 - cw;
+        put_str(buf, count_x, y, &count, next, Pen::new(theme.faint, theme.ground));
+        next = count_x;
+    }
+
+    let mark = if expanded { "v" } else { ">" };
+    put_str(buf, area.x, y, mark, bound, Pen::new(theme.faint, theme.ground));
+    let room = next.saturating_sub(name_x).saturating_sub(1);
+    let (text, moving) = marquee(m.label, room as usize, view.tick);
+    put_str(
+        buf,
+        name_x,
+        y,
+        &text,
+        next,
+        Pen::new(if m.live { theme.ink } else { theme.faint }, theme.ground),
+    );
+    moving
+}
+
+/// A level meter: `cells` wide, filled in proportion to `pct`.
+///
+/// Filled cells only. The empty half is the plot ground [`gauge_trace`] already
+/// draws its traces on, so a meter and a trace read as the same kind of object
+/// instead of one of them being written in a second alphabet.
+fn draw_meter(buf: &mut Buffer, x: u16, y: u16, cells: u16, pct: f32, color: Color, theme: &Theme) {
+    fill_row(buf, x, y, x + cells, theme.surface);
+    let filled = ((pct / 100.0) * cells as f32).round().clamp(0.0, cells as f32) as usize;
+    let bar: String = std::iter::repeat_n('█', filled).collect();
+    put_str(buf, x, y, &bar, x + cells, Pen::new(color, theme.surface));
 }
 
 /// Paint one row's background across a span.
@@ -4883,6 +5348,71 @@ pub fn system_gauges(sys: &SysDto, net: &NetSelect, disks: &DiskSelect) -> Vec<G
     g.extend(net_ifaces(sys, net).into_iter().map(Gauge::Net));
     g.extend(disk_mounts(sys, disks).into_iter().map(Gauge::Disk));
     g
+}
+
+/// The one reading that answers "is this machine in trouble".
+///
+/// **Not the CPU.** A box at 30% CPU with a full root filesystem is in trouble
+/// and its CPU number says it is fine, so this is the *worst* of the four things
+/// that can run out — and it carries which one it was, because "97%" without a
+/// name is a number you have to go and investigate.
+///
+/// COMPUTE draws this and nothing else per machine. The SYSTEM rail still draws
+/// every gauge, and that is the right division: the rail describes the one
+/// machine you are working on, and this column exists to choose between four.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pressure {
+    /// The SYSTEM rail's own label for whatever won — `CPU`, `RAM`, `GPU`,
+    /// `DSK`. Three cells every time, so the reading beside it lands in one
+    /// column down the whole list rather than shifting per row.
+    pub label: &'static str,
+    pub pct: f32,
+}
+
+/// A used/total pair as a percentage, with a zero total reading as zero rather
+/// than as a division by it. A machine that reports no RAM has not run out.
+fn pct_of(used: f32, total: f32) -> f32 {
+    if total > 0.0 {
+        used / total * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// The worst-off resource on a machine.
+///
+/// Ties go to whichever comes first in CPU, RAM, GPU, disk order — a strict
+/// `>`, so a machine sitting at exactly 40% everywhere reports its CPU every
+/// tick instead of flickering between four labels that are all equally true.
+///
+/// Disks are filtered through [`disk_mounts`], not read raw: which mounts count
+/// is a configured choice, and a machine whose rail deliberately shows only `/`
+/// must not be reported as full because of a snap loopback the user already
+/// said they did not care about.
+///
+/// A GPU contributes the worse of its utilisation and its memory. Both are ways
+/// for it to be unavailable to the next agent you start.
+pub fn machine_pressure(sys: &SysDto, disks: &DiskSelect) -> Pressure {
+    let gpu = sys
+        .gpus
+        .iter()
+        .map(|g| g.pct.max(pct_of(g.mem_used_gb, g.mem_total_gb)))
+        .fold(f32::NEG_INFINITY, f32::max);
+    let dsk = disk_mounts(sys, disks)
+        .into_iter()
+        .filter_map(|i| sys.disks.get(i))
+        .map(|d| pct_of(d.used_gb, d.total_gb))
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let mut worst = Pressure { label: "CPU", pct: sys.cpu_pct };
+    for (label, pct) in
+        [("RAM", pct_of(sys.ram_used_gb, sys.ram_total_gb)), ("GPU", gpu), ("DSK", dsk)]
+    {
+        if pct > worst.pct {
+            worst = Pressure { label, pct };
+        }
+    }
+    worst
 }
 
 /// Rows one gauge takes. Not a constant any more: the network gauge draws a
@@ -6905,6 +7435,34 @@ mod tests {
             .collect()
     }
 
+    /// The projects behind [`booth_fleet`], as the fleet column assembles them:
+    /// two on `local`, one on `gpu-box`, and `notes` — open with nothing running
+    /// in it, which is the row the agent list cannot produce and the reason the
+    /// fleet is built from the tab list instead.
+    fn booth_spaces<'a>(all: &'a [AllAgentRow<'a>]) -> Vec<SpaceRow<'a>> {
+        let mut tab = 0;
+        let mut space = |name, id, daemon, first, n: usize, preferred| {
+            tab += 1;
+            SpaceRow {
+                name,
+                id: SessionId(id),
+                daemon,
+                agents: &all[first..first + n],
+                first,
+                preferred,
+                tab: tab - 1,
+            }
+        };
+        vec![
+            space("butai", 1, 0, 0, 2, Some("claude")),
+            space("caliper", 2, 0, 2, 1, Some("claude")),
+            space("notes", 3, 0, 3, 0, Some("codex")),
+            // Same id as `butai`, on the other machine — which is why a fold key
+            // is a machine *and* an id, and never an id alone.
+            space("diffusion", 1, 1, 3, 1, None),
+        ]
+    }
+
     fn machines<'a>(sys: &'a SysDto, all: &[AllAgentRow<'a>]) -> Vec<MachineRow<'a>> {
         ["local", "gpu-box"]
             .iter()
@@ -6937,16 +7495,9 @@ mod tests {
         let all = booth_fleet(&calm);
         let sys = SysDto::default();
         let ms = machines(&sys, &all);
-        let shape = |rows: &[BoothRow<'_>]| -> Vec<String> {
-            rows.iter()
-                .map(|r| match r {
-                    BoothRow::Machine { label, .. } => format!("machine:{label}"),
-                    BoothRow::Space { name } => format!("space:{name}"),
-                    BoothRow::Agent { row, sel } => format!("agent:{}:{sel}", row.agent.title),
-                })
-                .collect()
-        };
-        let before = shape(&booth_rows(&all, &ms));
+        let spaces = booth_spaces(&all);
+        let open = Folds::default();
+        let before = shape(&booth_rows(&spaces, &ms, &open));
         assert_eq!(
             before,
             vec![
@@ -6956,6 +7507,9 @@ mod tests {
                 "agent:codex:1",
                 "space:caliper",
                 "agent:aider:2",
+                // Open, empty, and on the list anyway — the whole reason the
+                // rows come from the projects rather than from the agents.
+                "space:notes",
                 "machine:gpu-box",
                 "space:diffusion",
                 "agent:gemini:3",
@@ -6972,7 +7526,20 @@ mod tests {
         ];
         let all2 = booth_fleet(&stirred);
         let ms2 = machines(&sys, &all2);
-        assert_eq!(shape(&booth_rows(&all2, &ms2)), before, "state changed the order");
+        let spaces2 = booth_spaces(&all2);
+        assert_eq!(shape(&booth_rows(&spaces2, &ms2, &open)), before, "state changed the order");
+    }
+
+    /// What the rows say, as one string apiece — the shape both order tests and
+    /// both fold tests compare.
+    fn shape(rows: &[BoothRow<'_>]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r {
+                BoothRow::Machine { label, .. } => format!("machine:{label}"),
+                BoothRow::Space { space, .. } => format!("space:{}", space.name),
+                BoothRow::Agent { row, sel } => format!("agent:{}:{sel}", row.agent.title),
+            })
+            .collect()
     }
 
     /// The tray *copies* the waiting agents upward and leaves the originals
@@ -6996,7 +7563,7 @@ mod tests {
         // And the fleet list still has all four, in their original places.
         let sys = SysDto::default();
         let ms = machines(&sys, &all);
-        let seats: Vec<usize> = booth_rows(&all, &ms)
+        let seats: Vec<usize> = booth_rows(&booth_spaces(&all), &ms, &Folds::default())
             .iter()
             .filter_map(|r| match r {
                 BoothRow::Agent { sel, .. } => Some(*sel),
@@ -7004,6 +7571,202 @@ mod tests {
             })
             .collect();
         assert_eq!(seats, vec![0, 1, 2, 3], "a copied agent left its seat");
+    }
+
+    /// A fold takes a group's children out of the list and moves nothing else.
+    ///
+    /// That is the whole safety property: the order is a pure function of
+    /// identity, and folding must be a *filter* over it rather than a second
+    /// ordering. Mutation-checked by the last assertion — rebuild the unfolded
+    /// list and it is byte-identical to the one before any of this.
+    #[test]
+    fn folding_removes_rows_and_reorders_nothing() {
+        let agents = [
+            agent(1, "claude", AgentState::Idle),
+            agent(2, "codex", AgentState::Idle),
+            agent(3, "aider", AgentState::Idle),
+            agent(4, "gemini", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let mut folds = Folds::default();
+        let open = shape(&booth_rows(&spaces, &ms, &folds));
+
+        // One project. Its agents go; every other row stays where it was.
+        folds.toggle_space("local", SessionId(1));
+        let one = shape(&booth_rows(&spaces, &ms, &folds));
+        assert_eq!(
+            one,
+            vec![
+                "machine:local",
+                "space:butai",
+                "space:caliper",
+                "agent:aider:2",
+                "space:notes",
+                "machine:gpu-box",
+                "space:diffusion",
+                "agent:gemini:3",
+            ]
+        );
+
+        // The same id on the other machine is a different project, and folding
+        // one must not fold the other. This is why a fold key is a machine and
+        // an id rather than an id alone.
+        assert!(one.contains(&"agent:gemini:3".to_string()), "folded across machines: {one:?}");
+
+        // A machine takes its projects with it.
+        folds.toggle_machine("local");
+        assert_eq!(
+            shape(&booth_rows(&spaces, &ms, &folds)),
+            vec!["machine:local", "machine:gpu-box", "space:diffusion", "agent:gemini:3"]
+        );
+
+        // And unfolding is exactly the inverse.
+        folds.toggle_machine("local");
+        folds.toggle_space("local", SessionId(1));
+        assert_eq!(shape(&booth_rows(&spaces, &ms, &folds)), open, "unfolding did not restore");
+    }
+
+    /// `Z` folds every project and leaves the machines open — the index view.
+    ///
+    /// Folding the machines too would hide the projects the key exists to show
+    /// you, and it is the second press that has to be right as well: the DIFF
+    /// page's rule is "whichever leaves more visible", so a half-folded fleet
+    /// folds the rest rather than opening what is already shut.
+    #[test]
+    fn fold_all_leaves_an_index_of_every_machine_and_project() {
+        let agents = [
+            agent(1, "claude", AgentState::Idle),
+            agent(2, "codex", AgentState::Idle),
+            agent(3, "aider", AgentState::Idle),
+            agent(4, "gemini", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let keys = booth_space_keys(&spaces, &ms);
+
+        let mut folds = Folds::default();
+        folds.toggle_all_spaces(&keys);
+        let index = shape(&booth_rows(&spaces, &ms, &folds));
+        assert_eq!(
+            index,
+            vec![
+                "machine:local",
+                "space:butai",
+                "space:caliper",
+                "space:notes",
+                "machine:gpu-box",
+                "space:diffusion",
+            ],
+            "Z should leave every machine and every project, and no agents"
+        );
+
+        // Pressing it again opens everything.
+        folds.toggle_all_spaces(&keys);
+        assert!(
+            shape(&booth_rows(&spaces, &ms, &folds)).iter().any(|r| r.starts_with("agent:")),
+            "a second Z should open the fleet back up"
+        );
+
+        // From half-folded it folds the rest, rather than opening the one shut
+        // project — more of the fleet ends up visible either way, and this is
+        // the direction that gets you the index in one press.
+        folds.toggle_space("local", SessionId(1));
+        folds.toggle_all_spaces(&keys);
+        assert_eq!(shape(&booth_rows(&spaces, &ms, &folds)), index);
+    }
+
+    /// A project row previews the agent in it that most needs you, and an empty
+    /// one previews nothing.
+    ///
+    /// This is what makes walking the fleet a fly-over of each project rather
+    /// than a cursor that keeps pointing the pane somewhere it has left.
+    #[test]
+    fn a_project_row_previews_the_agent_that_most_needs_you() {
+        let agents = [
+            agent(1, "claude", AgentState::Idle),
+            // Second in the project, and the one that is asking.
+            agent(2, "codex", AgentState::Waiting),
+            agent(3, "aider", AgentState::Working),
+            agent(4, "gemini", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let rows = booth_rows(&spaces, &ms, &Folds::default());
+
+        let row_of = |name: &str| {
+            rows.iter().position(|r| shape(std::slice::from_ref(r))[0] == name).expect(name)
+        };
+        assert_eq!(booth_preview(&rows, row_of("space:butai")), Some(1), "codex is the one asking");
+        assert_eq!(booth_preview(&rows, row_of("agent:claude:0")), Some(0), "an agent is itself");
+        assert_eq!(booth_preview(&rows, row_of("space:notes")), None, "nothing to preview");
+        assert_eq!(
+            booth_preview(&rows, row_of("machine:local")),
+            None,
+            "a machine is not a screen"
+        );
+
+        // The cursor's own reading is stricter: `x` and the row menu act on an
+        // agent, and a project row is not one however good its preview is.
+        assert_eq!(booth_selected(&rows, row_of("space:butai")), None);
+        assert_eq!(booth_selected(&rows, row_of("agent:codex:1")), Some(1));
+    }
+
+    /// COMPUTE names the *worst* reading on a machine, not the CPU.
+    ///
+    /// A box at 30% CPU with a full root filesystem is in trouble and its CPU
+    /// number says it is fine. Mutation-checked by every arm: take away the
+    /// comparison and each of these reports `CPU`.
+    #[test]
+    fn machine_pressure_names_whichever_resource_is_worst() {
+        let disks = DiskSelect::Mode(DiskMode::Auto);
+        let base =
+            SysDto { cpu_pct: 30.0, ram_used_gb: 4.0, ram_total_gb: 32.0, ..Default::default() };
+
+        let p = machine_pressure(&base, &disks);
+        assert_eq!((p.label, p.pct as u32), ("CPU", 30), "nothing else is close");
+
+        let hot_ram = SysDto { ram_used_gb: 30.0, ..base.clone() };
+        assert_eq!(machine_pressure(&hot_ram, &disks).label, "RAM");
+
+        let full = DiskDto {
+            mount: "/".into(),
+            source: "/dev/nvme0n1p2".into(),
+            fstype: "ext4".into(),
+            kind: DiskKind::Local,
+            used_gb: 96.0,
+            total_gb: 100.0,
+            stale: false,
+        };
+        let full_disk = SysDto { disks: vec![full], ..base.clone() };
+        let p = machine_pressure(&full_disk, &disks);
+        assert_eq!((p.label, p.pct as u32), ("DSK", 96));
+
+        // A GPU contributes the worse of its two ways of being unavailable.
+        let busy_gpu = SysDto {
+            gpus: vec![butai_protocol::api::GpuDto {
+                pct: 5.0,
+                mem_used_gb: 23.0,
+                mem_total_gb: 24.0,
+                hist: Vec::new(),
+                name: String::new(),
+                temp_c: None,
+                power_w: None,
+            }],
+            ..base.clone()
+        };
+        assert_eq!(machine_pressure(&busy_gpu, &disks).label, "GPU", "full memory is unavailable");
+
+        // A machine that reports no RAM has not run out of it.
+        let empty =
+            SysDto { cpu_pct: 1.0, ram_used_gb: 0.0, ram_total_gb: 0.0, ..Default::default() };
+        assert_eq!(machine_pressure(&empty, &disks).label, "CPU");
     }
 
     /// A turn that landed while you were away belongs in the tray; the same turn
@@ -7133,23 +7896,48 @@ mod tests {
         let ms = machines(&sys, &all);
         let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
         let mut b = buf(160, 40);
-        let scene = Scene { machines: &ms, ..scene(&[], None, &sys, &all) };
+        let spaces = booth_spaces(&all);
+        let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
         draw(&mut b, 160, 40, &scene, &view, &Theme::default());
         let screen: String = (0..40).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n");
 
         assert!(screen.contains("FLEET (4)"), "{screen}");
-        // Grouped: both machines and all three workspaces are headers.
-        for want in ["local", "gpu-box", "butai", "caliper", "diffusion"] {
+        // Grouped: both machines and every project, including the empty one.
+        for want in ["local", "gpu-box", "butai", "caliper", "diffusion", "notes"] {
             assert!(screen.contains(want), "`{want}` missing from:\n{screen}");
         }
+        // A project with nothing in it says so, and still offers to start one.
+        assert!(screen.contains("no agents"), "{screen}");
+        assert!(screen.contains("[+ codex]"), "notes names its own agent:\n{screen}");
         // The tray counts what is waiting, and says so where a count belongs.
         assert!(screen.contains("NEEDS YOU (2)"), "{screen}");
-        // The stage names the selected agent *and* its machine, because two
+        // The stage names the previewed agent *and* its machine, because two
         // machines may run an agent of the same name one row apart.
-        assert!(screen.contains("claude · local:butai"), "{screen}");
-        // Compute is per machine, so the column carries both names and gauges.
+        //
+        // Row 1 is the `butai` project, and a project previews the agent in it
+        // that most needs you — `codex`, which is waiting, rather than `claude`,
+        // which is merely first. That is the whole of what a project row means
+        // in the middle column.
+        let on_project = View { booth_sel: 1, ..view.clone() };
+        let mut b2 = buf(160, 40);
+        draw(&mut b2, 160, 40, &scene, &on_project, &Theme::default());
+        let screen2: String = (0..40).map(|y| text_of(&b2, y)).collect::<Vec<_>>().join("\n");
+        assert!(screen2.contains("codex · local:butai"), "{screen2}");
+
+        // COMPUTE is one row per machine now: both names, both readings, and
+        // no gauge stack until one is asked for.
         assert!(screen.contains("COMPUTE"), "{screen}");
-        assert!(screen.contains("CPU") && screen.contains("RAM"), "{screen}");
+        assert!(screen.contains("CPU  42%"), "the worst reading, named:\n{screen}");
+        assert!(!screen.contains("RAM"), "a summary must not draw the stack:\n{screen}");
+
+        // …and `z` on a machine puts the whole stack back, through the very
+        // renderer the SYSTEM rail uses.
+        let mut open = view.clone();
+        open.folds.toggle_expanded("local");
+        let mut b3 = buf(160, 40);
+        draw(&mut b3, 160, 40, &scene, &open, &Theme::default());
+        let screen3: String = (0..40).map(|y| text_of(&b3, y)).collect::<Vec<_>>().join("\n");
+        assert!(screen3.contains("RAM"), "expanding a machine draws its gauges:\n{screen3}");
     }
 
     /// One interface, `carrier` up and carrying the default route, with the
@@ -7605,7 +8393,8 @@ mod tests {
         let all = booth_fleet(&agents);
         let sys = SysDto::default();
         let ms = machines(&sys, &all);
-        let scene = Scene { machines: &ms, ..scene(&[], None, &sys, &all) };
+        let spaces = booth_spaces(&all);
+        let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
 
         let mut seen = String::new();
         let mut ever_wanted_anim = false;
@@ -7642,7 +8431,8 @@ mod tests {
         ];
         let all = booth_fleet(&agents);
         let ms = machines(&sys, &all);
-        let scene = Scene { machines: &ms, ..scene(&[], None, &sys, &all) };
+        let spaces = booth_spaces(&all);
+        let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
 
         // Only the fleet column: the stage box is titled with the same agent,
         // and a box title is ellipsized rather than scrolled, so its copy of
@@ -7696,7 +8486,8 @@ mod tests {
             let all = booth_fleet(&agents);
             let ms = machines(&sys, &all);
             let mut b = buf(160, 40);
-            let scene = Scene { machines: &ms, ..scene(&[], None, &sys, &all) };
+            let spaces = booth_spaces(&all);
+            let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
             draw(&mut b, 160, 40, &scene, &view, &Theme::default());
             let rows: Vec<String> = (0..40).map(|y| text_of(&b, y)).collect();
             let y =
@@ -7745,6 +8536,7 @@ mod tests {
             conflicts: 0,
             repo_state: RepoState::Clean,
             attached_clients: 1,
+            autostart: Vec::new(),
         }
     }
 
@@ -8929,6 +9721,7 @@ mod tests {
             conflicts: 0,
             repo_state: RepoState::Clean,
             attached_clients: 1,
+            autostart: Vec::new(),
         };
         let tabs = [Tab { summary: &summary, host: None, live: true }];
         // Where the chip ends: one column of margin, then the label the bar
@@ -10135,6 +10928,7 @@ index 1111111..2222222 100644
             conflicts: 0,
             repo_state: RepoState::Clean,
             attached_clients: 1,
+            autostart: Vec::new(),
         }];
         let tabs = [Tab { summary: &tabs[0], host: None, live: true }];
         draw(

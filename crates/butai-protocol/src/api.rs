@@ -1070,6 +1070,22 @@ pub struct WorkspaceSummary {
     #[serde(default)]
     pub repo_state: RepoState,
     pub attached_clients: usize,
+    /// The project's own `[agents] autostart`, verbatim and in order.
+    ///
+    /// A *declaration*, not a record of what was started: it is what this
+    /// project's `.butai.toml` says it runs, which is the honest answer to
+    /// "which agent does this project use" — and the reason a client offering
+    /// to start one here needs no configuration of its own for the ordinary
+    /// case, since a project that autostarts `claude` has already said so.
+    ///
+    /// Published raw rather than reduced to a single name, for the reason
+    /// [`NetDto`] and [`DiskDto`] are published unfiltered: the daemon says what
+    /// a thing *is* and each client decides. A client that wants the first
+    /// entry takes the first entry; one that wants to offer all of them can.
+    ///
+    /// Empty where the project has no workspace file, or names no agents.
+    #[serde(default)]
+    pub autostart: Vec<String>,
 }
 
 /// A workspace with its full rail contents (detail view).
