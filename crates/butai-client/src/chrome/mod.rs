@@ -3516,6 +3516,9 @@ pub fn fleet_open_span(area: LRect) -> Option<(u16, u16)> {
     Some((end.saturating_sub(FLEET_OPEN_LABEL.len() as u16), end))
 }
 
+/// What an empty project says where its agents would be.
+pub const FLEET_NO_AGENTS: &str = "no agents";
+
 /// Everything a project row puts on screen, resolved once.
 ///
 /// The painter draws from this and the hit-test reads it, so a click cannot land
@@ -3528,8 +3531,15 @@ pub struct SpaceLayout {
     pub mark_x: u16,
     /// The name — the span that goes to that workspace.
     pub name: (u16, u16),
-    /// Where a folded row draws its agents' sprites, if it has room.
-    pub sprites: Option<(u16, u16)>,
+    /// What is in the project, in the cells its agent rows would have used:
+    /// their sprites when it is folded, `no agents` when there are none.
+    ///
+    /// One span for both because they answer one question, and a row that had
+    /// somewhere to put a word but not a sprite would be answering it twice.
+    pub content: Option<(u16, u16)>,
+    /// How many sprites `content` has room for — `None` when it holds a word
+    /// instead. Always whole ones: half a sprite is a figure with no head.
+    pub sprites: Option<u16>,
     /// The start button and what it says.
     pub add: Option<((u16, u16), String)>,
 }
@@ -3537,49 +3547,65 @@ pub struct SpaceLayout {
 /// Lay out one project row inside the fleet column.
 ///
 /// Right to left, because everything on the right is a control and the name is
-/// the only thing that can be shortened without losing one. The start button
-/// names its agent when the row can spell it and falls back to `[+]` when it
-/// cannot — the AGENTS rail's own rule, for its own reason: a button that
-/// spawns on a single click with nothing in between is the only place you can
-/// see what that click is about to do.
+/// the only thing that can be shortened without losing one.
+///
+/// **The button gives up its name before the strip gives up a sprite.** The
+/// strip is what folding is *for* — a folded project that cannot say what is in
+/// it is a row you have to unfold to read — and `[+]` starts exactly the agent
+/// `[+ claude]` would. Naming it at all is the AGENTS rail's rule and its
+/// reason: a button that spawns on a single click with nothing in between is
+/// the only place you can see what that click is about to do.
 pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool) -> SpaceLayout {
+    const CELL: u16 = SPRITE_W as u16 + 1;
     let end = area.x + area.width;
     let mark_x = area.x + FLEET_INDENT;
     let name_x = mark_x + 2;
-    let floor = name_x + FLEET_MIN_NAME;
+    // Everything to the right of the shortest name the row will draw.
+    let room = end.saturating_sub(name_x + FLEET_MIN_NAME);
 
-    let full = space.preferred.map(|p| format!("[+ {p}]"));
-    let add = full
-        .filter(|l| end.saturating_sub(l.chars().count() as u16) > floor)
-        .or_else(|| {
-            (end.saturating_sub(FLEET_ADD_LABEL.len() as u16) > floor)
-                .then(|| FLEET_ADD_LABEL.to_string())
-        })
-        .map(|l| {
-            let w = l.chars().count() as u16;
-            ((end - w, end), l)
-        });
+    let (want, sprites) = match (folded, space.agents.len() as u16) {
+        (_, 0) => (FLEET_NO_AGENTS.chars().count() as u16, None),
+        (true, n) => (n * CELL - 1, Some(n)),
+        (false, _) => (0, None),
+    };
 
-    // The right edge of everything left of the button.
+    let named = space.preferred.map(|p| format!("[+ {p}]"));
+    let short = FLEET_ADD_LABEL.to_string();
+    let fits = |l: &String, content: u16| (l.chars().count() as u16) + 1 + content <= room;
+    let label = match &named {
+        Some(l) if fits(l, want) => Some(l.clone()),
+        _ if fits(&short, want) => Some(short.clone()),
+        // Nothing fits beside the whole strip, so the button keeps its place
+        // and the strip is cut to whole sprites below.
+        Some(l) if fits(l, 0) => Some(l.clone()),
+        _ if fits(&short, 0) => Some(short),
+        _ => None,
+    };
+
+    let add = label.map(|l| {
+        let w = l.chars().count() as u16;
+        ((end - w, end), l)
+    });
     let right = add.as_ref().map(|((x, _), _)| *x).unwrap_or(end);
 
-    // A folded project draws its agents' sprites where its agent rows were.
-    // Three ASCII cells each and a space, which is the whole reason folding is
-    // affordable here: it costs you the titles and the buttons, not the states.
-    let sprites = (folded && !space.agents.is_empty())
-        .then(|| {
-            let cell = SPRITE_W as u16 + 1;
-            let room = right.saturating_sub(floor + 1);
-            let fits = (room / cell).min(space.agents.len() as u16);
-            (fits > 0).then(|| {
-                let w = fits * cell - 1;
-                (right - 1 - w, right - 1)
-            })
-        })
-        .flatten();
+    // What is left for the strip, in whole sprites — or nothing at all, since a
+    // truncated `no agents` reads as a row still loading rather than an answer.
+    let space_for = right.saturating_sub(name_x + FLEET_MIN_NAME + 1);
+    let (content, sprites) = match sprites {
+        Some(n) => {
+            let show = (space_for.saturating_add(1) / CELL).min(n);
+            match show {
+                0 => (None, None),
+                n => (Some(n * CELL - 1), Some(n)),
+            }
+        }
+        None if want > 0 && want <= space_for => (Some(want), None),
+        None => (None, None),
+    };
+    let content = content.map(|w| (right - 1 - w, right - 1));
 
-    let name_end = sprites.map(|(x, _)| x).unwrap_or(right).saturating_sub(1).max(name_x);
-    SpaceLayout { mark_x, name: (name_x, name_end), sprites, add }
+    let name_end = content.map(|(x, _)| x).unwrap_or(right).saturating_sub(1).max(name_x);
+    SpaceLayout { mark_x, name: (name_x, name_end), content, sprites, add }
 }
 
 /// Which fleet row is at `y`, as an index into `rows`.
@@ -3810,37 +3836,32 @@ fn draw_booth_page(
                         // The name is brighter than a header used to be,
                         // because it is now the thing you press to go there.
                         put_str(buf, nx, y, &text, ne, Pen::new(theme.ink, bg));
-                        match l.sprites {
-                            Some((sx, se)) => {
-                                let mut x = sx;
-                                for a in space.agents {
-                                    if x + SPRITE_W as u16 > se {
-                                        break;
+                        // What is in the project, where its agent rows were:
+                        // their sprites folded, `no agents` when there are
+                        // none. Never a fragment of either — the span is sized
+                        // in whole sprites and the word is dropped rather than
+                        // cut, because half of it reads as a row still loading.
+                        if let Some((cx, ce)) = l.content {
+                            match l.sprites {
+                                Some(n) => {
+                                    let mut x = cx;
+                                    for a in space.agents.iter().take(n as usize) {
+                                        let (sprite, color, animating) =
+                                            sprite_for(a.agent, view.fast_tick, theme);
+                                        out.wants_fast_anim |= animating;
+                                        put_str(buf, x, y, &sprite, ce, Pen::new(color, bg));
+                                        x += SPRITE_W as u16 + 1;
                                     }
-                                    let (sprite, color, animating) =
-                                        sprite_for(a.agent, view.fast_tick, theme);
-                                    out.wants_fast_anim |= animating;
-                                    put_str(buf, x, y, &sprite, se, Pen::new(color, bg));
-                                    x += SPRITE_W as u16 + 1;
                                 }
-                            }
-                            // Nothing running, and nothing folded away either:
-                            // say which, because an empty row reads as a row
-                            // still loading.
-                            None if space.agents.is_empty() => {
-                                let room = ne.saturating_sub(nx) as usize;
-                                let used = space.name.chars().count().min(room) as u16;
-                                let x = nx + used + 1;
-                                put_str(
+                                None => put_str(
                                     buf,
-                                    x,
+                                    cx,
                                     y,
-                                    &ellipsize("no agents", ne.saturating_sub(x) as usize),
-                                    ne,
+                                    FLEET_NO_AGENTS,
+                                    ce,
                                     Pen::new(theme.faint, bg),
-                                );
+                                ),
                             }
-                            None => {}
                         }
                         if let Some(((ax, ae), label)) = &l.add {
                             // Brighter on the row the cursor is on, for the
@@ -3920,8 +3941,16 @@ fn draw_booth_page(
     out
 }
 
-/// Cells the level meter takes on a COMPUTE summary row.
-const COMPUTE_METER_W: u16 = 6;
+/// What the level meter will stretch to, and what it will shrink to before it
+/// goes altogether.
+///
+/// Elastic rather than fixed, because a fixed six vanished at a 23-cell column —
+/// a perfectly ordinary width — and the meter is the scannable half of the row:
+/// the number says how loaded a machine is and the bar is what you read without
+/// reading. Below three cells it can no longer say anything a percentage does
+/// not, so that is where it stops.
+const COMPUTE_METER_MAX: u16 = 8;
+const COMPUTE_METER_MIN: u16 = 3;
 
 /// The shortest a machine's name is allowed to get before the row starts
 /// dropping the fields to its right instead of squeezing it further.
@@ -4058,19 +4087,23 @@ fn draw_compute_summary(
     let name_x = area.x + 2;
     let mut next = value_x; // left edge of the leftmost right-hand field so far
 
-    if m.live && next >= name_x + COMPUTE_MIN_NAME + COMPUTE_METER_W + 2 {
-        let p = machine_pressure(m.sys, &view.disks);
-        let meter_x = next - 1 - COMPUTE_METER_W;
-        draw_meter(buf, meter_x, y, COMPUTE_METER_W, p.pct, theme.role(load_role(p.pct)), theme);
-        next = meter_x;
-    }
-
+    // The count before the meter, and deliberately: the meter is the reading
+    // drawn a second way, and how many agents a machine is running is a fact
+    // that appears nowhere else on this page.
     let count = if m.live { m.agents.to_string() } else { "·".to_string() };
     let cw = count.chars().count() as u16;
     if next > name_x + COMPUTE_MIN_NAME + cw {
         let count_x = next - 1 - cw;
         put_str(buf, count_x, y, &count, next, Pen::new(theme.faint, theme.ground));
         next = count_x;
+    }
+
+    let meter_w = next.saturating_sub(name_x + COMPUTE_MIN_NAME + 1).min(COMPUTE_METER_MAX);
+    if m.live && meter_w >= COMPUTE_METER_MIN {
+        let p = machine_pressure(m.sys, &view.disks);
+        let meter_x = next - 1 - meter_w;
+        draw_meter(buf, meter_x, y, meter_w, p.pct, theme.role(load_role(p.pct)), theme);
+        next = meter_x;
     }
 
     let mark = if expanded { "v" } else { ">" };
@@ -7573,6 +7606,57 @@ mod tests {
         assert_eq!(seats, vec![0, 1, 2, 3], "a copied agent left its seat");
     }
 
+    /// A folded project keeps its sprites and the button gives up its name.
+    ///
+    /// The strip is what folding is *for* — a folded project that cannot say
+    /// what is in it is a row you have to unfold to read — and `[+]` starts
+    /// exactly the agent `[+ claude]` would. Both were the other way round
+    /// first, and a two-agent project drew one sprite.
+    #[test]
+    fn a_folded_row_spends_its_cells_on_states_before_labels() {
+        let agents = [
+            agent(1, "claude", AgentState::Finished),
+            agent(2, "codex", AgentState::Idle),
+            agent(3, "aider", AgentState::Working),
+            agent(4, "gemini", AgentState::Waiting),
+        ];
+        let all = booth_fleet(&agents);
+        let spaces = booth_spaces(&all);
+        let butai = spaces[0]; // two agents, prefers `claude`
+        let notes = spaces[2]; // none, prefers `codex`
+
+        // 28 cells: `  > butai` + two sprites + `[+ claude]` is exactly 28, so
+        // the wide case keeps both.
+        let wide = LRect::new(0, 0, 28, 1);
+        let l = space_layout(wide, &butai, true);
+        assert_eq!(l.sprites, Some(2), "both agents' states survive the fold");
+        assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+ claude]"));
+
+        // Take four cells away and the *label* is what goes, not a sprite.
+        let l = space_layout(LRect::new(0, 0, 24, 1), &butai, true);
+        assert_eq!(l.sprites, Some(2), "a sprite was dropped before the label was");
+        assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+]"));
+
+        // Narrow enough and the strip gives up whole sprites, never halves.
+        let l = space_layout(LRect::new(0, 0, 18, 1), &butai, true);
+        assert!(matches!(l.sprites, None | Some(1)), "half a sprite: {:?}", l.sprites);
+        if let Some((x, e)) = l.content {
+            assert_eq!((e - x) % (SPRITE_W as u16 + 1), SPRITE_W as u16 % (SPRITE_W as u16 + 1));
+        }
+
+        // An empty project says so in the same cells, and the word is dropped
+        // whole rather than cut — half of it reads as a row still loading.
+        let l = space_layout(wide, &notes, false);
+        assert_eq!(l.sprites, None);
+        let (x, e) = l.content.expect("`no agents` fits at 28");
+        assert_eq!(e - x, FLEET_NO_AGENTS.len() as u16);
+        let l = space_layout(LRect::new(0, 0, 16, 1), &notes, false);
+        assert_eq!(l.content, None, "it does not fit, so it is not drawn at all");
+
+        // An unfolded project with agents shows neither: its agents are rows.
+        assert_eq!(space_layout(wide, &butai, false).content, None);
+    }
+
     /// A fold takes a group's children out of the list and moves nothing else.
     ///
     /// That is the whole safety property: the order is a pure function of
@@ -7716,6 +7800,57 @@ mod tests {
         // agent, and a project row is not one however good its preview is.
         assert_eq!(booth_selected(&rows, row_of("space:butai")), None);
         assert_eq!(booth_selected(&rows, row_of("agent:codex:1")), Some(1));
+    }
+
+    /// A summary row gives up its fields outward-in, and never the reading.
+    ///
+    /// Both orders here were wrong first. A fixed six-cell meter vanished at 23
+    /// columns — an ordinary width — and making it elastic then took the agent
+    /// count's cells instead, which is the wrong trade: the meter is the reading
+    /// drawn a second way and the count appears nowhere else on the page.
+    #[test]
+    fn a_compute_row_drops_the_meter_before_the_count_and_the_reading_last() {
+        let sys =
+            SysDto { cpu_pct: 41.0, ram_used_gb: 19.0, ram_total_gb: 32.0, ..Default::default() };
+        let m = MachineRow { label: "gpu-box", sys: &sys, agents: 3, live: true };
+        let view = View::default();
+        let theme = Theme::default();
+
+        let row = |w: u16| {
+            let mut b = buf(w, 1);
+            draw_compute_summary(&mut b, LRect::new(0, 0, w, 1), 0, &m, false, &view, &theme);
+            text_of(&b, 0).trim_end().to_string()
+        };
+
+        // Wide: everything, and the meter stretches to its cap.
+        let wide = row(34);
+        assert!(wide.contains("RAM  59%"), "{wide:?}");
+        assert!(wide.contains('3'), "the agent count: {wide:?}");
+        assert_eq!(wide.matches('█').count(), 5, "59% of eight cells: {wide:?}");
+
+        // Narrow: the meter shrinks rather than going, and the count stays.
+        let narrow = row(23);
+        assert!(narrow.contains("RAM  59%") && narrow.contains('3'), "{narrow:?}");
+        assert!(narrow.contains('█'), "the meter shrank to nothing: {narrow:?}");
+
+        // Narrower still: the meter goes before the count does…
+        let tight = row(19);
+        assert!(tight.contains("RAM  59%"), "{tight:?}");
+        assert!(!tight.contains('█'), "the meter should have gone: {tight:?}");
+        assert!(tight.contains('3'), "the count outlives the meter: {tight:?}");
+
+        // …and the reading outlives everything, because a row that cannot say
+        // how loaded a machine is has no reason to exist.
+        assert!(row(14).contains("59%"), "{:?}", row(14));
+
+        // A machine that is away draws no meter at all: its gauges would go on
+        // animating from telemetry nobody is taking, and a moving trace is a
+        // strong claim to be alive.
+        let gone = MachineRow { live: false, ..m };
+        let mut b = buf(34, 1);
+        draw_compute_summary(&mut b, LRect::new(0, 0, 34, 1), 0, &gone, false, &view, &theme);
+        let text = text_of(&b, 0);
+        assert!(text.contains("away") && !text.contains('█'), "{text:?}");
     }
 
     /// COMPUTE names the *worst* reading on a machine, not the CPU.

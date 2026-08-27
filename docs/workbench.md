@@ -657,26 +657,28 @@ columns: the left rail would list one workspace's agents beside a column listing
 everyone's.
 
 ```
-┌ FLEET (6) ───────────────────┐┌ codex · gpu-box:infra ─┐┌ COMPUTE ───────────┐
-│?o? codex · infra             ││                        ││> local     4 ███ CP│
-│\o/ claude · butai            ││  ? Run the migration?  ││> gpu-box   2 ███ RA│
-│\o/ gemini · caliper          ││    1. Yes  2. No       ││> mini      ·   away│
-│                              ││                        ││                    │
-├ NEEDS YOU (3) ───────────────┤│  > _                   ││v dev-1     1 █   CP│
-│v local                      4││                        ││  CPU Xeon      8%  │
-│  v butai           [+ claude]││                        ││  ▁▁▂▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁│
-│    \o/ claude          [open]││                        ││  RAM        6/64G  │
-│    -o- gemini          [open]││                        ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│
-│  > caliper .o' \o/      [+]  ││                        ││                    │
-│  v notes            [+ codex]││                        ││                    │
-│      no agents               ││                        ││                    │
-│v gpu-box                    2││                        ││                    │
-│  v infra           [+ claude]││                        ││                    │
-│    ?o? codex           [open]││                        ││                    │
-│    .o' claude          [open]││                        ││                    │
-│> mini            nothing open││                        ││                    │
-└──────────────────────────────┘└────────────────────────┘└────────────────────┘
+┌ FLEET (4) ────────────┐┌ claude · local:butai ────────┐┌ COMPUTE ──────────────┐
+│?o? gemini · gpu-box:di││                              ││> local ██   3 RAM  59%│
+│                       ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
+│                       ││    1. Yes  2. No             ││                       │
+│                       ││                              ││                       │
+├ NEEDS YOU (1) ────────┤│  > _                         ││                       │
+│v local               3││                              ││                       │
+│  v butai    [+ claude]││                              ││                       │
+│    \o/ claude   [open]││                              ││                       │
+│    -o- codex    [open]││                              ││                       │
+│  > caliper     .o' [+]││                              ││                       │
+│  v notes no agents [+]││                              ││                       │
+│v gpu-box             1││                              ││                       │
+│  v diffusion       [+]││                              ││                       │
+│    ?o? gemini   [open]││                              ││                       │
+└───────────────────────┘└──────────────────────────────┘└───────────────────────┘
 ```
+
+That is a 100-column terminal, which is where the fallbacks start to bite: the
+meter has shrunk to two cells, `caliper` is folded and spends its cells on its
+agent's state rather than on spelling `[+ claude]`, and `diffusion` has no
+preferred agent to name. Wider, every one of them says more.
 
 **It is a list of projects that happens to contain agents**, and that is a change
 from what it was. The rows used to be built by walking the agent list and
