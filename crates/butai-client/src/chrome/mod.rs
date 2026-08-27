@@ -1979,7 +1979,14 @@ pub enum ConfirmKind {
     /// already has: this one leaves nothing to restore from.
     DeleteFile { path: String },
     /// Close a workspace, killing everything running in it.
-    CloseWorkspace { id: SessionId, name: String },
+    /// Close a workspace, and everything running in it.
+    ///
+    /// Carries the machine as well as the id. BOOTH's fleet spans daemons, so
+    /// the row you pressed `[x]` on is routinely not on the tab you are looking
+    /// at — and a `SessionId` is only unique on its own daemon, so sending the
+    /// DELETE to the active one would close whatever happens to hold that id
+    /// here. The same reason [`MenuTarget::Agent`] carries all three.
+    CloseWorkspace { daemon: usize, id: SessionId, name: String },
     /// A git-menu row the table marked destructive. Which one is held on
     /// [`View::pending_menu_action`] rather than in here, so this enum does
     /// not have to know the menu's vocabulary.
@@ -3491,6 +3498,9 @@ pub const FLEET_OPEN_LABEL: &str = "[open]";
 /// A project row's start button, with no room to say what it starts.
 pub const FLEET_ADD_LABEL: &str = "[+]";
 
+/// A project row's close button — the tab bar's `[x]`, one level in.
+pub const FLEET_CLOSE_LABEL: &str = "[x]";
+
 /// The narrowest fleet column that can afford the button: enough for the
 /// sprite, a few columns of title and the label itself. Below it the row is all
 /// title and the two-step click is the only way, which is what it was before.
@@ -3542,6 +3552,15 @@ pub struct SpaceLayout {
     pub sprites: Option<u16>,
     /// The start button and what it says.
     pub add: Option<((u16, u16), String)>,
+    /// The close button, on the cursor's row only.
+    ///
+    /// **Only there**, which is the tab bar's rule for its own `[x]` and for
+    /// the same reason: this one ends a workspace and everything running in it,
+    /// and a destructive button sitting under a row you were not aiming at is a
+    /// press away from being the wrong one. It also costs four cells, which on
+    /// this column is a sprite or half a name — worth spending on the row you
+    /// are looking at and not on the ten you are not.
+    pub close: Option<(u16, u16)>,
 }
 
 /// Lay out one project row inside the fleet column.
@@ -3555,57 +3574,91 @@ pub struct SpaceLayout {
 /// `[+ claude]` would. Naming it at all is the AGENTS rail's rule and its
 /// reason: a button that spawns on a single click with nothing in between is
 /// the only place you can see what that click is about to do.
-pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool) -> SpaceLayout {
+pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: bool) -> SpaceLayout {
     const CELL: u16 = SPRITE_W as u16 + 1;
-    let end = area.x + area.width;
     let mark_x = area.x + FLEET_INDENT;
     let name_x = mark_x + 2;
-    // Everything to the right of the shortest name the row will draw.
-    let room = end.saturating_sub(name_x + FLEET_MIN_NAME);
 
+    // What the name will not go below. A *short* name is not squeezed at all,
+    // which is the point of the `min`: reserving six cells for `butai` costs a
+    // cell the row would rather spend saying which agent its button starts.
+    let reserve = (space.name.chars().count() as u16).min(FLEET_MIN_NAME);
+    let room = (area.x + area.width).saturating_sub(name_x + reserve);
+
+    // What the project has in it, in the cells its agent rows would have used.
     let (want, sprites) = match (folded, space.agents.len() as u16) {
         (_, 0) => (FLEET_NO_AGENTS.chars().count() as u16, None),
         (true, n) => (n * CELL - 1, Some(n)),
         (false, _) => (0, None),
     };
 
+    // Every field costs itself plus the gap in front of it, and one arithmetic
+    // for both halves of this function: deciding what fits and placing it. They
+    // were two, and disagreed by a cell — the row promised itself room for
+    // `no agents` and then drew `no agent`.
+    let cost = |w: u16| if w == 0 { 0 } else { w + 1 };
+    let close_w = FLEET_CLOSE_LABEL.len() as u16;
     let named = space.preferred.map(|p| format!("[+ {p}]"));
     let short = FLEET_ADD_LABEL.to_string();
-    let fits = |l: &String, content: u16| (l.chars().count() as u16) + 1 + content <= room;
-    let label = match &named {
-        Some(l) if fits(l, want) => Some(l.clone()),
-        _ if fits(&short, want) => Some(short.clone()),
-        // Nothing fits beside the whole strip, so the button keeps its place
-        // and the strip is cut to whole sprites below.
-        Some(l) if fits(l, 0) => Some(l.clone()),
-        _ if fits(&short, 0) => Some(short),
-        _ => None,
+    let len = |l: &String| l.chars().count() as u16;
+
+    // In preference order, best first. Two rules decide it. **A control keeps
+    // its place before any control is spelled out** — `[+]` starts exactly the
+    // agent `[+ claude]` would, and `[x]` has no shorter form at all. And **the
+    // strip outranks both labels**, because a folded project that cannot say
+    // what is in it is a row you have to unfold to read, which is the thing
+    // folding exists to avoid.
+    let shut_w = if cursor { close_w } else { 0 };
+    let fits =
+        |label: u16, content: u16, close: u16| cost(label) + cost(content) + cost(close) <= room;
+    let (label, shut) = match &named {
+        Some(l) if fits(len(l), want, shut_w) => (Some(l.clone()), cursor),
+        _ if fits(len(&short), want, shut_w) => (Some(short.clone()), cursor),
+        Some(l) if fits(len(l), want, 0) => (Some(l.clone()), false),
+        _ if fits(len(&short), want, 0) => (Some(short.clone()), false),
+        // Nothing fits beside the whole strip. The controls keep their places
+        // and the strip is cut to whole sprites below — or dropped, if it is a
+        // word, since half of `no agents` is not a shorter answer.
+        _ if fits(len(&short), 0, shut_w) => (Some(short.clone()), cursor),
+        _ if fits(len(&short), 0, 0) => (Some(short), false),
+        _ => (None, false),
     };
 
-    let add = label.map(|l| {
-        let w = l.chars().count() as u16;
-        ((end - w, end), l)
+    // Placed right to left, each field taking its own width and then its gap.
+    let mut cur = area.x + area.width;
+    let close = shut.then(|| {
+        cur -= close_w;
+        let span = (cur, cur + close_w);
+        cur -= 1;
+        span
     });
-    let right = add.as_ref().map(|((x, _), _)| *x).unwrap_or(end);
+    let add = label.map(|l| {
+        let w = len(&l);
+        cur -= w;
+        let span = ((cur, cur + w), l);
+        cur -= 1;
+        span
+    });
 
-    // What is left for the strip, in whole sprites — or nothing at all, since a
-    // truncated `no agents` reads as a row still loading rather than an answer.
-    let space_for = right.saturating_sub(name_x + FLEET_MIN_NAME + 1);
-    let (content, sprites) = match sprites {
-        Some(n) => {
-            let show = (space_for.saturating_add(1) / CELL).min(n);
-            match show {
-                0 => (None, None),
-                n => (Some(n * CELL - 1), Some(n)),
-            }
-        }
-        None if want > 0 && want <= space_for => (Some(want), None),
-        None => (None, None),
+    // Whatever the strip asked for, capped by what is left above the name.
+    let avail = cur.saturating_sub(name_x + reserve);
+    let width = match sprites {
+        Some(n) => ((avail + 1) / CELL).min(n) * CELL,
+        // `want > 0` matters: an unfolded project with agents asks for nothing
+        // here, and `0 <= avail` would have given it a one-cell span of gap.
+        None if want > 0 && want <= avail => want + 1,
+        None => 0,
     };
-    let content = content.map(|w| (right - 1 - w, right - 1));
+    let sprites = sprites.map(|_| width / CELL).filter(|n| *n > 0);
+    let content = (width > 0).then(|| {
+        cur -= width - 1;
+        let span = (cur, cur + width - 1);
+        cur -= 1;
+        span
+    });
 
-    let name_end = content.map(|(x, _)| x).unwrap_or(right).saturating_sub(1).max(name_x);
-    SpaceLayout { mark_x, name: (name_x, name_end), content, sprites, add }
+    let name_end = cur.max(name_x);
+    SpaceLayout { mark_x, name: (name_x, name_end), content, sprites, add, close }
 }
 
 /// Which fleet row is at `y`, as an index into `rows`.
@@ -3820,7 +3873,7 @@ fn draw_booth_page(
                     BoothRow::Space { space, folded, .. } => {
                         let bg = theme.row_bg(cursor);
                         fill_row(buf, area.x, y, bound, bg);
-                        let l = space_layout(area, space, *folded);
+                        let l = space_layout(area, space, *folded, cursor);
                         put_str(
                             buf,
                             l.mark_x,
@@ -3869,6 +3922,12 @@ fn draw_booth_page(
                             // the one that should look pressable.
                             let ink = if cursor { theme.accent } else { theme.faint };
                             put_str(buf, *ax, y, label, *ae, Pen::new(ink, bg));
+                        }
+                        // In `danger`, and it is the only thing on this column
+                        // drawn that way: it is the one press here that takes
+                        // something away rather than adding or moving.
+                        if let Some((cx, ce)) = l.close {
+                            put_str(buf, cx, y, FLEET_CLOSE_LABEL, ce, Pen::new(theme.danger, bg));
                         }
                     }
                     BoothRow::Agent { row, .. } => {
@@ -7628,17 +7687,17 @@ mod tests {
         // 28 cells: `  > butai` + two sprites + `[+ claude]` is exactly 28, so
         // the wide case keeps both.
         let wide = LRect::new(0, 0, 28, 1);
-        let l = space_layout(wide, &butai, true);
+        let l = space_layout(wide, &butai, true, false);
         assert_eq!(l.sprites, Some(2), "both agents' states survive the fold");
         assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+ claude]"));
 
         // Take four cells away and the *label* is what goes, not a sprite.
-        let l = space_layout(LRect::new(0, 0, 24, 1), &butai, true);
+        let l = space_layout(LRect::new(0, 0, 24, 1), &butai, true, false);
         assert_eq!(l.sprites, Some(2), "a sprite was dropped before the label was");
         assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+]"));
 
         // Narrow enough and the strip gives up whole sprites, never halves.
-        let l = space_layout(LRect::new(0, 0, 18, 1), &butai, true);
+        let l = space_layout(LRect::new(0, 0, 18, 1), &butai, true, false);
         assert!(matches!(l.sprites, None | Some(1)), "half a sprite: {:?}", l.sprites);
         if let Some((x, e)) = l.content {
             assert_eq!((e - x) % (SPRITE_W as u16 + 1), SPRITE_W as u16 % (SPRITE_W as u16 + 1));
@@ -7646,15 +7705,64 @@ mod tests {
 
         // An empty project says so in the same cells, and the word is dropped
         // whole rather than cut — half of it reads as a row still loading.
-        let l = space_layout(wide, &notes, false);
+        let l = space_layout(wide, &notes, false, false);
         assert_eq!(l.sprites, None);
         let (x, e) = l.content.expect("`no agents` fits at 28");
         assert_eq!(e - x, FLEET_NO_AGENTS.len() as u16);
-        let l = space_layout(LRect::new(0, 0, 16, 1), &notes, false);
+        let l = space_layout(LRect::new(0, 0, 16, 1), &notes, false, false);
         assert_eq!(l.content, None, "it does not fit, so it is not drawn at all");
 
         // An unfolded project with agents shows neither: its agents are rows.
-        assert_eq!(space_layout(wide, &butai, false).content, None);
+        assert_eq!(space_layout(wide, &butai, false, false).content, None);
+    }
+
+    /// `[x]` is drawn on the cursor's row and nowhere else.
+    ///
+    /// The tab bar's rule for its own `[x]`, and for the same reason: this one
+    /// ends a workspace and everything running in it, so a press that lands on
+    /// it has to be a press that aimed at it. It also costs four cells, which on
+    /// this column is a sprite or half a name.
+    #[test]
+    fn the_close_button_is_only_on_the_row_the_cursor_is_on() {
+        let agents = [
+            agent(1, "claude", AgentState::Finished),
+            agent(2, "codex", AgentState::Idle),
+            agent(3, "aider", AgentState::Working),
+            agent(4, "gemini", AgentState::Waiting),
+        ];
+        let all = booth_fleet(&agents);
+        let butai = booth_spaces(&all)[0];
+        let wide = LRect::new(0, 0, 34, 1);
+
+        assert_eq!(space_layout(wide, &butai, false, false).close, None, "not the cursor's row");
+        let on = space_layout(wide, &butai, false, true);
+        let (x, e) = on.close.expect("the cursor's row has one");
+        assert_eq!(e - x, FLEET_CLOSE_LABEL.len() as u16);
+        assert_eq!(e, wide.x + wide.width, "hard against the right edge");
+
+        // It does not take the start button's place, only its spelling — and
+        // only when there is no room for both.
+        assert_eq!(on.add.as_ref().map(|(_, s)| s.as_str()), Some("[+ claude]"));
+        let tight = space_layout(LRect::new(0, 0, 23, 1), &butai, false, true);
+        assert!(tight.close.is_some(), "the control keeps its place");
+        assert_eq!(
+            tight.add.as_ref().map(|(_, s)| s.as_str()),
+            Some("[+]"),
+            "the label is what gives way, because `[+]` starts the same agent"
+        );
+
+        // Narrow enough that only one of them fits, and it is the one you can
+        // still reach every other way that goes.
+        let cramped = space_layout(LRect::new(0, 0, 16, 1), &butai, false, true);
+        assert_eq!(cramped.close, None);
+        assert!(cramped.add.is_some(), "starting an agent is what this page is for");
+
+        // And it never costs the strip a sprite: `caliper` folded keeps its
+        // agent's state whether or not the cursor is on it.
+        let caliper = booth_spaces(&all)[1];
+        for cursor in [false, true] {
+            assert_eq!(space_layout(wide, &caliper, true, cursor).sprites, Some(1), "{cursor}");
+        }
     }
 
     /// A fold takes a group's children out of the list and moves nothing else.

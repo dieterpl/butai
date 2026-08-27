@@ -183,6 +183,7 @@ const SURFACES: Record<string, SurfaceEntry> = {
       // each names the element the press lands on — the same rule the AGENTS
       // rail's `[+ agent]` follows.
       [VerbId.NewAgent]: ["home.new"],
+      [VerbId.Kill]: ["home.close"],
       [VerbId.Fold]: ["home.fold"],
       [VerbId.FoldAll]: ["home.foldAll"],
     },

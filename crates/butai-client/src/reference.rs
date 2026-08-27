@@ -579,6 +579,10 @@ and each of them acts on the row's own machine and project, not on the tab you
 are looking at. `a`/`A` are the AGENTS rail's verbs and `z`/`Z` are the diff's
 folds; nothing here is a key this workbench did not already have.
 
+`x` ends what the row *is*. On an agent that is the session and it does not ask;
+on a project it is the workspace and everything running in it, and it does. The
+`[x]` beside `[+]` is the same press, and it is drawn on the cursor's row alone.
+
 ## Everything has one
 
 **Nothing in this workbench is reachable by pointer alone.** Every button,

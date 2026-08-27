@@ -326,7 +326,16 @@ pub fn on_fleet(
             Some(FleetHit::Row(row))
         }
         chrome::BoothRow::Space { space, folded, .. } => {
-            let l = chrome::space_layout(c.fleet_rows, space, *folded);
+            // Laid out as the cursor's row only when it *is* the cursor's row:
+            // `[x]` is drawn there and nowhere else, so resolving against a
+            // layout that always had one would make a press on the row below it
+            // close a workspace nobody aimed at.
+            let l = chrome::space_layout(c.fleet_rows, space, *folded, row == view.booth_sel);
+            if let Some((start, end)) = l.close {
+                if x >= start && x < end {
+                    return Some(FleetHit::Close(row));
+                }
+            }
             if let Some(((start, end), _)) = l.add {
                 if x >= start && x < end {
                     return Some(FleetHit::New(row));
@@ -394,6 +403,8 @@ pub enum FleetHit {
     Go(usize),
     /// A project's `[+]`: start its preferred agent, without moving the page.
     New(usize),
+    /// A project's `[x]`: close that workspace, once the confirm says so.
+    Close(usize),
     /// A machine or project row, off its name and off its button: fold it.
     Fold(usize),
 }

@@ -335,6 +335,9 @@ function Home(p: PageProps) {
     start: (space) => {
       void p.actions.spawnPick(space.ws, false, space.preferred);
     },
+    close: (space) => {
+      void p.actions.closeWorkspace(space.ws, space.name);
+    },
   };
 
   const act: HomeActions = {
@@ -351,6 +354,15 @@ function Home(p: PageProps) {
       if (verb?.id === VerbId.NewAgent) {
         if (row?.kind === HomeRowKind.Space) on.start(row.space);
         else p.actions.toast("put the cursor on a project to start an agent");
+        return;
+      }
+      // `x` ends the thing the row *is*: on an agent that is the session, and
+      // on a project it is the workspace and everything running in it. Only the
+      // second asks — an agent is a process whose transcript is on disk.
+      if (verb?.id === VerbId.Kill) {
+        if (row?.kind === HomeRowKind.Space) on.close(row.space);
+        else if (cursor) void p.actions.kill(cursor.ws, cursor.pane, cursor.agent.title);
+        else p.actions.toast("nothing selected");
         return;
       }
       if (verb?.id === VerbId.Fold) {

@@ -487,10 +487,14 @@ const HOME: readonly Verb[] = Object.freeze([
   verb("a", "new...", VerbId.NewAgent),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
-  // Quiet, both of them: the footer has 26 columns and `enter open · a new...`
-  // is already 21 of them, and unlike those two the fold has an affordance on
-  // the row itself — the `v`/`>` mark every machine and project carries. `?`
-  // is where it is written down.
+  // `x` ends the thing the row *is* — the session on an agent row, and on a
+  // project the workspace and everything running in it. Quiet because the
+  // footer has 26 columns and `enter open · a new...` is already 21 of them,
+  // and because a project row draws its own `x` button when the cursor is on it.
+  quiet("x", "end", VerbId.Kill),
+  // Quiet for the same reason, and one more: unlike those two the fold has an
+  // affordance on the row itself — the `v`/`>` mark every machine and project
+  // carries. `?` is where all three are written down.
   quiet("z", "fold", VerbId.Fold),
   quiet("Z", "fold all", VerbId.FoldAll),
   quiet("tab", "the preview", VerbId.FocusCycle),

@@ -1233,8 +1233,9 @@ pub async fn run(
                         dirty = true;
                     }
                     Flow::AskCloseWorkspace => {
+                        let d = active_daemon(&daemons, &hosts, &view);
                         if let Some(ws) = active_workspace(&daemons, &hosts, &view) {
-                            view.overlay = Some(close_workspace_confirm(ws));
+                            view.overlay = Some(close_workspace_confirm(d, ws.id, &ws.name));
                         }
                         dirty = true;
                     }
@@ -1323,6 +1324,14 @@ pub async fn run(
                             BoothCursor::Nothing => {}
                         }
                         clamp_booth_sel(&daemons, &hosts, &mut view);
+                        dirty = true;
+                    }
+                    Flow::AskCloseFleetSpace => {
+                        if let BoothCursor::Space { daemon, id, name, .. } =
+                            booth_cursor(&daemons, &hosts, &view)
+                        {
+                            view.overlay = Some(close_workspace_confirm(daemon, id, &name));
+                        }
                         dirty = true;
                     }
                     Flow::FoldFleetAll => {
@@ -1436,13 +1445,33 @@ pub async fn run(
                     // is a verb of the list it is drawn under, and the two are
                     // routinely different rows.
                     Flow::KillSelected => {
-                        match selected_route(&daemons, &hosts, &view) {
-                            Some(at) => {
-                                if let Err(e) = kill_pane(&daemons, at).await {
-                                    view.flash = Some(format!("{e:#}"));
+                        // `x` ends the thing the row *is*. On an agent that is
+                        // the session, and it does not ask, because an agent is
+                        // a process whose transcript is on disk. On one of
+                        // BOOTH's project rows it is the workspace and
+                        // everything running in it, which is the tab bar's `[x]`
+                        // — so it asks, in the same box and the same words.
+                        let space = (view.page == Page::Booth)
+                            .then(|| booth_cursor(&daemons, &hosts, &view))
+                            .and_then(|c| match c {
+                                BoothCursor::Space { daemon, id, name, .. } => {
+                                    Some((daemon, id, name))
                                 }
+                                _ => None,
+                            });
+                        match space {
+                            Some((daemon, id, name)) => {
+                                view.overlay =
+                                    Some(close_workspace_confirm(daemon, id, &name));
                             }
-                            None => view.flash = Some("nothing selected".into()),
+                            None => match selected_route(&daemons, &hosts, &view) {
+                                Some(at) => {
+                                    if let Err(e) = kill_pane(&daemons, at).await {
+                                        view.flash = Some(format!("{e:#}"));
+                                    }
+                                }
+                                None => view.flash = Some("nothing selected".into()),
+                            },
                         }
                         dirty = true;
                     }
@@ -1783,10 +1812,10 @@ pub async fn run(
                         }
                         dirty = true;
                     }
-                    Flow::CloseWorkspace(id) => {
-                        let d = active_daemon(&daemons, &hosts, &view);
+                    Flow::CloseWorkspace { daemon, workspace } => {
+                        let d = daemon.min(daemons.len().saturating_sub(1));
                         if let Err(e) =
-                            daemons[d].api.delete(&format!("/v1/workspaces/{id}")).await
+                            daemons[d].api.delete(&format!("/v1/workspaces/{workspace}")).await
                         {
                             view.flash = Some(format!("close: {e:#}"));
                         }
@@ -2268,15 +2297,20 @@ fn page_tree<'a>(page: Page, files: &'a mut Files, docs: &'a mut Files) -> &'a m
 
 /// The box that asks before a workspace and everything in it goes away.
 ///
-/// One builder because three routes open it — `X`, `alt-x`, and the `[x]` on
-/// the active chip — and a confirm that words itself differently depending on
-/// how you got there is three chances to word one of them wrongly.
-fn close_workspace_confirm(ws: &WorkspaceDetail) -> Overlay {
+/// One builder because five routes open it now — `X`, `alt-x`, the `[x]` on the
+/// active chip, and on BOOTH the `[x]` on a project row and `x` with the cursor
+/// on one — and a confirm that words itself differently depending on how you
+/// got there is five chances to word one of them wrongly.
+///
+/// Takes the machine, the id and the name rather than a `WorkspaceDetail`,
+/// because BOOTH has a fleet row and no detail for it: the fleet lists projects
+/// from the tab list, which arrives before any detail does.
+fn close_workspace_confirm(daemon: usize, id: SessionId, name: &str) -> Overlay {
     Overlay::Confirm(chrome::ConfirmOverlay {
         title: "CLOSE WORKSPACE".into(),
-        header: format!("close {} and kill what is running in it", ws.name),
+        header: format!("close {name} and kill what is running in it"),
         yes: false,
-        kind: chrome::ConfirmKind::CloseWorkspace { id: ws.id, name: ws.name.clone() },
+        kind: chrome::ConfirmKind::CloseWorkspace { daemon, id, name: name.to_string() },
     })
 }
 
@@ -3176,6 +3210,7 @@ fn page_bar_click(
     ret: Page,
     tab_count: usize,
     ws: Option<&WorkspaceDetail>,
+    here: usize,
 ) -> Flow {
     use hit::Target;
     // A target that names a page sets it itself, and `[settings]` has to stay a
@@ -3194,7 +3229,7 @@ fn page_bar_click(
     ) {
         view.page = ret;
     }
-    run_click(target, view, tab_count, ws)
+    run_click(target, view, tab_count, ws, here)
 }
 
 /// Which palette the screen should be wearing right now.
@@ -4591,7 +4626,12 @@ enum Flow {
         name: String,
     },
     /// Close a workspace, once its confirm box has been answered.
-    CloseWorkspace(butai_protocol::SessionId),
+    /// Close a workspace on a named machine — see
+    /// [`chrome::ConfirmKind::CloseWorkspace`] for why the machine rides along.
+    CloseWorkspace {
+        daemon: usize,
+        workspace: SessionId,
+    },
     /// Carry out a git-menu row that has been confirmed.
     MenuAction(crate::git_menu::GitAction),
     /// Carry out a chosen row that has been confirmed.
@@ -4619,6 +4659,9 @@ enum Flow {
     FoldFleetRow,
     /// Fold every project, or open every one — whichever leaves more visible.
     FoldFleetAll,
+    /// Ask before closing the workspace BOOTH's cursor is on. The answer is
+    /// [`Flow::CloseWorkspace`], carrying that row's own machine.
+    AskCloseFleetSpace,
     /// Re-read everything the GIT page shows.
     GitRefresh,
     /// Ask before a destructive pick, with the row named in the question — the
@@ -6107,7 +6150,9 @@ fn confirm(view: &mut View) -> Flow {
     match c.kind {
         chrome::ConfirmKind::Discard { path } => Flow::Git(GitAction::Discard(path)),
         chrome::ConfirmKind::DeleteFile { path } => Flow::DeleteFile(path),
-        chrome::ConfirmKind::CloseWorkspace { id, .. } => Flow::CloseWorkspace(id),
+        chrome::ConfirmKind::CloseWorkspace { daemon, id, .. } => {
+            Flow::CloseWorkspace { daemon, workspace: id }
+        }
         // Hand the action back to the same path that asked, with the answer
         // recorded so it goes through this time.
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
@@ -6262,6 +6307,7 @@ fn fleet_click(hit: hit::FleetHit, view: &mut View) -> Flow {
         hit::FleetHit::Row(row) => (row, Flow::Continue),
         hit::FleetHit::Open(row) | hit::FleetHit::Go(row) => (row, Flow::OpenFleetRow),
         hit::FleetHit::New(row) => (row, Flow::NewFleetAgent { pick: false }),
+        hit::FleetHit::Close(row) => (row, Flow::AskCloseFleetSpace),
         hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
     };
     view.booth_sel = row;
@@ -6285,6 +6331,9 @@ fn run_click(
     view: &mut View,
     tab_count: usize,
     ws: Option<&WorkspaceDetail>,
+    // The machine the active tab is on. Only `[x]` reads it, and it reads it
+    // because a workspace id means nothing without the daemon holding it.
+    here: usize,
 ) -> Flow {
     use hit::Target;
     match target {
@@ -6298,7 +6347,7 @@ fn run_click(
         // rather than a flash message and an armed flag nothing on screen names.
         Target::CloseTab => {
             let Some(ws) = ws else { return Flow::Continue };
-            view.overlay = Some(close_workspace_confirm(ws));
+            view.overlay = Some(close_workspace_confirm(here, ws.id, &ws.name));
             Flow::Continue
         }
         // Clicking the space you are already on goes back to the agents page, so
@@ -7351,6 +7400,7 @@ fn handle_input(
                         | hit::FleetHit::Open(row)
                         | hit::FleetHit::Go(row)
                         | hit::FleetHit::New(row)
+                        | hit::FleetHit::Close(row)
                         | hit::FleetHit::Fold(row)) = fleet_hit;
                         view.overlay = fleet_menu_here(daemons, hosts, view, row);
                         return Flow::Continue;
@@ -7403,7 +7453,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return page_bar_click(target, view, settings.ret, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return page_bar_click(target, view, settings.ret, tab_count, ws, here);
                         }
                         if let Some(flow) =
                             settings_click(view, settings, *cols, *rows, m.column, m.row)
@@ -7430,7 +7481,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return page_bar_click(target, view, help.ret, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return page_bar_click(target, view, help.ret, tab_count, ws, here);
                         }
                         if let Some(flow) = help_click(view, help, *cols, *rows, m.column, m.row) {
                             return flow;
@@ -7478,7 +7530,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return run_click(target, view, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return run_click(target, view, tab_count, ws, here);
                         }
                         let owned = active_workspace(daemons, hosts, view).cloned();
                         let ch = owned.as_ref().and_then(|w| w.changes.clone());
@@ -7538,7 +7591,8 @@ fn handle_input(
                     if let hit::Target::Stage(px, py) = target {
                         forward_mouse(stage, px, py, &m);
                     }
-                    return run_click(target, view, tab_count, ws);
+                    let here = active_daemon(daemons, hosts, view);
+                    return run_click(target, view, tab_count, ws, here);
                 }
                 event::MouseEventKind::Drag(event::MouseButton::Left) => {
                     // A pane that grabbed the mouse gets the drag, unless Alt
@@ -7821,8 +7875,9 @@ fn handle_input(
                 // and the unshifted key is a file verb on the rail. `alt-x` is
                 // the daemon's spelling of the same thing.
                 (event::KeyCode::Char('X'), false) => {
+                    let d = active_daemon(daemons, hosts, view);
                     if let Some(ws) = active_workspace(daemons, hosts, view) {
-                        view.overlay = Some(close_workspace_confirm(ws));
+                        view.overlay = Some(close_workspace_confirm(d, ws.id, &ws.name));
                     }
                 }
                 (event::KeyCode::Tab, false) => {
@@ -9179,6 +9234,7 @@ mod tests {
                 header: "close this workspace?".into(),
                 yes: false,
                 kind: chrome::ConfirmKind::CloseWorkspace {
+                    daemon: 0,
                     id: butai_protocol::SessionId(1),
                     name: "proj".into(),
                 },
@@ -9995,6 +10051,7 @@ mod tests {
             chrome::ConfirmKind::Discard { path: "u.rs".into() },
             chrome::ConfirmKind::DeleteFile { path: "u.rs".into() },
             chrome::ConfirmKind::CloseWorkspace {
+                daemon: 0,
                 id: butai_protocol::SessionId(1),
                 name: "proj".into(),
             },
@@ -11581,6 +11638,54 @@ mod tests {
         assert!(fleet_menu(&rows, &fleet, 3).is_none(), "a machine row opened a menu");
     }
 
+    /// Closing a workspace from BOOTH asks first, and asks about the row's own
+    /// machine.
+    ///
+    /// The routing half is the bug this found: `Flow::CloseWorkspace` carried
+    /// an id and the dispatch sent the DELETE to `active_daemon`. From the tab
+    /// bar those are the same machine by construction; from a fleet row they
+    /// are routinely not, and a `SessionId` is only unique on its own daemon —
+    /// so `[x]` on a `gpu-box` row would have closed whatever held that id here.
+    /// The same failure `x` on a rail row had, and the same fix.
+    #[test]
+    fn closing_a_fleet_workspace_asks_and_names_its_machine() {
+        let overlay = close_workspace_confirm(1, SessionId(1), "infra");
+        let Overlay::Confirm(c) = &overlay else { panic!("{overlay:?}") };
+        assert!(!c.yes, "it must open on `no`");
+        assert!(c.header.contains("infra"), "the box names what goes: {:?}", c.header);
+        assert_eq!(
+            c.kind,
+            chrome::ConfirmKind::CloseWorkspace {
+                daemon: 1,
+                id: SessionId(1),
+                name: "infra".into()
+            }
+        );
+
+        // …and answering it sends the DELETE to that machine, not to whichever
+        // tab happens to be up.
+        let mut view = View { page: Page::Booth, overlay: Some(overlay), ..Default::default() };
+        let flow = press(&mut view, key(event::KeyCode::Char('y')), &Keymap::default());
+        assert!(
+            matches!(flow, Flow::CloseWorkspace { daemon: 1, workspace: SessionId(1) }),
+            "{flow:?}"
+        );
+    }
+
+    /// The `[x]` on a project row asks; a press beside it does not.
+    #[test]
+    fn the_fleet_close_button_asks_rather_than_closing() {
+        let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        assert!(matches!(
+            fleet_click(hit::FleetHit::Close(3), &mut view),
+            Flow::AskCloseFleetSpace
+        ));
+        assert_eq!(view.booth_sel, 3, "and it aims at the row it was pressed on");
+        // Nothing has gone yet: the flow opens a box, and only the box closes
+        // anything.
+        assert_eq!(view.page, Page::Booth);
+    }
+
     /// BOOTH's preview is a pane, so a key typed at it reaches the agent.
     ///
     /// Reported as "the agent is right there and I can't talk to it". It was
@@ -11830,7 +11935,7 @@ mod tests {
 
         // The chip, which goes the long way round through `run_click`.
         let mut view = View { focus: Focus::Stage, ..Default::default() };
-        run_click(hit::Target::Space(Page::Booth), &mut view, 1, None);
+        run_click(hit::Target::Space(Page::Booth), &mut view, 1, None, 0);
         assert_eq!((view.page, view.focus), (Page::Booth, Focus::AllAgents));
 
         // And leaving hands it back, or the cursor would be in a list the next
@@ -12192,7 +12297,7 @@ mod tests {
         let keymap = Keymap::default();
         let mut view = View::default();
         assert!(matches!(
-            run_click(hit::Target::Footer("[layout]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[layout]"), &mut view, 1, None, 0),
             Flow::ToggleLayout
         ));
         assert!(!view.zen, "[layout] is not the zen key");
@@ -12230,7 +12335,7 @@ mod tests {
             let mut files = Files { dir: "src".into(), sel: 3, ..Default::default() };
             let mut docs = Files { dir: "docs".into(), sel: 2, ..Default::default() };
             let flow = match target {
-                Some(t) => run_click(t, &mut view, 1, None),
+                Some(t) => run_click(t, &mut view, 1, None, 0),
                 None => handle_input(
                     event::Event::Key(key(event::KeyCode::Char('?'))),
                     &mut view,
@@ -12269,7 +12374,7 @@ mod tests {
         let mut help = chrome::Help::default();
         let mut view = View { page: Page::Docker, ..Default::default() };
         assert!(matches!(
-            run_click(hit::Target::Footer("[help]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[help]"), &mut view, 1, None, 0),
             Flow::OpenHelp
         ));
         // The loop is what carries the page across; do it the way the loop does.
@@ -12278,7 +12383,7 @@ mod tests {
 
         // Both ways out: the button again, and `esc` on the page.
         assert!(matches!(
-            run_click(hit::Target::Footer("[help]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[help]"), &mut view, 1, None, 0),
             Flow::CloseHelp
         ));
         let flow = handle_help_key(key(event::KeyCode::Esc), &mut view, &mut help, 120, 40);
@@ -12335,14 +12440,14 @@ mod tests {
     fn the_footer_settings_button_enters_and_leaves() {
         let mut view = View { page: Page::Docker, ..Default::default() };
         assert!(matches!(
-            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None, 0),
             Flow::OpenSettings
         ));
         // The loop is what carries the page across; do it the way the loop does.
         let ret = view.page;
         view.page = Page::Settings;
         assert!(matches!(
-            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None, 0),
             Flow::CloseSettings
         ));
         assert_eq!(ret, Page::Docker, "and it goes back where it was opened from");
@@ -12355,35 +12460,35 @@ mod tests {
         let ret = Page::Docker;
         // A space names where it is going, and goes there rather than to `ret`.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(Page::Booth), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(Page::Booth), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, Page::Booth, "clicking BOOTH left SETTINGS up");
 
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(Page::Files), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(Page::Files), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, Page::Files);
 
         // The space that *is* `ret` still goes there, rather than reading as a
         // press on the page you are already on and toggling to AGENTS.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(ret), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(ret), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, ret, "the space you came from toggled instead");
 
         // A chip names no page, so it puts back the one SETTINGS was over.
         let mut view = View { page: Page::Settings, tab: 0, ..Default::default() };
-        page_bar_click(hit::Target::Tab(1), &mut view, ret, 2, None);
+        page_bar_click(hit::Target::Tab(1), &mut view, ret, 2, None, 0);
         assert_eq!(view.page, ret, "a workspace chip left SETTINGS up over it");
         assert_eq!(view.tab, 1, "and it still selects the workspace");
 
         // `[help]` names a page of its own, and it is the loop that carries the
         // page across — so what this pins is the flow, not `view.page`.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        let flow = page_bar_click(hit::Target::Footer("[help]"), &mut view, ret, 1, None);
+        let flow = page_bar_click(hit::Target::Footer("[help]"), &mut view, ret, 1, None, 0);
         assert!(matches!(flow, Flow::OpenHelp), "help from SETTINGS went nowhere");
 
         // And its own button stays a toggle: putting the page back first would
         // turn the press into a fresh `OpenSettings` and pin the page open.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        let flow = page_bar_click(hit::Target::Footer("[settings]"), &mut view, ret, 1, None);
+        let flow = page_bar_click(hit::Target::Footer("[settings]"), &mut view, ret, 1, None, 0);
         assert!(matches!(flow, Flow::CloseSettings), "[settings] stopped closing");
     }
 
@@ -12552,7 +12657,7 @@ mod tests {
                     // And it opens the same list the button does.
                     let mut view = View::default();
                     assert!(matches!(
-                        run_click(hit::Target::Spaces, &mut view, 1, None),
+                        run_click(hit::Target::Spaces, &mut view, 1, None, 0),
                         Flow::PickSpace
                     ));
                 }
@@ -12597,7 +12702,7 @@ mod tests {
                 hit::Target::Machines => {
                     assert_eq!(alt('h'), Some(ViewVerb::Host));
                     let mut view = View::default();
-                    assert!(matches!(run_click(target, &mut view, 1, None), Flow::PickHost));
+                    assert!(matches!(run_click(target, &mut view, 1, None, 0), Flow::PickHost));
                 }
                 // All four footer buttons, by the label the footer draws.
                 hit::Target::Footer(_) => {
@@ -12702,21 +12807,21 @@ mod tests {
     fn clicking_a_row_selects_it_and_clicking_it_again_stages_it() {
         let mut view = View::default();
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 2), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 2), &mut view, 1, None, 0),
             Flow::Continue
         ));
         assert_eq!((view.focus, view.agent_sel), (Focus::Agents, 2));
 
         // A different row is still only a selection.
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None, 0),
             Flow::Continue
         ));
         assert_eq!(view.agent_sel, 3);
 
         // The row already under the cursor is the one that stages.
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None, 0),
             Flow::StageSelected
         ));
 
@@ -12725,7 +12830,7 @@ mod tests {
         view.focus = Focus::Changes;
         view.changes_sel = 1;
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Changes, 1), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Changes, 1), &mut view, 1, None, 0),
             Flow::OpenSelectedDiff
         ));
     }
@@ -12741,7 +12846,7 @@ mod tests {
     fn every_left_rail_verb_does_what_the_word_under_the_list_says() {
         let ws = ws_with_agents();
         let mut view = View::default();
-        let run = |view: &mut View, t| run_click(t, view, 1, Some(&ws));
+        let run = |view: &mut View, t| run_click(t, view, 1, Some(&ws), 0);
 
         assert!(matches!(run(&mut view, hit::Target::AgentsVerb('x')), Flow::KillSelected));
         assert_eq!(view.focus, Focus::Agents, "a verb acts on its own section's cursor");
@@ -12848,14 +12953,14 @@ mod tests {
     #[test]
     fn choosing_a_workspace_on_booth_leaves_it() {
         let mut view = View { page: Page::Booth, tab: 0, ..Default::default() };
-        assert!(matches!(run_click(hit::Target::Tab(1), &mut view, 3, None), Flow::Continue));
+        assert!(matches!(run_click(hit::Target::Tab(1), &mut view, 3, None, 0), Flow::Continue));
         assert_eq!(view.tab, 1, "the chip should still select its workspace");
         assert_eq!(view.page, Page::Agents, "BOOTH kept the screen after a workspace was chosen");
 
         // A tree page is a view of a workspace, so it stays up and re-points.
         for page in [Page::Files, Page::Docs, Page::Docker] {
             let mut view = View { page, tab: 0, ..Default::default() };
-            run_click(hit::Target::Tab(2), &mut view, 3, None);
+            run_click(hit::Target::Tab(2), &mut view, 3, None, 0);
             assert_eq!(view.tab, 2);
             assert_eq!(view.page, page, "{page:?} should survive a tab change");
         }
@@ -12894,9 +12999,9 @@ mod tests {
     #[test]
     fn a_click_on_a_tab_that_has_gone_is_ignored() {
         let mut view = View { tab: 1, ..Default::default() };
-        run_click(hit::Target::Tab(5), &mut view, 2, None);
+        run_click(hit::Target::Tab(5), &mut view, 2, None, 0);
         assert_eq!(view.tab, 1, "the cursor followed a tab that does not exist");
-        run_click(hit::Target::Tab(0), &mut view, 2, None);
+        run_click(hit::Target::Tab(0), &mut view, 2, None, 0);
         assert_eq!(view.tab, 0);
     }
 

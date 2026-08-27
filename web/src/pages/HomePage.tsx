@@ -118,6 +118,9 @@ export interface HomeCallbacks {
   fold(next: Folds): void;
   /// Start this project's preferred agent in it, without moving the page.
   start(space: SpaceRow): void;
+  /// Close that workspace, and everything running in it. Asks first — this is
+  /// the one press on the page that takes something away.
+  close(space: SpaceRow): void;
 }
 
 export interface HomePageProps {
@@ -315,6 +318,24 @@ function FleetList({
               >
                 {space.preferred ? `+ ${space.preferred}` : "+"}
               </Button>
+              {/* On the cursor's row only, which is the tab bar's rule for its
+                  own `[x]` and for the same reason: this ends a workspace and
+                  everything running in it, so a press that lands on it has to
+                  be a press that aimed at it. */}
+              {i === sel ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-bad"
+                  title={`Close ${space.name} and kill what is running in it (x)`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    on.close(space);
+                  }}
+                >
+                  x
+                </Button>
+              ) : null}
             </Row>
           );
         }

@@ -807,8 +807,26 @@ fit on screen. `z` or a click expands one back to the stack, drawn by the same
 renderer the rail uses, so the two cannot come to two opinions of what 41% means.
 It has nothing to select, so the wheel scrolls it and `j`/`k` stay with the fleet.
 
-**`x` ends the session the cursor is on**, wherever it lives, and `m` or the
-right button opens that row's menu — `Close agent`, `Close others`, `Close all
+**`x` ends the thing the row is.** On an agent that is the session, wherever it
+lives, and it does not ask, for the reason the rail's `x` does not: an agent is
+a process whose transcript is on disk. On a project row it is the workspace and
+everything running in it, so it asks — in the tab bar's own box and its own
+words, because that is the same act reached from somewhere else.
+
+`[x]` is that press under the pointer, right of `[+]`, and it is drawn **on the
+cursor's row and nowhere else**. That is the tab bar's rule for its own `[x]`
+and it has the same reason: a button that ends a workspace has to be one you
+aimed at, not one sitting under a row you were passing. It costs four cells,
+which on this column is a sprite or half a name — worth spending on the row you
+are looking at and not on the ten you are not.
+
+Every control on the row keeps its place before any of them is spelled out, so a
+narrow column draws `[+] [x]` rather than `[+ claude]` and no way to close: `[+]`
+starts exactly the agent `[+ claude]` would, and `[x]` has no shorter form. What
+neither of them ever costs is a sprite — a folded project that cannot say what is
+in it is a row you have to unfold to read.
+
+`m` or the right button opens that row's menu — `Close agent`, `Close others`, `Close all
 agents`, the same three the AGENTS rail offers, acting on the row's own project
 rather than on the tab you are looking at. Neither asks first, for the reason the
 rail's `x` does not: an agent is a process whose transcript is on disk. On a

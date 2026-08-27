@@ -42,12 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workbench onto somebody else's project. A project row has nothing to preview,
   so going there is the only thing pressing its name could be asking for.
 
+- **`[x]` closes a workspace from BOOTH**, and `x` with the cursor on a project
+  row does the same. It ends what the row *is*: on an agent that is the session
+  and it does not ask, because an agent is a process whose transcript is on
+  disk; on a project it is the workspace and everything running in it, so it
+  asks — in the tab bar's own box and its own words, since that is the same act
+  reached from somewhere else.
+
+  The button is drawn on the cursor's row and nowhere else, which is the tab
+  bar's rule for its own `[x]`: a button that ends a workspace has to be one you
+  aimed at, not one sitting under a row you were passing.
+
 - **`z` and `Z` fold BOOTH's fleet**, with the DIFF page's keys and its marks
   (`v` open, `>` folded) — this workbench already had a fold idiom and a second
   one for the same concept would be drift. `Z` leaves an index of every machine,
   every project, and what is running in each. A folded project draws its agents'
   sprites where their rows were, so folding costs you the titles and the buttons
   and not the states.
+
+### Fixed
+
+- **Closing a workspace sent the DELETE to the machine the *active tab* was on.**
+  From the tab bar those are the same daemon by construction, so it never bit;
+  from BOOTH's fleet they are routinely not, and a `SessionId` is only unique on
+  its own daemon — so closing a `gpu-box` project would have closed whatever
+  held that id at home. `ConfirmKind::CloseWorkspace` carries the machine now,
+  the same way `MenuTarget::Agent` already did after `x` on a fleet row had the
+  identical bug.
 
 ### Changed
 

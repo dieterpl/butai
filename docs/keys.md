@@ -182,8 +182,9 @@ commit box and the sync buttons, which is what `C` goes to.
 
 **BOOTH** — `j` `k` walk the rows · `enter` go there: an agent's workspace on its
 machine, or the project the cursor names · `a` start that project's agent · `A`
-pick which · `z` fold this machine or project · `Z` fold every project · `tab` the
-preview · `x` end the session · `m` the row's menu.
+pick which · `x` end what the row is: the session on an agent, the workspace and
+everything in it on a project (which asks) · `z` fold this machine or project ·
+`Z` fold every project · `tab` the preview · `m` the row's menu.
 
 Ten keys, and every one of them is a key this workbench already had: `a` and `A`
 are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`
