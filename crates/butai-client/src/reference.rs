@@ -97,16 +97,23 @@ asks for a name, makes the folder on that machine and steps into it, leaving
 `[open this folder]` under the cursor. Nothing here needs a shell.
 
 BOOTH is not a view of a workspace, it is the surface that spans them: every
-agent on every machine, with the selected one's screen. That is why it sits
+project on every machine, with the selected one's screen. That is why it sits
 beside the workspace chips rather than in the space list. The name is the
 control booth at the back of a theatre — the one seat that watches every
 stage at once and can key into any single one of them.
 
 The middle column is that agent's live pane, not a picture of one. The keyboard
-starts on the FLEET list, so `j`/`k` walk agents; `tab` or a click hands it to
+starts on the FLEET list, so `j`/`k` walk rows; `tab` or a click hands it to
 the pane and everything you type from then on is the agent's. `alt-w` takes it
 back. `[open]` is the other move — it goes to that agent's project, which
-changes the tab you are on; typing at the preview does not.
+changes the tab you are on; typing at the preview does not. A project's name
+does the same, because a project row has nothing to preview.
+
+The fleet lists the projects with nothing running in them too, so `a` can start
+one: it spawns that project's own agent — `[agents] autostart` in its
+`.butai.toml`, then your `default_agent` — and `A` picks the type. `z` folds the
+machine or project the cursor is on and `Z` folds every project, which leaves an
+index of the whole fleet.
 
 ## Other machines
 
@@ -567,9 +574,10 @@ eating it.
     j k         move
     enter       stage the row, or open what it names
 
-BOOTH's fleet takes `j`, `k`, `enter`, `tab`, and `x` and `m` — which there act
-on the row's own machine and project, not on the tab you are looking at. The
-rest of the list is about a workspace, and BOOTH is not in one.
+BOOTH's fleet takes `j`, `k`, `enter`, `tab`, `x`, `m`, `a`, `A`, `z` and `Z` —
+and each of them acts on the row's own machine and project, not on the tab you
+are looking at. `a`/`A` are the AGENTS rail's verbs and `z`/`Z` are the diff's
+folds; nothing here is a key this workbench did not already have.
 
 ## Everything has one
 

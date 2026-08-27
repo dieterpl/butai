@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **BOOTH lists projects, not just agents — and you can start work in one from
+  there.** The page could show you every agent on every machine and let you
+  watch them; it could not let you act on the answer. Reaching a project meant
+  `[open]` to it, `a` on the rail, then back — and a project you had not started
+  anything in did not appear at all, because the rows were built by walking the
+  agent list and emitting a header whenever the workspace changed.
+
+  The rows come from the machine and project lists now, so a project with
+  nothing running has a row and a connected machine with nothing open has one
+  too. `a` starts that project's agent and `A` picks which — the AGENTS rail's
+  own two verbs, bound here unchanged, acting on the project the cursor is in
+  rather than on the tab you are looking at. The new agent appears in the fleet
+  and the preview points at it; the page does not move.
+
+  A project's `[+ claude]` button is the same act under the pointer, and it names
+  what it will start for the reason the rail's does: a button that spawns on a
+  single click with nothing in between is the only place you can see what that
+  click is about to do.
+
+- **A project's `.butai.toml` says which agent it uses.** `[agents] autostart`
+  already declared what a workspace starts when it opens; it is now published on
+  the workspace and read whenever a client offers to start one. So the answer to
+  "which agent does this project use" is two steps — the project's own
+  declaration, then the client's `default_agent` pin — and most projects need no
+  new configuration at all. The preference lives with the project, travels to
+  the machine it runs on, and is shared with whoever else opens it, which a
+  client-side pin keyed by directory would not.
+
+- **A project's name goes to that workspace.** An agent row still only moves the
+  cursor, because a click meaning "let me look at this" must not throw the
+  workbench onto somebody else's project. A project row has nothing to preview,
+  so going there is the only thing pressing its name could be asking for.
+
+- **`z` and `Z` fold BOOTH's fleet**, with the DIFF page's keys and its marks
+  (`v` open, `>` folded) — this workbench already had a fold idiom and a second
+  one for the same concept would be drift. `Z` leaves an index of every machine,
+  every project, and what is running in each. A folded project draws its agents'
+  sprites where their rows were, so folding costs you the titles and the buttons
+  and not the states.
+
+### Changed
+
+- **BOOTH's compute column is one row per machine, and it names what is wrong.**
+  It drew the SYSTEM rail's whole gauge stack per machine — twelve to twenty rows
+  for a workstation, which is right for the rail (it describes the one machine
+  you are working on) and wrong on a page whose question is which of four
+  machines is in trouble. Four machines did not fit.
+
+  A machine is a line now: what it is, how many agents it is running, and the
+  *worst* of its four readings, named. Not the CPU — a box at 30% CPU with a full
+  root filesystem is in trouble and its CPU number says it is fine. `z` or a
+  click expands one back to the stack, drawn by the same renderer the rail uses,
+  so the two cannot come to two opinions of what 41% means.
+
+- **BOOTH's cursor walks rows rather than agents**, since a machine and a project
+  are now things you can sit on. The agent under it is derived — one function for
+  what `x` and the menu act on, one for what the middle column shows. On a
+  project row the pane shows the agent in it that most needs you, so walking the
+  fleet is a fly-over of each project's screen.
+
+- The TUI groups the fleet's projects by *id* rather than by name, as the web
+  client already did. Two machines routinely have a project of the same name
+  open, and one machine may have two.
+
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

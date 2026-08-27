@@ -102,9 +102,9 @@ interface. It also carries **disconnect host** on a remote tab, which is the one
 row of it that has a second way in: `alt-h` lists the machines you are connected
 to, and choosing one drops it.
 
-`x` and `m` also answer on **BOOTH's fleet**, and there they act on the row's own
-machine and project rather than on the tab you are looking at — the one list in
-the workbench where those are routinely not the same thing.
+`x`, `m`, `a` and `A` also answer on **BOOTH's fleet**, and there they act on the
+row's own machine and project rather than on the tab you are looking at — the one
+list in the workbench where those are routinely not the same thing.
 
 The SYSTEM gauges are the one part of the left rail the cursor cannot walk, so
 their monitor is keyed rather than entered: `C-b S` is `htop`, `C-b Y` is
@@ -180,11 +180,21 @@ over the DIFF space, so you keep the refs and the history you opened it from,
 and the diff keys above work there. The rail is unchanged and still owns the
 commit box and the sync buttons, which is what `C` goes to.
 
-**BOOTH** — `j` `k` walk the fleet · `enter` go to that agent, on its machine ·
-`tab` the preview · `x` end the session · `m` the row's menu. Six keys and no
-more: the rest of the rails' table is about a project, and this page is not in
-one. The NEEDS YOU tray answers the pointer as the fleet does — a click puts the
-cursor on the agent the copy stands for.
+**BOOTH** — `j` `k` walk the rows · `enter` go there: an agent's workspace on its
+machine, or the project the cursor names · `a` start that project's agent · `A`
+pick which · `z` fold this machine or project · `Z` fold every project · `tab` the
+preview · `x` end the session · `m` the row's menu.
+
+Ten keys, and every one of them is a key this workbench already had: `a` and `A`
+are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`
+folded) and all. It used to be six, and the reason given was that the rest of the
+rails' table is about a project and this page is not in one — which stopped being
+true when its rows became projects.
+
+The NEEDS YOU tray answers the pointer as the fleet does — a click puts the
+cursor on the row the copy stands for. An agent folded away inside its project
+has no row to move to, so its copy names nothing rather than selecting whatever
+sits at that index; the tray is still the shortest way to it, through unfolding.
 
 **FILES / DOCS** — `j` `k` move · `enter` open or descend · `backspace` up ·
 `/` find · `e` edit · `C-s` save · `esc` stop editing · `x` delete · `q` close.

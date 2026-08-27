@@ -174,7 +174,7 @@ are listed here in the order the source declares them.
 | Key | Type | Default | Read by | What it changes |
 |---|---|---|---|---|
 | `prefix` | string | `"C-b"` | client | The key that opens a prefix binding. Pressing it twice sends one literal through to the pane. Spelling is the key mini-language: `C-`, `M-`, `S-` prefixes over a character or a named key. |
-| `default_agent` | string | unset | client | The agent `a` and `[+ agent]` spawn with no picker in between. Unset asks every time. Stored as a *name*, so it survives reordering `[[agents]]`. |
+| `default_agent` | string | unset | client | The agent `a` and `[+ agent]` spawn with no picker in between. Unset asks every time. Stored as a *name*, so it survives reordering `[[agents]]`. On BOOTH it is the **fallback**: a project's own `[agents] autostart` is asked first — see below. |
 | `remote_auto_attach` | bool | `true` | client | Whether a `butai` run over ssh inside a pane may pull its machine into this tab bar on its own. Off means machines join only through the machines button or a `[[remote]]` block. |
 | `option_as_alt` | bool | `true` on macOS, `false` elsewhere | client | Read macOS's Option-composed characters back as the Alt layer, so Option-o *is* `alt-o`. Only characters the workbench binds are mapped; the cost is that those characters cannot be typed into a pane. |
 | `default_shell` | string | unset | daemon | The shell a terminal pane runs, and the interpreter `[[processes]]` commands go through. Unset falls back to `$SHELL`, then `/bin/sh`. |
@@ -519,7 +519,19 @@ autostart = ["claude"]
 | `[[processes]] name` | string | *required* | The row's label in the PROCESSES rail. |
 | `[[processes]] cmd` | string | *required* | Run through the workspace shell's `-c`, in the workspace directory. That is `[general] default_shell`, then `$SHELL`, then `/bin/sh` — the same resolution a shell pane uses. |
 | `[[processes]] ready` | string | unset | A **case-sensitive substring** of the process's output that flips the row's status to `ok`. Matched against the raw output stream, across burst boundaries. |
-| `[agents] autostart` | list of strings | `[]` | `[[agents]]` names spawned into the AGENTS rail when the workspace opens, in order. |
+| `[agents] autostart` | list of strings | `[]` | `[[agents]]` names spawned into the AGENTS rail when the workspace opens, in order. **Also what this project's agent *is***: BOOTH's `a` and its `[+ NAME]` button start the first entry, so a project that autostarts `claude` needs no client configuration to offer it. |
+
+**`autostart` is a declaration, not just an instruction.** It is published on the
+workspace (`WorkspaceSummary.autostart`, and the detail record too) and kept after
+the file has been acted on, because "which agent does this project use" is a
+question a client needs answered whenever it offers to start one — not only at
+open. The daemon publishes the list; each client decides what to do with it, the
+same split `net` and `disks` already make.
+
+That is also why the per-project preference lives *here* rather than in the
+client's own config: this file travels with the project to whichever machine it
+runs on, and it is shared with whoever else opens it. A client-side pin keyed by
+directory would be none of those things.
 
 `name` and `cmd` are required in the same sense `[[agents]]`' are: a block
 missing either fails the *whole file's* parse, so one typo costs you every

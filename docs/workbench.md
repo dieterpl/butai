@@ -650,28 +650,42 @@ and then prints unrelated prose.
 
 ## BOOTH
 
-`alt-0`, or the chip at the far left of the tab bar. Every agent on every
-connected machine, the selected one's live screen, and what each machine is doing
-to itself. It is the only page that spans daemons, which is why it takes the
-rails' columns: the left rail would list one workspace's agents beside a column
-listing everyone's.
+`alt-0`, or the chip at the far left of the tab bar. Every project on every
+connected machine, the selected one's live screen, and whether each machine is in
+trouble. It is the only page that spans daemons, which is why it takes the rails'
+columns: the left rail would list one workspace's agents beside a column listing
+everyone's.
 
 ```
-┌ FLEET (7) ─────────┐┌ codex · gpu-box:infra ─┐┌ COMPUTE ─────┐
-│,o, codex · infra   ││                        ││local 3 agents│
-│                    ││  ? Run the migration?  ││CPU ▄▄▄▄  41% │
-│nothing else waiting││    1. Yes  2. No       ││RAM ▆▆▆▆ 19/32│
-│                    ││                        ││              │
-├ NEEDS YOU (1) ─────┤│  > _                   ││gpu-box 4 agen│
-│local             3 ││                        ││CPU ██████ 97%│
-│ butai              ││                        ││RAM ▇▇▇▇ 58/64│
-│ -o- claude   [open]││                        ││GPU ████ 11/12│
-│ \o/ gemini   [open]││                        ││              │
-│gpu-box           4 ││                        ││              │
-│ infra              ││                        ││              │
-│ ?o? codex    [open]││                        ││              │
-└────────────────────┘└────────────────────────┘└──────────────┘
+┌ FLEET (6) ───────────────────┐┌ codex · gpu-box:infra ─┐┌ COMPUTE ───────────┐
+│?o? codex · infra             ││                        ││> local     4 ███ CP│
+│\o/ claude · butai            ││  ? Run the migration?  ││> gpu-box   2 ███ RA│
+│\o/ gemini · caliper          ││    1. Yes  2. No       ││> mini      ·   away│
+│                              ││                        ││                    │
+├ NEEDS YOU (3) ───────────────┤│  > _                   ││v dev-1     1 █   CP│
+│v local                      4││                        ││  CPU Xeon      8%  │
+│  v butai           [+ claude]││                        ││  ▁▁▂▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁│
+│    \o/ claude          [open]││                        ││  RAM        6/64G  │
+│    -o- gemini          [open]││                        ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│
+│  > caliper .o' \o/      [+]  ││                        ││                    │
+│  v notes            [+ codex]││                        ││                    │
+│      no agents               ││                        ││                    │
+│v gpu-box                    2││                        ││                    │
+│  v infra           [+ claude]││                        ││                    │
+│    ?o? codex           [open]││                        ││                    │
+│    .o' claude          [open]││                        ││                    │
+│> mini            nothing open││                        ││                    │
+└──────────────────────────────┘└────────────────────────┘└────────────────────┘
 ```
+
+**It is a list of projects that happens to contain agents**, and that is a change
+from what it was. The rows used to be built by walking the agent list and
+emitting a header whenever the workspace changed, so a project with nothing
+running in it produced no rows at all — the one page listing every project on
+every machine could not show you the ones you had not started anything in, which
+are exactly the ones you want to start something in. They come from the machine
+and project lists now, so `notes` above has a row and so does `mini`, which is
+connected with nothing open on it.
 
 **The tray** at the top is a fixed four rows whether it holds three agents or
 none, because a tray that grew would push the list down every time an agent
@@ -689,12 +703,14 @@ the original is right there below with one — so `enter` is how you go to it on
 the cursor is on it. Right-clicking a copy opens the same menu the original's row
 does.
 
-**The fleet list** is grouped by machine and then by workspace, and its order is a
+**The fleet list** is grouped by machine and then by project, and its order is a
 pure function of identity — daemon, then tab order, then spawn order. It reads no
 agent state at all, so a row is where it was an hour ago and a status change
 redraws a glyph in place. (Sorting by urgency was measured and rejected: rows
 travelled ~174 positions per ten sampler ticks at 24 agents, and hysteresis only
-brought that to 169.)
+brought that to 169.) Projects are grouped by *id* rather than by name: two
+machines routinely have a project of the same name open, and one machine may have
+two, so the name is left to the drawing.
 
 Each agent wears a three-cell sprite:
 
@@ -717,34 +733,96 @@ and the name here exactly as the AGENTS rail pins it, in the tray and in the
 fleet list both. Only the name marquees.
 
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk agents; `tab` or a click hands it to the pane and
+the fleet, so `j`/`k` walk rows; `tab` or a click hands it to the pane and
 everything you type from then on is that agent's. `alt-w` or `alt-esc` takes it
 back — it has to be one of those, because once the pane has the keyboard `esc`
 and `tab` are the agent's too.
 
-**Clicking a row only moves the cursor.** `[open]`, right-aligned on the row, is
-the one thing that travels: it goes to that agent's workspace on its machine,
-which moves the tab bar out from under you. `enter` is its keyboard spelling.
-This split exists because a click that meant "let me look at this" was throwing
-the whole workbench onto somebody else's project. `[open]` is dropped when the
-column is too narrow for it, and then the two-step click is the only way.
+The cursor walks *rows*, machines and projects included, because starting a
+session belongs to a project and so does going somewhere. The agent under it is
+derived rather than tracked beside it — two indices that have to agree are two
+indices that eventually do not — and **on a project row the pane shows the agent
+in it that most needs you**, so walking the fleet is a fly-over of each project's
+screen rather than a cursor that keeps pointing the pane somewhere it has left. A
+project with nothing running previews nothing, and a machine row previews
+nothing: there is no honest answer and the stage says so.
 
-**The compute column** draws each connected machine — its name, its agent count,
-and the same gauges the SYSTEM rail draws, through the same renderer. It has
-nothing to select, so the wheel scrolls it and `j`/`k` stay with the fleet.
+**Clicking an agent row only moves the cursor.** `[open]`, right-aligned on it, is
+the one thing on that row which travels: it goes to that agent's workspace on its
+machine, which moves the tab bar out from under you. `enter` is its keyboard
+spelling. This split exists because a click that meant "let me look at this" was
+throwing the whole workbench onto somebody else's project. `[open]` is dropped
+when the column is too narrow for it, and then the two-step click is the only way.
+
+That rule is about *agent* rows and it has not moved. A **project's name** goes to
+that workspace, because a project row has nothing to preview and travelling is
+the only thing pressing its name could be asking for. Nothing here takes you
+somewhere by accident: every route out is a field you aimed at.
+
+**`a` starts a session in the project the cursor is in**, and `A` picks the type
+whatever the project says. They are the rails' own two verbs, bound here
+unchanged — what moved is only what they act on, from the tab you are looking at
+to the project the row names, which on this page are routinely not the same
+project or even the same machine. The new agent appears in the fleet and the
+preview points at it; **the page does not move**, because a button that started
+something *and* threw the tab bar onto another machine is the bug that made agent
+rows two-step in the first place.
+
+`[+ claude]` on the row is the same button under the pointer, and it names what
+it will start for the reason the AGENTS rail's does: a button that spawns on a
+single click with nothing in between is the only place you can see what that
+click is about to do. It falls back to `[+]` and then to nothing as the column
+narrows, exactly as `[open]` already degrades.
+
+**What a project starts** is its own `[agents] autostart`, then the client's
+`default_agent` pin, then the picker. Two steps and no third: a project that
+wants `codex` says so in the file it already has for exactly that, which lives
+with the project, travels to the machine it runs on, and is shared with whoever
+else opens it. A client-side pin keyed by directory would be none of those three.
+
+**`z` folds the machine or project the cursor is on; `Z` folds every project at
+once**, leaving an index of every machine, every project, and what is running in
+each. They are the DIFF page's fold keys and its marks — `v` open, `>` folded —
+because this workbench already has a fold idiom and a second one for the same
+concept is drift. A folded project draws its agents' sprites where their rows
+were, so folding costs you the titles and the buttons and not the states; three
+ASCII cells apiece is what makes that affordable. `z` on an *agent* folds the
+project it is in and takes the cursor up to that row, which is the only move that
+leaves the cursor on something you can still see.
+
+Folding is a filter over the order and never a second ordering: a folded row is
+simply not emitted and the rows around it keep the positions they had. The tray
+is untouched by it — the tray holds copies, so an agent waiting inside a folded
+project is still one click from the top of the page.
+
+**The compute column** is one row per machine: what it is, how many agents it is
+running, and the *worst* of its four readings, named. Not the CPU — a box at 30%
+CPU with a full root filesystem is in trouble and its CPU number says it is fine.
+The column used to draw the SYSTEM rail's whole stack per machine, which is right
+for the rail (it describes the one machine you are working on) and wrong here,
+where the question is which of four machines is in trouble and the answer did not
+fit on screen. `z` or a click expands one back to the stack, drawn by the same
+renderer the rail uses, so the two cannot come to two opinions of what 41% means.
+It has nothing to select, so the wheel scrolls it and `j`/`k` stay with the fleet.
 
 **`x` ends the session the cursor is on**, wherever it lives, and `m` or the
 right button opens that row's menu — `Close agent`, `Close others`, `Close all
 agents`, the same three the AGENTS rail offers, acting on the row's own project
 rather than on the tab you are looking at. Neither asks first, for the reason the
-rail's `x` does not: an agent is a process whose transcript is on disk.
+rail's `x` does not: an agent is a process whose transcript is on disk. On a
+project row the menu is the tab bar's own, against *its* chip; a machine row has
+none, because there is nothing generic to offer about a host here that the tab
+bar does not already offer about its tabs.
 
 Pasting with the cursor still on the fleet says `click the preview or Tab to it
 to type there` rather than silently landing in an agent on another machine.
 
-The fleet's bare keys are `j`, `k`, `enter`, `tab`, `x` and `m`, and no more. The
+The fleet's bare keys are `j`, `k`, `enter`, `tab`, `x`, `m`, `a`, `A`, `z` and
+`Z`, and no more. It used to be the first six, and the reason given was that the
 rest of the lettered rail verbs are about lists this page does not draw — a new
-agent belongs to a project, and BOOTH is not in one.
+agent belongs to a project, and BOOTH is not in one. That sentence stopped being
+true when the rows became projects. It survives in a better form: a new agent
+belongs to a project, and here the cursor is always in one.
 
 ## FILES and DOCS
 
@@ -1283,6 +1361,12 @@ lockfile in the repo. Two consequences worth knowing:
 | the CHANGES rail: rows, label, verbs, split | `crates/butai-client/src/chrome/mod.rs` (`change_rows`, `changes_label`, `changes_verbs`, `changes_split`) |
 | every verb table, the footer packing, the `?` text | `crates/butai-client/src/verbs.rs` |
 | BOOTH: columns, tray, fleet order, `[open]` | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `booth_tray`, `fleet_open_span`) |
+| BOOTH: which projects the fleet lists, and what each starts | `crates/butai-client/src/workbench.rs` (`fleet_spaces`), `crates/butai-client/src/chrome/mod.rs` (`SpaceRow`) |
+| BOOTH: what the cursor is on, and what the pane shows | `crates/butai-client/src/chrome/mod.rs` (`booth_selected`, `booth_preview`), `crates/butai-client/src/workbench.rs` (`booth_cursor`) |
+| BOOTH: folding, and what `Z` folds | `crates/butai-client/src/chrome/mod.rs` (`Folds`, `booth_space_keys`), `crates/butai-client/src/workbench.rs` (`fold_cursors_space`) |
+| BOOTH: a project row's fields and where each sits | `crates/butai-client/src/chrome/mod.rs` (`space_layout`) |
+| BOOTH: the compute summary and what it names | `crates/butai-client/src/chrome/mod.rs` (`machine_pressure`, `draw_compute`, `compute_machine_h`) |
+| BOOTH: starting an agent in a row's project | `crates/butai-client/src/workbench.rs` (`spawn_agent_in`, `fleet_agent_picker`, `open_fleet_row`) |
 | BOOTH: what a press on the fleet or the tray lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`, `booth_tray_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |
 | BOOTH: `x`, the row menu, and which machine they act on | `crates/butai-client/src/workbench.rs` (`handle_fleet_key`, `fleet_menu`, `fleet_route`, `selected_route`) |
 | FILES / DOCS: tree, editor, gutter, `[find]` | `crates/butai-client/src/chrome/mod.rs` (`Files`, `Editor`, `draw_files_page`), `crates/butai-client/src/syntax.rs` |
