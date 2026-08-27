@@ -28,7 +28,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { PageName, PageProps } from "./Shell.tsx";
 import { api } from "../logic/api.ts";
-import { allAgentRows } from "../logic/fleet.ts";
+import {
+  HomeRowKind,
+  allAgentRows,
+  fleetSpaces,
+  homePreview,
+  homeRows,
+  machineRows,
+  toggleAllSpaces,
+  toggleFold,
+} from "../logic/fleet.ts";
 import { daemonOf, qid, type Qid, type QualifiedWorkspace } from "../logic/events.ts";
 import {
   ChangesRow,
@@ -290,12 +299,18 @@ function Work(p: PageProps) {
 // ---------------------------------------------------------------------------
 
 function Home(p: PageProps) {
-  // The same rows the page draws, from the same pure function: the cursor counts
-  // rows of exactly that list, so deriving it twice is the one thing here that
-  // must not drift — which is why `fleet.ts` is pure and neither side keeps a
-  // copy.
+  // The same rows the page draws, from the same pure functions: the cursor
+  // counts rows of exactly that list, so deriving it twice is the one thing
+  // here that must not drift — which is why `fleet.ts` is pure and neither side
+  // keeps a copy.
   const rows = allAgentRows(p.world.workspaces, p.world.daemons);
-  const cursor = rows[Math.min(p.view.sel, Math.max(0, rows.length - 1))] ?? null;
+  const machines = machineRows(p.world.daemons, rows);
+  const spaces = fleetSpaces(p.world.workspaces, p.world.daemons, rows, p.view.pin);
+  const list = homeRows(spaces, machines, p.view.folds);
+  const at = Math.min(p.view.sel, Math.max(0, list.length - 1));
+  const row = list[at] ?? null;
+  const previewed = homePreview(list, at);
+  const cursor = previewed == null ? null : (rows[previewed] ?? null);
 
   const on: HomeCallbacks = {
     walk: (sel) => p.on.setSel(sel),
@@ -306,14 +321,59 @@ function Home(p: PageProps) {
       p.on.setPane(pane);
       p.on.setPage("work");
     },
+    // A project has no pane to stage, so this goes there and leaves the
+    // workspace showing whatever it had.
+    go: (ws) => {
+      p.on.setWsId(String(ws));
+      p.on.setPage("work");
+    },
+    fold: (folds) => p.on.setFolds(folds),
+    // Starting an agent leaves you on HOME: the new row appears in the fleet
+    // and the preview points at it, which is the whole of what you wanted to
+    // see. A button that started something *and* threw the page onto another
+    // machine is the bug that made agent rows two-step.
+    start: (space) => {
+      void p.actions.spawnPick(space.ws, false, space.preferred);
+    },
   };
 
   const act: HomeActions = {
     press: (surface, key) => {
       const verb = verbFor(surface, key, p.view.pin);
+      // `enter` reads the row: an agent goes to that agent, a project goes to
+      // that workspace, a machine folds — one key, and the row says which.
       if (verb?.id === VerbId.OpenAgent) {
-        if (cursor) on.open({ ws: cursor.ws, pane: cursor.pane });
-        else p.actions.toast("no agent selected");
+        if (row?.kind === HomeRowKind.Space) on.go(row.space.ws);
+        else if (cursor && row?.kind === HomeRowKind.Agent) on.open({ ws: cursor.ws, pane: cursor.pane });
+        else p.actions.toast("nothing to open here");
+        return;
+      }
+      if (verb?.id === VerbId.NewAgent) {
+        if (row?.kind === HomeRowKind.Space) on.start(row.space);
+        else p.actions.toast("put the cursor on a project to start an agent");
+        return;
+      }
+      if (verb?.id === VerbId.Fold) {
+        const f = p.view.folds;
+        if (row?.kind === HomeRowKind.Machine) {
+          on.fold({ ...f, machines: toggleFold(f.machines, row.label ?? "") });
+        } else if (row?.kind === HomeRowKind.Space) {
+          on.fold({ ...f, spaces: toggleFold(f.spaces, row.space.ws) });
+        } else if (row?.kind === HomeRowKind.Agent) {
+          // `z` on an agent folds the project it is *in*, and takes the cursor
+          // up to that row — the only move that leaves the cursor on something
+          // you can still see.
+          const header = list.slice(0, at).findLastIndex((r) => r.kind === HomeRowKind.Space);
+          const space = header >= 0 ? list[header] : null;
+          if (space && space.kind === HomeRowKind.Space) {
+            p.on.setSel(header);
+            on.fold({ ...f, spaces: toggleFold(f.spaces, space.space.ws) });
+          }
+        }
+        return;
+      }
+      if (verb?.id === VerbId.FoldAll) {
+        on.fold(toggleAllSpaces(p.view.folds, spaces));
         return;
       }
       if (verb?.id === VerbId.Help) {
@@ -329,7 +389,9 @@ function Home(p: PageProps) {
       world={p.world}
       actions={act}
       on={on}
-      sel={p.view.sel}
+      sel={at}
+      folds={p.view.folds}
+      pin={p.view.pin}
       pane={cursor ? cursor.pane : null}
       theme={p.term}
       fontPx={p.view.fontPx}

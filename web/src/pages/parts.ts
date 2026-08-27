@@ -170,7 +170,7 @@ export function loadTone(pct: number): MeterTone {
   return c === "bad" ? "bad" : c === "warn" ? "warn" : "ok";
 }
 
-function num(n: number | null | undefined): string {
+export function num(n: number | null | undefined): string {
   return Number(n || 0).toFixed(0);
 }
 

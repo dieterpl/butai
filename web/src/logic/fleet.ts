@@ -60,11 +60,58 @@ export interface AgentRow {
 /// which — the bug every "draw it twice" list eventually has.
 export const HomeRowKind = Object.freeze({ Machine: "machine", Space: "space", Agent: "agent" } as const);
 
+/// One project on one machine — *including* the ones with nothing running.
+///
+/// The port of `SpaceRow`. The fleet used to be built by walking the agents and
+/// emitting a header whenever the workspace changed, which meant a project with
+/// no agents produced no rows at all: the one page listing every project on
+/// every machine could not show you the ones you had not started anything in,
+/// which are exactly the ones you would want to start something in.
+export interface SpaceRow {
+  ws: Qid;
+  name: string;
+  daemon: string | null;
+  /// This project's agents, as a window onto the fleet list — a folded row
+  /// draws their sprites, so it needs the agents and not a count.
+  agents: AgentRow[];
+  /// Where those agents start in the fleet list.
+  first: number;
+  /// The agent `+` starts here: the project's own `[agents] autostart`, then
+  /// the client's pin. See `preferredAgent`.
+  preferred: string | null;
+}
+
 /// A row of the fleet column: a machine header, a project header, or an agent.
 export type HomeRow =
-  | { kind: typeof HomeRowKind.Machine; daemon: string | null; label: string | null; agents: number }
-  | { kind: typeof HomeRowKind.Space; ws: Qid; name: string; daemon: string | null }
+  | {
+      kind: typeof HomeRowKind.Machine;
+      daemon: string | null;
+      label: string | null;
+      agents: number;
+      folded: boolean;
+    }
+  | { kind: typeof HomeRowKind.Space; space: SpaceRow; machine: string; folded: boolean }
   | { kind: typeof HomeRowKind.Agent; row: AgentRow; sel: number };
+
+/// What HOME has folded away, and which machines have their gauges out.
+///
+/// Keyed by *name*, not by position, for the reason the TUI's `Folds` is: a
+/// machine's place in the roster moves when an earlier one drops, and folding
+/// by position would hand the fold belonging to the machine that went away to
+/// whichever took its slot. A project's key is its qualified id, which already
+/// carries its machine.
+export interface Folds {
+  machines: ReadonlySet<string>;
+  spaces: ReadonlySet<Qid>;
+  expanded: ReadonlySet<string>;
+}
+
+/// Nothing folded, and every machine a summary.
+export const NO_FOLDS: Folds = Object.freeze({
+  machines: new Set<string>(),
+  spaces: new Set<Qid>(),
+  expanded: new Set<string>(),
+});
 
 /// One machine's block in the COMPUTE column.
 export interface MachineRow {
@@ -152,44 +199,153 @@ export function machineRows(
   }));
 }
 
-/// The fleet column's rows: machine, then space, then that space's agents.
+/// Every project on every daemon, in the roster's order and then tab order.
 ///
-/// `sel` is the row's index among **agents only**, which is what the cursor
-/// counts and what `j`/`k` walk. A header is not a row you can select — clicking
-/// a machine's name is not a request to open somebody's agent.
+/// The port of `fleet_spaces`. Built from the *workspace list* rather than from
+/// the agents, which is the point: a project with nothing running in it has a
+/// summary and no agents, and HOME is where you would go to start something in
+/// it.
 ///
-/// Spaces are grouped by the *qualified workspace id* rather than by name. The
-/// TUI groups by name and would merge two projects that happen to share one;
-/// here they are two headers, because the id is the thing that is actually
-/// unique and the name is only what the header prints.
-export function homeRows(
+/// `agents` is a window onto `all`, so the two lists must be walked in one
+/// order — `allAgentRows` walks the roster and then the workspaces, and so does
+/// this. `test/fleet.test.ts` is what keeps that one property one.
+export function fleetSpaces(
+  workspaces: readonly Workspace[] | null | undefined,
+  daemons: readonly DaemonEntry[] | null | undefined,
   all: readonly AgentRow[] | null | undefined,
-  machines: readonly MachineRow[] | null | undefined,
-): HomeRow[] {
+  pinned: string | null,
+): SpaceRow[] {
+  const list = workspaces || [];
   const rows = all || [];
-  const ms = machines || [];
-  const out: HomeRow[] = [];
-  let daemon: string | null = null;
-  let ws: Qid | null = null;
-  rows.forEach((row, sel) => {
-    if (daemon !== row.daemon) {
-      daemon = row.daemon;
-      ws = null;
-      const m = ms.find((x) => x.daemon === row.daemon);
+  const roster = daemons || [];
+  const order: (string | null)[] = roster.map((d) => d.key);
+  for (const w of list) if (w && !order.includes(w.daemon)) order.push(w.daemon);
+
+  const out: SpaceRow[] = [];
+  for (const key of order) {
+    for (const w of list) {
+      if (!w || w.daemon !== key) continue;
+      const first = rows.findIndex((r) => r.ws === w.id);
+      const mine = rows.filter((r) => r.ws === w.id);
       out.push({
-        kind: HomeRowKind.Machine,
-        daemon: row.daemon,
-        label: m ? m.label : row.daemon,
-        agents: rows.filter((r) => r.daemon === row.daemon).length,
+        ws: w.id,
+        name: w.name,
+        daemon: key,
+        agents: mine,
+        first: first < 0 ? rows.length : first,
+        // The project's own declaration first, then the client's pin. Two
+        // steps and no third: a project that wants a different agent says so
+        // in the file it already has for exactly that, which lives with the
+        // project and travels to the machine it runs on.
+        preferred: preferredAgent(w, pinned),
       });
     }
-    if (ws !== row.ws) {
-      ws = row.ws;
-      out.push({ kind: HomeRowKind.Space, ws: row.ws, name: row.workspace, daemon: row.daemon });
-    }
-    out.push({ kind: HomeRowKind.Agent, row, sel });
-  });
+  }
   return out;
+}
+
+/// The agent this project starts, or null when nothing names one and the
+/// picker is the answer.
+export function preferredAgent(
+  ws: { autostart?: readonly string[] | null } | null | undefined,
+  pinned: string | null,
+): string | null {
+  const declared = ws && ws.autostart && ws.autostart.length ? ws.autostart[0] : null;
+  return declared || pinned || null;
+}
+
+/// The fleet column's rows: machine, then project, then that project's agents.
+///
+/// `sel` on an agent row is its index in the **fleet list**, which is what the
+/// tray's copies carry. The cursor counts rows of *this* list, folds and all —
+/// see `homeSelected` and `homePreview`.
+///
+/// Driven by the machine and project lists rather than by the agents, so an
+/// empty project and a machine with nothing open both have a row. Folding is a
+/// filter over that order and never a second ordering: a folded row is simply
+/// not emitted, and the rows around it keep the positions they had.
+export function homeRows(
+  spaces: readonly SpaceRow[] | null | undefined,
+  machines: readonly MachineRow[] | null | undefined,
+  folds: Folds = NO_FOLDS,
+): HomeRow[] {
+  const all = spaces || [];
+  const out: HomeRow[] = [];
+  for (const m of machines || []) {
+    const mine = all.filter((s) => s.daemon === m.daemon);
+    const folded = folds.machines.has(m.label);
+    out.push({
+      kind: HomeRowKind.Machine,
+      daemon: m.daemon,
+      label: m.label,
+      agents: mine.reduce((n, s) => n + s.agents.length, 0),
+      folded,
+    });
+    if (folded) continue;
+    for (const space of mine) {
+      const shut = folds.spaces.has(space.ws);
+      out.push({ kind: HomeRowKind.Space, space, machine: m.label, folded: shut });
+      if (shut) continue;
+      space.agents.forEach((row, i) => {
+        out.push({ kind: HomeRowKind.Agent, row, sel: space.first + i });
+      });
+    }
+  }
+  return out;
+}
+
+/// The agent the cursor is *on*, as an index into the fleet list — null on a
+/// machine or a project. What ending a session and the row menu act on.
+export function homeSelected(rows: readonly HomeRow[], sel: number): number | null {
+  const row = rows[sel];
+  return row && row.kind === HomeRowKind.Agent ? row.sel : null;
+}
+
+/// The agent the stage shows.
+///
+/// On an agent row, that agent. **On a project row, the one in it that most
+/// needs you** — so walking the fleet is a fly-over of each project's screen
+/// rather than a cursor that keeps pointing the pane somewhere it has left. A
+/// project with nothing running, and a machine row, preview nothing.
+export function homePreview(rows: readonly HomeRow[], sel: number): number | null {
+  const row = rows[sel];
+  if (!row) return null;
+  if (row.kind === HomeRowKind.Agent) return row.sel;
+  if (row.kind === HomeRowKind.Machine) return null;
+  let best: number | null = null;
+  let rank = Infinity;
+  row.space.agents.forEach((a, i) => {
+    const r = trayRank(a.agent);
+    // Strictly better, so a tie keeps fleet order — the pick decides which of a
+    // project's screens you see, and one that re-broke its ties every tick
+    // would flick between two agents while you read.
+    if ((r === null ? Infinity : r) < rank) {
+      rank = r === null ? Infinity : r;
+      best = row.space.first + i;
+    }
+  });
+  return best;
+}
+
+/// Fold every project, or open every one — whichever leaves more of the fleet
+/// visible. The DIFF page's `Z`, against a two-level tree: it folds *projects*
+/// and leaves the machines open, because that is the reading the key exists for
+/// — every machine, every project, what is running in each, in one screen.
+export function toggleAllSpaces(folds: Folds, spaces: readonly SpaceRow[]): Folds {
+  const every = spaces.map((s) => s.ws);
+  const allShut = every.length > 0 && every.every((k) => folds.spaces.has(k));
+  return {
+    machines: new Set<string>(),
+    spaces: allShut ? new Set<Qid>() : new Set<Qid>(every),
+    expanded: folds.expanded,
+  };
+}
+
+/// Add or remove one key, without mutating the set that was handed in.
+export function toggleFold<T>(set: ReadonlySet<T>, key: T): Set<T> {
+  const next = new Set(set);
+  if (!next.delete(key)) next.add(key);
+  return next;
 }
 
 /// How loudly a tray row is asking, lowest first; `null` keeps it out entirely.
@@ -231,4 +387,55 @@ export function homeTray(all: readonly AgentRow[] | null | undefined): TrayRow[]
 /// reason. Split out so the column and the checks read one rule.
 export function machineIsDown(m: MachineRow | null | undefined): boolean {
   return !!(m && m.error);
+}
+
+/// The one reading that answers "is this machine in trouble".
+///
+/// **Not the CPU.** A box at 30% CPU with a full root filesystem is in trouble
+/// and its CPU number says it is fine, so this is the *worst* of the four
+/// things that can run out — and it carries which one it was, because "97%"
+/// without a name is a number you have to go and investigate.
+///
+/// The port of `machine_pressure`. Ties go to whichever comes first in CPU,
+/// RAM, GPU, disk order: a strict `>`, so a machine sitting at 40% everywhere
+/// reports its CPU every tick instead of flickering between four labels that
+/// are all equally true.
+export interface Pressure {
+  /// The SYSTEM rail's own label for whatever won — three cells every time, so
+  /// the reading beside it lands in one column down the whole list.
+  label: "CPU" | "RAM" | "GPU" | "DSK";
+  pct: number;
+}
+
+/// A used/total pair as a percentage, with a zero total reading as zero rather
+/// than as a division by it. A machine reporting no RAM has not run out.
+function pctOf(used: number, total: number): number {
+  return total > 0 ? (used / total) * 100 : 0;
+}
+
+/// The worst-off resource on a machine.
+///
+/// Disks come from `sys.disks` unfiltered here, where the TUI asks its
+/// configured `disk_mounts`: this client has no per-mount setting to honour
+/// yet, so it takes every local filesystem and nothing else — an overlay is the
+/// image under a container rather than a disk that can fill, and a tmpfs is RAM
+/// the RAM reading already counts.
+export function machinePressure(sys: SysDto | null | undefined): Pressure {
+  if (!sys) return { label: "CPU", pct: 0 };
+  const gpu = (sys.gpus || []).reduce(
+    (worst, g) => Math.max(worst, g.pct, pctOf(g.mem_used_gb, g.mem_total_gb)),
+    -Infinity,
+  );
+  const dsk = (sys.disks || [])
+    .filter((d) => d.kind === "local")
+    .reduce((worst, d) => Math.max(worst, pctOf(d.used_gb, d.total_gb)), -Infinity);
+
+  let out: Pressure = { label: "CPU", pct: sys.cpu_pct || 0 };
+  const rest: Pressure[] = [
+    { label: "RAM", pct: pctOf(sys.ram_used_gb, sys.ram_total_gb) },
+    { label: "GPU", pct: gpu },
+    { label: "DSK", pct: dsk },
+  ];
+  for (const p of rest) if (p.pct > out.pct) out = p;
+  return out;
 }

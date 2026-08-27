@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Patch } from "@/components/Patch";
+import { NO_FOLDS, type Folds } from "../logic/fleet.ts";
 import {
   Dialog,
   DialogContent,
@@ -85,8 +86,12 @@ export interface ShellView {
   pin: string | null;
   /** A verb is in flight, or a git operation is: the remote row is disabled. */
   busy: boolean;
-  /** HOME's cursor, as an index among agent rows. */
+  /** HOME's cursor, as an index into the *row* list — machines and projects
+   * included, folded-away rows excluded. It counted agents, back when a header
+   * was not a thing you could put a cursor on. */
   sel: number;
+  /** What HOME has folded away, and which machines have their gauges out. */
+  folds: Folds;
   /** HELP's open topic, by slug. Undefined lets the page keep its own. */
   topic: string | undefined;
   /** The prefix as the user spells it, for the pages that document keys. */
@@ -103,6 +108,7 @@ export interface ShellCallbacks {
   setPane: (pane: Qid | null) => void;
   setPath: (path: string | null) => void;
   setSel: (sel: number) => void;
+  setFolds: (folds: Folds) => void;
   setTopic: (slug: string) => void;
   setRails: (open: boolean) => void;
   /** Open the `g` menu. An overlay, so the shell draws it. */
@@ -126,6 +132,7 @@ export function Shell() {
   const [pane, setPane] = useState<Qid | null>(null);
   const [path, setPath] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
+  const [folds, setFolds] = useState<Folds>(NO_FOLDS);
   const [topic, setTopic] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [palette, setPalette] = useState(false);
@@ -234,6 +241,7 @@ export function Shell() {
       setPane,
       setPath,
       setSel,
+      setFolds,
       setTopic,
       setRails: (open: boolean) => setRails(open ? "open" : "auto"),
       gitMenu: () => setMenu(true),
@@ -251,6 +259,7 @@ export function Shell() {
     // exactly when a second click on `push` happens.
     busy: busy || (world.gitOp?.running === true && ws != null && world.gitOp.ws === ws.id),
     sel,
+    folds,
     topic,
     prefix: prefs.prefix,
     fontPx: prefs.fontPx,

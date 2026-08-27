@@ -1280,6 +1280,7 @@ mod tests {
                 .collect(),
             changes,
             stage: None,
+            autostart: Vec::new(),
         }
     }
 

@@ -62,7 +62,15 @@ export const VerbId = Object.freeze(ids([
   // …and the one verb that acts on a fleet row: go to that agent's workspace,
   // on its own machine, and put it on the stage. Distinct from `Open`, which
   // every other list uses to mean "stage this row of the workspace I am in".
+  // On a *project* row it goes to that workspace, which is what makes its name
+  // a link — a project has no pane to preview, so travelling is the only thing
+  // pressing it could be asking for.
   "OpenAgent",
+  // Folding the fleet. The DIFF widget's own pair, and its reason transfers
+  // whole: reading a twenty-file diff without folds means scrolling past four
+  // files to reach the fifth, and a fleet of four machines is the same list
+  // with worse names.
+  "Fold", "FoldAll",
   // List navigation, listed in `?` so every rail documents itself.
   "Down", "Up", "First", "Last", "Open",
   // The left rail.
@@ -470,8 +478,21 @@ export function homeVerbs(): readonly Verb[] {
 }
 const HOME: readonly Verb[] = Object.freeze([
   verb("enter", "open", VerbId.OpenAgent),
+  // The rails' own verb, bound here unchanged. What moved is only what it acts
+  // on: on a rail that is the tab you are looking at, and here it is the
+  // project the cursor is in — which on this page are routinely not the same
+  // project, or even the same machine. No `a`/`A` split, for the reason the
+  // AGENTS rail has none in this client: it asks which type every time unless
+  // SETTINGS has pinned one.
+  verb("a", "new...", VerbId.NewAgent),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
+  // Quiet, both of them: the footer has 26 columns and `enter open · a new...`
+  // is already 21 of them, and unlike those two the fold has an affordance on
+  // the row itself — the `v`/`>` mark every machine and project carries. `?`
+  // is where it is written down.
+  quiet("z", "fold", VerbId.Fold),
+  quiet("Z", "fold all", VerbId.FoldAll),
   quiet("tab", "the preview", VerbId.FocusCycle),
   quiet("?", "keys", VerbId.Help),
 ]);

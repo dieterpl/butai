@@ -1081,7 +1081,17 @@ changes: ChangesDto | null,
  * Pane currently on the stage, if any — the web client's default pane to
  * stream. `null` when nothing is staged.
  */
-stage: PaneId | null, };
+stage: PaneId | null, 
+/**
+ * The project's own `[agents] autostart`, as [`WorkspaceSummary::autostart`]
+ * carries it.
+ *
+ * On both DTOs because `id`, `name` and `cwd` are: they are facts about
+ * the workspace, and which of the two records a client happens to hold
+ * should not decide whether it can answer "which agent does this project
+ * use". One field, filled from one place — see `build_ws_detail`.
+ */
+autostart: Array<string>, };
 
 /**
  * A workspace at a glance (list view).
@@ -1129,7 +1139,24 @@ conflicts: number,
 /**
  * What the workspace's repository is in the middle of, if anything.
  */
-repo_state: RepoState, attached_clients: number, };
+repo_state: RepoState, attached_clients: number, 
+/**
+ * The project's own `[agents] autostart`, verbatim and in order.
+ *
+ * A *declaration*, not a record of what was started: it is what this
+ * project's `.butai.toml` says it runs, which is the honest answer to
+ * "which agent does this project use" — and the reason a client offering
+ * to start one here needs no configuration of its own for the ordinary
+ * case, since a project that autostarts `claude` has already said so.
+ *
+ * Published raw rather than reduced to a single name, for the reason
+ * [`NetDto`] and [`DiskDto`] are published unfiltered: the daemon says what
+ * a thing *is* and each client decides. A client that wants the first
+ * entry takes the first entry; one that wants to offer all of them can.
+ *
+ * Empty where the project has no workspace file, or names no agents.
+ */
+autostart: Array<string>, };
 
 /**
  * One checkout of a repository (`GET .../git/worktrees`).

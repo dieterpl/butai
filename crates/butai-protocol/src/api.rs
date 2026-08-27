@@ -1102,6 +1102,15 @@ pub struct WorkspaceDetail {
     /// Pane currently on the stage, if any — the web client's default pane to
     /// stream. `null` when nothing is staged.
     pub stage: Option<PaneId>,
+    /// The project's own `[agents] autostart`, as [`WorkspaceSummary::autostart`]
+    /// carries it.
+    ///
+    /// On both DTOs because `id`, `name` and `cwd` are: they are facts about
+    /// the workspace, and which of the two records a client happens to hold
+    /// should not decide whether it can answer "which agent does this project
+    /// use". One field, filled from one place — see `build_ws_detail`.
+    #[serde(default)]
+    pub autostart: Vec<String>,
 }
 
 /// One entry in a directory listing (`GET /v1/workspaces/{id}/tree`).

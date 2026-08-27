@@ -205,8 +205,11 @@ describe("the footers say what is bound", () => {
   // verb in the table with nothing to click is the "key for a thing that is not
   // there" this rule has always been about. Closing the gap means adding the
   // buttons first, then the verbs, and moving this assertion.
-  test("verbs/home-footer — the fleet navigates and opens, and that is the whole table here", () => {
-    expect(footer(homeVerbs(), RAIL, 1)).toEqual(["enter open"]);
+  test("verbs/home-footer — the fleet navigates, opens and starts, and that is the whole table here", () => {
+    // `a` earns its column because a fleet row's button is the only place you
+    // can see what it is about to start. The folds do not: every machine and
+    // project row draws its own `v`/`>`.
+    expect(footer(homeVerbs(), RAIL, 1)).toEqual(["enter open · a new..."]);
   });
 
   const railSurfaces = [

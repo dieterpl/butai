@@ -415,6 +415,7 @@ mod tests {
             processes: vec![],
             changes: None,
             stage: None,
+            autostart: Vec::new(),
         };
         state.apply(&ApiEvent::WorkspaceDetail(detail));
         assert!(state.workspace(SessionId(1)).is_some());

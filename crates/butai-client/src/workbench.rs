@@ -9265,6 +9265,7 @@ mod tests {
             agents: vec![],
             processes: vec![],
             stage: None,
+            autostart: Vec::new(),
             changes: Some(ChangesDto {
                 branch: "main".into(),
                 staged: vec![file("s.rs", "A")],
@@ -9777,6 +9778,7 @@ mod tests {
             processes: vec![],
             changes: None,
             stage: None,
+            autostart: Vec::new(),
         }
     }
 
@@ -9789,6 +9791,7 @@ mod tests {
             agents: vec![],
             processes: vec![],
             stage: None,
+            autostart: Vec::new(),
             changes: Some(changes),
         }
     }
@@ -10171,6 +10174,7 @@ mod tests {
             processes: vec![],
             changes: Some(changes.clone()),
             stage: None,
+            autostart: Vec::new(),
         };
         let rows = chrome::change_rows(&changes);
         // Walk every row, and for each one every verb its footer would draw.
@@ -10337,6 +10341,7 @@ mod tests {
             processes: vec![],
             changes: Some(changes),
             stage: None,
+            autostart: Vec::new(),
         };
         let press = |sel: usize, c: char| {
             let mut view = View { page: Page::Git, focus: Focus::Refs, ..View::default() };

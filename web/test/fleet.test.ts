@@ -19,15 +19,24 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  NO_FOLDS,
   allAgentRows,
+  fleetSpaces,
+  homePreview,
   homeRows,
+  homeSelected,
   homeTray,
   machineIsDown,
+  machinePressure,
   machineRows,
+  toggleAllSpaces,
+  toggleFold,
   HomeRowKind,
   type AgentRow,
   type DaemonEntry,
+  type Folds,
   type MachineRow,
+  type SpaceRow,
   type Workspace,
 } from "../src/logic/fleet.ts";
 
@@ -40,13 +49,14 @@ const agent = (pane: number, title: string, state: string, extra: Partial<AgentS
   ...extra,
 });
 
-const ws = (daemon: string, id: number, name: string, agents: AgentSeed[]): Workspace =>
+const ws = (daemon: string, id: number, name: string, agents: AgentSeed[], autostart: string[] = []): Workspace =>
   ({
     id: `${daemon}:${id}`,
     daemon,
     name,
     agents: agents.map((a) => ({ ...a, pane: `${daemon}:${a.pane}` })),
     processes: [{ pane: `${daemon}:1`, name: "shell" }],
+    autostart,
   }) as unknown as Workspace;
 
 const sys = (cpu: number) => ({
@@ -74,7 +84,19 @@ const roster = [
 
 const all: AgentRow[] = allAgentRows(workspaces, roster);
 const machines: MachineRow[] = machineRows(roster, all);
-const rows = homeRows(all, machines);
+const spaces: SpaceRow[] = fleetSpaces(workspaces, roster, all, null);
+const rows = homeRows(spaces, machines);
+
+/// One row apiece, as a string — the shape every ordering and folding test
+/// compares. The port of the TUI's `shape`.
+const shape = (list: readonly ReturnType<typeof homeRows>[number][]) =>
+  list.map((r) =>
+    r.kind === HomeRowKind.Machine
+      ? `machine:${r.label}:${r.agents}`
+      : r.kind === HomeRowKind.Space
+        ? `space:${r.space.ws}`
+        : `agent:${r.sel}:${r.row.pane}`,
+  );
 
 describe("the fleet list", () => {
   test("fleet/rows — machine by machine in roster order, every row saying which", () => {
@@ -116,18 +138,16 @@ describe("the fleet list", () => {
 
 describe("the grouped page", () => {
   test("fleet/home-rows — machine, then project, then that project's agents", () => {
-    const shape = rows.map((r) =>
-      r.kind === HomeRowKind.Machine
-        ? `machine:${r.label}:${r.agents}`
-        : r.kind === HomeRowKind.Space
-          ? `space:${r.ws}`
-          : `agent:${r.sel}:${r.row.pane}`,
-    );
-    expect(shape).toEqual([
+    expect(shape(rows)).toEqual([
       "machine:a:3", "space:a:1", "agent:0:a:4", "agent:1:a:5",
       "space:a:2", "agent:2:a:9",
       "machine:b:2", "space:b:1", "agent:3:b:4", "agent:4:b:5",
       "machine:c:1", "space:c:1", "agent:5:c:4",
+      // The unreachable machine has a row of its own now. `machineRows` has
+      // always kept it — "the gpu box has nothing open" and "the gpu box is
+      // unreachable" are not the same sentence — and the fleet used to drop it
+      // anyway, because a machine with no agents produced no rows.
+      "machine:ghost:0",
     ]);
   });
 
@@ -138,14 +158,23 @@ describe("the grouped page", () => {
 
   test("fleet/spaces-are-ids — two projects sharing a name are two headers", () => {
     // The id is what is unique; the name is only what is printed.
-    const dup = homeRows(
-      allAgentRows(
-        [ws("a", 1, "dup", [agent(4, "x", "idle")]), ws("a", 2, "dup", [agent(5, "y", "idle")])],
-        [roster[0]!],
-      ),
-      [],
-    );
-    expect(dup.filter((r) => r.kind === HomeRowKind.Space).map((r) => r.ws)).toEqual(["a:1", "a:2"]);
+    const dups = [ws("a", 1, "dup", [agent(4, "x", "idle")]), ws("a", 2, "dup", [agent(5, "y", "idle")])];
+    const one = [roster[0]!];
+    const dupAll = allAgentRows(dups, one);
+    const dup = homeRows(fleetSpaces(dups, one, dupAll, null), machineRows(one, dupAll));
+    expect(
+      dup.filter((r) => r.kind === HomeRowKind.Space).map((r) => (r.kind === HomeRowKind.Space ? r.space.ws : "")),
+    ).toEqual(["a:1", "a:2"]);
+  });
+
+  test("fleet/empty-projects — a project with nothing running still has a row", () => {
+    // The whole reason the rows come from the projects rather than from the
+    // agents: the one page listing every project on every machine could not
+    // show you the ones you had not started anything in.
+    const list = [...workspaces, ws("a", 9, "notes", [], ["codex"])];
+    const rowsAll = allAgentRows(list, roster);
+    const withEmpty = homeRows(fleetSpaces(list, roster, rowsAll, null), machineRows(roster, rowsAll));
+    expect(shape(withEmpty)).toContain("space:a:9");
   });
 });
 
@@ -207,9 +236,96 @@ describe("the machines column", () => {
 
 test("fleet/empty — nothing in, nothing out, and no throw", () => {
   expect([
-    homeRows([], machines).length,
+    homeRows([], []).length,
     homeTray([]).length,
     allAgentRows(null, null).length,
     machineRows(null, null).length,
-  ]).toEqual([0, 0, 0, 0]);
+    fleetSpaces(null, null, null, null).length,
+  ]).toEqual([0, 0, 0, 0, 0]);
+  // …but machines with nothing open are rows, not nothing: that is the whole
+  // reason the list is driven by them.
+  expect(homeRows([], machines).length).toBe(machines.length);
+});
+
+describe("folding", () => {
+  const fold = (f: Folds, p: Partial<Folds>): Folds => ({ ...f, ...p });
+
+  test("fleet/fold-removes-and-reorders-nothing", () => {
+    const open = shape(rows);
+    // One project. Its agents go; every other row stays where it was.
+    const one = fold(NO_FOLDS, { spaces: toggleFold(NO_FOLDS.spaces, "a:1") });
+    expect(shape(homeRows(spaces, machines, one))).toEqual(open.filter((r) => !r.startsWith("agent:0:") && !r.startsWith("agent:1:")));
+
+    // A machine takes its projects with it.
+    const m = fold(NO_FOLDS, { machines: toggleFold(NO_FOLDS.machines, "a") });
+    expect(shape(homeRows(spaces, machines, m)).filter((r) => r.includes(":a:"))).toEqual(["machine:a:3"]);
+
+    // And unfolding is exactly the inverse.
+    const back = fold(one, { spaces: toggleFold(one.spaces, "a:1") });
+    expect(shape(homeRows(spaces, machines, back))).toEqual(open);
+  });
+
+  test("fleet/fold-all — every machine and every project, and no agents", () => {
+    const shut = toggleAllSpaces(NO_FOLDS, spaces);
+    const index = shape(homeRows(spaces, machines, shut));
+    expect(index.some((r) => r.startsWith("agent:"))).toBe(false);
+    expect(index.filter((r) => r.startsWith("space:")).length).toBe(spaces.length);
+    expect(index.filter((r) => r.startsWith("machine:")).length).toBe(machines.length);
+
+    // A second press opens it back up…
+    expect(shape(homeRows(spaces, machines, toggleAllSpaces(shut, spaces)))).toEqual(shape(rows));
+    // …and from half-folded it folds the rest, which is the direction that gets
+    // you the index in one press.
+    const half = { ...NO_FOLDS, spaces: toggleFold(NO_FOLDS.spaces, "a:1") };
+    expect(shape(homeRows(spaces, machines, toggleAllSpaces(half, spaces)))).toEqual(index);
+  });
+});
+
+describe("the cursor", () => {
+  const at = (name: string) => rows.findIndex((r) => shape([r])[0] === name);
+
+  test("fleet/preview — a project shows the agent in it that most needs you", () => {
+    // `alpha` holds a waiting `ringer` and an idle `pinger`; the one that is
+    // asking is the one you are shown, not the one that is merely first.
+    expect(homePreview(rows, at("space:a:1"))).toBe(0);
+    expect(homePreview(rows, at("agent:1:a:5"))).toBe(1);
+    expect(homePreview(rows, at("machine:a:3"))).toBeNull();
+  });
+
+  test("fleet/selected — a project row is not an agent, however good its preview", () => {
+    // `x` and the row menu act on an agent; the preview is a different question.
+    expect(homeSelected(rows, at("space:a:1"))).toBeNull();
+    expect(homeSelected(rows, at("agent:1:a:5"))).toBe(1);
+  });
+});
+
+describe("compute", () => {
+  test("fleet/pressure — the worst reading, not the CPU", () => {
+    const base = { cpu_pct: 30, ram_used_gb: 4, ram_total_gb: 32, gpus: [], disks: [] };
+    expect(machinePressure(base as never)).toEqual({ label: "CPU", pct: 30 });
+    expect(machinePressure({ ...base, ram_used_gb: 30 } as never).label).toBe("RAM");
+    // A box at 30% CPU with a full root filesystem is in trouble, and its CPU
+    // number says it is fine.
+    const disks = [{ mount: "/", kind: "local", used_gb: 96, total_gb: 100 }];
+    expect(machinePressure({ ...base, disks } as never)).toEqual({ label: "DSK", pct: 96 });
+    // A GPU contributes the worse of its two ways of being unavailable.
+    const gpus = [{ pct: 5, mem_used_gb: 23, mem_total_gb: 24 }];
+    expect(machinePressure({ ...base, gpus } as never).label).toBe("GPU");
+    // A machine that reports no RAM has not run out of it.
+    expect(machinePressure({ ...base, ram_total_gb: 0, cpu_pct: 1 } as never).label).toBe("CPU");
+    expect(machinePressure(null)).toEqual({ label: "CPU", pct: 0 });
+  });
+});
+
+describe("the preferred agent", () => {
+  test("fleet/preferred — the project declares it, then the pin, then nothing", () => {
+    const list = [ws("a", 1, "alpha", [], ["codex"]), ws("a", 2, "alto", [])];
+    const one = [roster[0]!];
+    const rowsAll = allAgentRows(list, one);
+    // The project's own `[agents] autostart` wins over the client's pin: it
+    // lives with the project and travels to the machine it runs on.
+    expect(fleetSpaces(list, one, rowsAll, "claude").map((s) => s.preferred)).toEqual(["codex", "claude"]);
+    // With no pin either, the picker is the answer.
+    expect(fleetSpaces(list, one, rowsAll, null).map((s) => s.preferred)).toEqual(["codex", null]);
+  });
 });

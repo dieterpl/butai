@@ -178,6 +178,13 @@ const SURFACES: Record<string, SurfaceEntry> = {
     rows: ["home.row"],
     verbs: {
       [VerbId.OpenAgent]: ["home.open"],
+      // The three the fleet gained when its rows became projects rather than
+      // headers over agents. Each is a button on the row as well as a key, so
+      // each names the element the press lands on — the same rule the AGENTS
+      // rail's `[+ agent]` follows.
+      [VerbId.NewAgent]: ["home.new"],
+      [VerbId.Fold]: ["home.fold"],
+      [VerbId.FoldAll]: ["home.foldAll"],
     },
     footer: (app) => app.el.home?.drawFooter?.(),
     moved: (app) => app.pointHome(),

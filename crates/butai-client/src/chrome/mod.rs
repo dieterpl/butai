@@ -8596,6 +8596,7 @@ mod tests {
             processes: vec![],
             changes,
             stage: None,
+            autostart: Vec::new(),
         }
     }
 
