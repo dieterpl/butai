@@ -1394,6 +1394,7 @@ impl ServerCore {
         let mut ws = Workspace::new(sid, name, cwd.clone());
         // Project workspace file: name, managed processes, agent autostart.
         let (ws_file, warnings) = crate::config::WorkspaceFile::load(&cwd);
+        ws.autostart = ws_file.agents.autostart.clone();
         for w in warnings {
             warn!("workspace config: {w}");
         }
@@ -3330,6 +3331,7 @@ impl ServerCore {
                 conflicts: self.git_pane(w).map(|g| g.conflict_count()).unwrap_or(0),
                 repo_state: self.git_pane(w).map(|g| g.state()).unwrap_or_default(),
                 attached_clients: self.attached_count(w.id),
+                autostart: w.autostart.clone(),
             })
             .collect()
     }
@@ -3337,9 +3339,9 @@ impl ServerCore {
     fn build_ws_detail(&mut self, sid: SessionId) -> Option<WorkspaceDetail> {
         // Read the workspace's own fields out first: building the process rows
         // borrows `self` mutably (see `build_processes`).
-        let (id, name, cwd, stage) = {
+        let (id, name, cwd, stage, autostart) = {
             let w = self.workspaces.get(&sid)?;
-            (w.id, w.name.clone(), w.cwd.display().to_string(), w.stage)
+            (w.id, w.name.clone(), w.cwd.display().to_string(), w.stage, w.autostart.clone())
         };
         Some(WorkspaceDetail {
             id,
@@ -3349,6 +3351,7 @@ impl ServerCore {
             processes: self.build_processes(sid),
             changes: self.build_changes(sid),
             stage,
+            autostart,
         })
     }
 

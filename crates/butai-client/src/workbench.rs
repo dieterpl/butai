@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use butai_protocol::api::{ApiEvent, ApplyTarget, WorkspaceDetail};
+use butai_protocol::SessionId;
 use butai_protocol::{
     AttachTarget, ClientMsg, Color as PColor, Encoding, FrameUpdate, InputEvent, KeyEvent, PaneId,
     ServerMsg, DETACH_SERVER_SHUTDOWN, PROTOCOL_VERSION,
@@ -1308,8 +1309,9 @@ pub async fn run(
                         dirty = true;
                     }
                     Flow::AskCloseWorkspace => {
+                        let d = active_daemon(&daemons, &hosts, &view);
                         if let Some(ws) = active_workspace(&daemons, &hosts, &view) {
-                            view.overlay = Some(close_workspace_confirm(ws));
+                            view.overlay = Some(close_workspace_confirm(d, ws.id, &ws.name));
                         }
                         dirty = true;
                     }
@@ -1339,10 +1341,82 @@ pub async fn run(
                         }
                         dirty = true;
                     }
-                    Flow::OpenFleetAgent(sel) => {
-                        if !open_fleet_agent(&daemons, &hosts, &mut view, sel) {
-                            view.flash = Some("that agent has gone".into());
+                    Flow::OpenFleetRow => {
+                        if !open_fleet_row(&daemons, &hosts, &mut view) {
+                            view.flash = Some("that row has gone".into());
                         }
+                        dirty = true;
+                    }
+                    // Starting an agent leaves you on BOOTH. The new row
+                    // appears in the fleet and the preview points at it, which
+                    // is the whole of what you wanted to see — a button that
+                    // started something *and* threw the tab bar onto another
+                    // machine is the bug that made agent rows two-step.
+                    Flow::NewFleetAgent { pick } => {
+                        match booth_cursor(&daemons, &hosts, &view) {
+                            BoothCursor::Space { daemon, id, preferred, name, .. } => {
+                                match preferred.filter(|_| !pick) {
+                                    Some(name) => {
+                                        match spawn_agent_in(&daemons, daemon, id, &name).await {
+                                            Ok(pane) => {
+                                                view.staged = Some(pane);
+                                                view.flash = Some(format!("started {name}"));
+                                            }
+                                            Err(e) => view.flash = Some(format!("{e:#}")),
+                                        }
+                                    }
+                                    None => match fleet_agent_picker(&daemons, daemon, id, &name)
+                                        .await
+                                    {
+                                        Ok(overlay) => view.overlay = Some(overlay),
+                                        Err(e) => view.flash = Some(format!("agents: {e:#}")),
+                                    },
+                                }
+                            }
+                            // An agent row is *in* a project, so `a` there is
+                            // not ambiguous — it means the project the agent is
+                            // in, which is the row above it.
+                            BoothCursor::Agent { .. } | BoothCursor::Machine { .. } => {
+                                view.flash =
+                                    Some("put the cursor on a project to start an agent".into());
+                            }
+                            BoothCursor::Nothing => {}
+                        }
+                        dirty = true;
+                    }
+                    Flow::FoldFleetRow => {
+                        match booth_cursor(&daemons, &hosts, &view) {
+                            BoothCursor::Machine { label } => view.folds.toggle_machine(&label),
+                            BoothCursor::Space { machine, id, .. } => {
+                                view.folds.toggle_space(&machine, id)
+                            }
+                            // On an agent, fold the project it is in and take
+                            // the cursor up to that row — the vim-tree move, and
+                            // the only one that leaves the cursor somewhere it
+                            // can still see.
+                            BoothCursor::Agent { .. } => {
+                                fold_cursors_space(&daemons, &hosts, &mut view)
+                            }
+                            BoothCursor::Nothing => {}
+                        }
+                        clamp_booth_sel(&daemons, &hosts, &mut view);
+                        dirty = true;
+                    }
+                    Flow::AskCloseFleetSpace => {
+                        if let BoothCursor::Space { daemon, id, name, .. } =
+                            booth_cursor(&daemons, &hosts, &view)
+                        {
+                            view.overlay = Some(close_workspace_confirm(daemon, id, &name));
+                        }
+                        dirty = true;
+                    }
+                    Flow::FoldFleetAll => {
+                        let all = all_agent_rows(&daemons, &hosts);
+                        let machines = machine_rows(&daemons, &hosts, &all);
+                        let spaces = fleet_spaces(&daemons, &all, None);
+                        let keys = chrome::booth_space_keys(&spaces, &machines);
+                        view.folds.toggle_all_spaces(&keys);
+                        clamp_booth_sel(&daemons, &hosts, &mut view);
                         dirty = true;
                     }
                     Flow::OpenSelectedDiff => {
@@ -1447,13 +1521,33 @@ pub async fn run(
                     // is a verb of the list it is drawn under, and the two are
                     // routinely different rows.
                     Flow::KillSelected => {
-                        match selected_route(&daemons, &hosts, &view) {
-                            Some(at) => {
-                                if let Err(e) = kill_pane(&daemons, at).await {
-                                    view.flash = Some(format!("{e:#}"));
+                        // `x` ends the thing the row *is*. On an agent that is
+                        // the session, and it does not ask, because an agent is
+                        // a process whose transcript is on disk. On one of
+                        // BOOTH's project rows it is the workspace and
+                        // everything running in it, which is the tab bar's `[x]`
+                        // — so it asks, in the same box and the same words.
+                        let space = (view.page == Page::Booth)
+                            .then(|| booth_cursor(&daemons, &hosts, &view))
+                            .and_then(|c| match c {
+                                BoothCursor::Space { daemon, id, name, .. } => {
+                                    Some((daemon, id, name))
                                 }
+                                _ => None,
+                            });
+                        match space {
+                            Some((daemon, id, name)) => {
+                                view.overlay =
+                                    Some(close_workspace_confirm(daemon, id, &name));
                             }
-                            None => view.flash = Some("nothing selected".into()),
+                            None => match selected_route(&daemons, &hosts, &view) {
+                                Some(at) => {
+                                    if let Err(e) = kill_pane(&daemons, at).await {
+                                        view.flash = Some(format!("{e:#}"));
+                                    }
+                                }
+                                None => view.flash = Some("nothing selected".into()),
+                            },
                         }
                         dirty = true;
                     }
@@ -1803,10 +1897,10 @@ pub async fn run(
                         }
                         dirty = true;
                     }
-                    Flow::CloseWorkspace(id) => {
-                        let d = active_daemon(&daemons, &hosts, &view);
+                    Flow::CloseWorkspace { daemon, workspace } => {
+                        let d = daemon.min(daemons.len().saturating_sub(1));
                         if let Err(e) =
-                            daemons[d].api.delete(&format!("/v1/workspaces/{id}")).await
+                            daemons[d].api.delete(&format!("/v1/workspaces/{workspace}")).await
                         {
                             view.flash = Some(format!("close: {e:#}"));
                         }
@@ -2374,15 +2468,20 @@ fn page_tree<'a>(page: Page, files: &'a mut Files, docs: &'a mut Files) -> &'a m
 
 /// The box that asks before a workspace and everything in it goes away.
 ///
-/// One builder because three routes open it — `X`, `alt-x`, and the `[x]` on
-/// the active chip — and a confirm that words itself differently depending on
-/// how you got there is three chances to word one of them wrongly.
-fn close_workspace_confirm(ws: &WorkspaceDetail) -> Overlay {
+/// One builder because five routes open it now — `X`, `alt-x`, the `[x]` on the
+/// active chip, and on BOOTH the `[x]` on a project row and `x` with the cursor
+/// on one — and a confirm that words itself differently depending on how you
+/// got there is five chances to word one of them wrongly.
+///
+/// Takes the machine, the id and the name rather than a `WorkspaceDetail`,
+/// because BOOTH has a fleet row and no detail for it: the fleet lists projects
+/// from the tab list, which arrives before any detail does.
+fn close_workspace_confirm(daemon: usize, id: SessionId, name: &str) -> Overlay {
     Overlay::Confirm(chrome::ConfirmOverlay {
         title: "CLOSE WORKSPACE".into(),
-        header: format!("close {} and kill what is running in it", ws.name),
+        header: format!("close {name} and kill what is running in it"),
         yes: false,
-        kind: chrome::ConfirmKind::CloseWorkspace { id: ws.id, name: ws.name.clone() },
+        kind: chrome::ConfirmKind::CloseWorkspace { daemon, id, name: name.to_string() },
     })
 }
 
@@ -2477,7 +2576,8 @@ fn current_stage(
     // meaningful active tab to resolve — and returning that agent's *own* daemon
     // index is what makes the middle column reconnect to the right socket.
     if view.page == Page::Booth {
-        let row = all_agent_rows(daemons, hosts).get(view.all_agents_sel).copied()?;
+        let all = all_agent_rows(daemons, hosts);
+        let row = booth_previewed(daemons, hosts, view).and_then(|i| all.get(i))?;
         return Some((row.daemon, row.agent.pane));
     }
     let (d, t) = *tab_index(daemons, hosts).get(view.tab)?;
@@ -2559,6 +2659,11 @@ async fn act_on_choice(
         // The only choice that makes a pane, and therefore the only one with
         // anything to stage.
         ListKind::SpawnAgent => return spawn_agent(daemons, hosts, view, choice).await.map(Some),
+        // Into the project the picker was opened on, which on BOOTH is
+        // routinely neither the active tab nor even on its machine.
+        ListKind::SpawnAgentIn { daemon, workspace } => {
+            return spawn_agent_in(daemons, *daemon, *workspace, choice).await.map(Some);
+        }
         ListKind::Branch => {
             let body = serde_json::json!({ "branch": choice });
             daemons[d].api.post(&format!("/v1/workspaces/{}/checkout", ws.id), &body).await?;
@@ -2604,21 +2709,38 @@ async fn spawn_agent(
     view: &View,
     name: &str,
 ) -> Result<PaneId> {
-    use butai_protocol::api::AgentDto;
     let d = active_daemon(daemons, hosts, view);
     let Some(ws) = active_workspace(daemons, hosts, view) else {
         anyhow::bail!("no workspace to act in")
     };
-    let route = format!("/v1/workspaces/{}/agents", ws.id);
-    let before: Vec<PaneId> =
-        daemons[d].api.get_as::<Vec<AgentDto>>(&route).await?.iter().map(|a| a.pane).collect();
+    spawn_agent_in(daemons, d, ws.id, name).await
+}
 
-    daemons[d].api.post(&route, &serde_json::json!({ "type": name })).await?;
+/// Start an agent in a *named* workspace on a named daemon.
+///
+/// [`spawn_agent`] resolves its target through the active tab, which is the
+/// right question on a rail and the wrong one on BOOTH: the fleet lists every
+/// project on every machine, so the row you pressed is routinely neither the
+/// tab you are looking at nor even on its daemon. The route is the same shape
+/// [`fleet_route`] already builds for `x` and the row menu.
+async fn spawn_agent_in(
+    daemons: &[Daemon],
+    daemon: usize,
+    workspace: SessionId,
+    name: &str,
+) -> Result<PaneId> {
+    use butai_protocol::api::AgentDto;
+    let Some(d) = daemons.get(daemon) else { anyhow::bail!("that machine has gone") };
+    let route = format!("/v1/workspaces/{workspace}/agents");
+    let before: Vec<PaneId> =
+        d.api.get_as::<Vec<AgentDto>>(&route).await?.iter().map(|a| a.pane).collect();
+
+    d.api.post(&route, &serde_json::json!({ "type": name })).await?;
 
     // The spawn is synchronous in the daemon, but the agent list is rebuilt on
     // its own tick, so the new row can be a moment behind the reply.
     for _ in 0..40 {
-        let now: Vec<AgentDto> = daemons[d].api.get_as(&route).await?;
+        let now: Vec<AgentDto> = d.api.get_as(&route).await?;
         if let Some(a) = now.iter().find(|a| !before.contains(&a.pane)) {
             return Ok(a.pane);
         }
@@ -3257,6 +3379,7 @@ fn page_bar_click(
     ret: Page,
     tab_count: usize,
     ws: Option<&WorkspaceDetail>,
+    here: usize,
 ) -> Flow {
     use hit::Target;
     // A target that names a page sets it itself, and `[settings]` has to stay a
@@ -3275,7 +3398,7 @@ fn page_bar_click(
     ) {
         view.page = ret;
     }
-    run_click(target, view, tab_count, ws)
+    run_click(target, view, tab_count, ws, here)
 }
 
 /// Which palette the screen should be wearing right now.
@@ -4673,7 +4796,12 @@ enum Flow {
         name: String,
     },
     /// Close a workspace, once its confirm box has been answered.
-    CloseWorkspace(butai_protocol::SessionId),
+    /// Close a workspace on a named machine — see
+    /// [`chrome::ConfirmKind::CloseWorkspace`] for why the machine rides along.
+    CloseWorkspace {
+        daemon: usize,
+        workspace: SessionId,
+    },
     /// Carry out a git-menu row that has been confirmed.
     MenuAction(crate::git_menu::GitAction),
     /// Carry out a chosen row that has been confirmed.
@@ -4683,9 +4811,27 @@ enum Flow {
     },
     /// Act on the chosen row of the open list, then close it.
     Choose,
-    /// Go to the agent BOOTH's fleet cursor names — its workspace, on its
-    /// machine, with its screen on the stage.
-    OpenFleetAgent(usize),
+    /// Go where BOOTH's fleet cursor points: an agent's workspace on its own
+    /// machine with its screen staged, or, on a project row, that workspace.
+    ///
+    /// Carries no index. The cursor is the only thing that says which row this
+    /// is about, and a payload copied out of a click would be an index into a
+    /// list the fleet may have rebuilt by the time it is read — the fleet is
+    /// live, and an agent can exit between the frame you clicked and the click
+    /// arriving.
+    OpenFleetRow,
+    /// Start an agent in the project BOOTH's cursor is in. `pick` forces the
+    /// chooser open even where the project names one.
+    NewFleetAgent {
+        pick: bool,
+    },
+    /// Fold or unfold the machine or project the cursor is on.
+    FoldFleetRow,
+    /// Fold every project, or open every one — whichever leaves more visible.
+    FoldFleetAll,
+    /// Ask before closing the workspace BOOTH's cursor is on. The answer is
+    /// [`Flow::CloseWorkspace`], carrying that row's own machine.
+    AskCloseFleetSpace,
     /// Re-read everything the GIT page shows.
     GitRefresh,
     /// Ask before a destructive pick, with the row named in the question — the
@@ -5206,6 +5352,20 @@ fn handle_fleet_key(k: event::KeyEvent, view: &View, rows: usize) -> Option<Flow
         // daemon about a pane that was never named, which is how the rails
         // spell the same guard.
         event::KeyCode::Char('x') if rows > 0 => Some(Flow::KillSelected),
+        // The rails' own two, unchanged in meaning. `a` starts the project's
+        // agent with nothing in between where one is named and opens the
+        // chooser where none is; `A` is the chooser either way. What moves is
+        // only what they act on: on a rail that is the tab you are looking at,
+        // and here it is the project the cursor is in — which on this page are
+        // routinely not the same project, or even the same machine.
+        event::KeyCode::Char('a') => Some(Flow::NewFleetAgent { pick: false }),
+        event::KeyCode::Char('A') => Some(Flow::NewFleetAgent { pick: true }),
+        // The DIFF page's fold keys, against a two-level tree. Its reason
+        // transfers whole: reading a twenty-file diff without folds means
+        // scrolling past four files to reach the fifth, and a fleet of four
+        // machines is the same list with worse names.
+        event::KeyCode::Char('z') => Some(Flow::FoldFleetRow),
+        event::KeyCode::Char('Z') => Some(Flow::FoldFleetAll),
         _ => None,
     }
 }
@@ -6216,7 +6376,9 @@ fn confirm(view: &mut View) -> Flow {
     match c.kind {
         chrome::ConfirmKind::Discard { path } => Flow::Git(GitAction::Discard(path)),
         chrome::ConfirmKind::DeleteFile { path } => Flow::DeleteFile(path),
-        chrome::ConfirmKind::CloseWorkspace { id, .. } => Flow::CloseWorkspace(id),
+        chrome::ConfirmKind::CloseWorkspace { daemon, id, .. } => {
+            Flow::CloseWorkspace { daemon, workspace: id }
+        }
         // Hand the action back to the same path that asked, with the answer
         // recorded so it goes through this time.
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
@@ -6359,16 +6521,23 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 
 /// Carry out a click on BOOTH's fleet list.
 ///
-/// The one list in the workbench where clicking a row cannot also open it: see
-/// [`hit::FleetHit`] for why. A row moves the cursor and nothing else — which
-/// re-points BOOTH's middle column at that agent's screen, because the preview
-/// follows the cursor — and only `[open]` travels.
+/// The one list in the workbench where clicking an agent row cannot also open
+/// it: see [`hit::FleetHit`] for why. Such a row moves the cursor and nothing
+/// else — which re-points BOOTH's middle column at that agent's screen, because
+/// the preview follows the cursor — and only `[open]` travels.
+///
+/// **Every branch moves the cursor first.** The flows that follow carry no row
+/// index and resolve `view.booth_sel` when they run, so a click and the act it
+/// asks for cannot come to name two different rows.
 fn fleet_click(hit: hit::FleetHit, view: &mut View) -> Flow {
     let (row, flow) = match hit {
-        hit::FleetHit::Open(row) => (row, Flow::OpenFleetAgent(row)),
         hit::FleetHit::Row(row) => (row, Flow::Continue),
+        hit::FleetHit::Open(row) | hit::FleetHit::Go(row) => (row, Flow::OpenFleetRow),
+        hit::FleetHit::New(row) => (row, Flow::NewFleetAgent { pick: false }),
+        hit::FleetHit::Close(row) => (row, Flow::AskCloseFleetSpace),
+        hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
     };
-    view.all_agents_sel = row;
+    view.booth_sel = row;
     view.focus = Focus::AllAgents;
     flow
 }
@@ -6389,6 +6558,9 @@ fn run_click(
     view: &mut View,
     tab_count: usize,
     ws: Option<&WorkspaceDetail>,
+    // The machine the active tab is on. Only `[x]` reads it, and it reads it
+    // because a workspace id means nothing without the daemon holding it.
+    here: usize,
 ) -> Flow {
     use hit::Target;
     match target {
@@ -6402,7 +6574,7 @@ fn run_click(
         // rather than a flash message and an armed flag nothing on screen names.
         Target::CloseTab => {
             let Some(ws) = ws else { return Flow::Continue };
-            view.overlay = Some(close_workspace_confirm(ws));
+            view.overlay = Some(close_workspace_confirm(here, ws.id, &ws.name));
             Flow::Continue
         }
         // Clicking the space you are already on goes back to the agents page, so
@@ -6474,7 +6646,7 @@ fn run_click(
             view.focus = focus;
             set_selection(view, focus, row);
             if again {
-                return stage_selected(focus, view.page, row);
+                return stage_selected(focus, view.page);
             }
             Flow::Continue
         }
@@ -6609,13 +6781,44 @@ fn menu_for(
 /// same reason [`hit::on_fleet`] is a second entry point. Both end in
 /// [`menu_overlay`], so the right button, `m` and the rails cannot come to offer
 /// different rows.
-fn fleet_menu(fleet: &[chrome::AllAgentRow<'_>], sel: usize) -> Option<Overlay> {
-    let at = fleet_route(fleet, sel)?;
-    Some(menu_overlay(chrome::MenuTarget::Agent {
-        daemon: at.daemon,
-        workspace: at.workspace,
-        pane: at.pane,
-    }))
+/// Takes a *row* index, so it can answer for a project as well as an agent — a
+/// project's menu is the tab bar's own, acting on that machine's tab rather
+/// than on the one you are looking at. A machine row has no menu: there is
+/// nothing generic to offer about a host here that the tab bar does not already
+/// offer about its tabs.
+fn fleet_menu(
+    rows: &[chrome::BoothRow<'_>],
+    all: &[chrome::AllAgentRow<'_>],
+    row: usize,
+) -> Option<Overlay> {
+    match rows.get(row)? {
+        chrome::BoothRow::Agent { sel, .. } => {
+            let at = fleet_route(all, *sel)?;
+            Some(menu_overlay(chrome::MenuTarget::Agent {
+                daemon: at.daemon,
+                workspace: at.workspace,
+                pane: at.pane,
+            }))
+        }
+        chrome::BoothRow::Space { space, .. } => {
+            Some(menu_overlay(chrome::MenuTarget::Tab(space.tab)))
+        }
+        chrome::BoothRow::Machine { .. } => None,
+    }
+}
+
+/// [`fleet_menu`] against the live fleet, for the two call sites that have
+/// daemons rather than a list.
+fn fleet_menu_here(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &View,
+    row: usize,
+) -> Option<Overlay> {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    fleet_menu(&chrome::booth_rows(&spaces, &machines, &view.folds), &all, row)
 }
 
 /// A menu target as the list overlay that shows it. The rows come from
@@ -6915,7 +7118,7 @@ fn selection(view: &View, focus: Focus) -> usize {
         Focus::Agents => view.agent_sel,
         Focus::Processes => view.proc_sel,
         Focus::Changes => view.changes_sel,
-        Focus::AllAgents => view.all_agents_sel,
+        Focus::AllAgents => view.booth_sel,
         // The GIT page's two cursors live on the page's own state, the way the
         // Docker page's does — they are about a workspace, not about the rails.
         Focus::Refs | Focus::History | Focus::Stage => 0,
@@ -6927,7 +7130,7 @@ fn set_selection(view: &mut View, focus: Focus, row: usize) {
         Focus::Agents => view.agent_sel = row,
         Focus::Processes => view.proc_sel = row,
         Focus::Changes => view.changes_sel = row,
-        Focus::AllAgents => view.all_agents_sel = row,
+        Focus::AllAgents => view.booth_sel = row,
         Focus::Refs | Focus::History | Focus::Stage => {}
     }
 }
@@ -6938,13 +7141,13 @@ fn set_selection(view: &mut View, focus: Focus, row: usize) {
 /// Not on BOOTH: there the verb travels between machines, so it is the one row a
 /// click may not carry out. Enter still does, because a keystroke aimed at the
 /// cursor cannot be a slip of the pointer, and `[open]` is beside it either way.
-fn stage_selected(focus: Focus, page: Page, sel: usize) -> Flow {
+fn stage_selected(focus: Focus, page: Page) -> Flow {
     match focus {
         // On BOOTH the cursor is in a cross-daemon list, so Enter is a
         // different verb: go to that agent's workspace on its machine. The
         // ALL AGENTS panel keeps `StageSelected`, because its rows are this
         // workspace's already.
-        Focus::AllAgents if page == Page::Booth => Flow::OpenFleetAgent(sel),
+        Focus::AllAgents if page == Page::Booth => Flow::OpenFleetRow,
         Focus::Agents | Focus::Processes | Focus::AllAgents => Flow::StageSelected,
         Focus::Changes => Flow::OpenSelectedDiff,
         // The GIT page answers Enter itself, in `handle_git_key`, before this
@@ -7419,6 +7622,7 @@ fn handle_input(
             // the drawing was given or a click lands on the wrong agent.
             let fleet = all_agent_rows(daemons, hosts);
             let fleet_machines = machine_rows(daemons, hosts, &fleet);
+            let fleet_spaces = fleet_spaces(daemons, &fleet, None);
             // How wide the open file's line numbers are, so a selection can
             // start after them. Only the buffer knows, and only here is it in
             // scope — hence a value passed down rather than a lookup.
@@ -7435,11 +7639,23 @@ fn handle_input(
                     // does not move, which is what the rails do — right-clicking
                     // a row to end it should not also re-point the preview at a
                     // machine you were not watching.
-                    if let Some(fleet_hit) =
-                        hit::on_fleet(*cols, *rows, view, &fleet, &fleet_machines, m.column, m.row)
-                    {
-                        let (hit::FleetHit::Row(sel) | hit::FleetHit::Open(sel)) = fleet_hit;
-                        view.overlay = fleet_menu(&fleet, sel);
+                    if let Some(fleet_hit) = hit::on_fleet(
+                        *cols,
+                        *rows,
+                        view,
+                        &fleet,
+                        &fleet_spaces,
+                        &fleet_machines,
+                        m.column,
+                        m.row,
+                    ) {
+                        let (hit::FleetHit::Row(row)
+                        | hit::FleetHit::Open(row)
+                        | hit::FleetHit::Go(row)
+                        | hit::FleetHit::New(row)
+                        | hit::FleetHit::Close(row)
+                        | hit::FleetHit::Fold(row)) = fleet_hit;
+                        view.overlay = fleet_menu_here(daemons, hosts, view, row);
                         return Flow::Continue;
                     }
                     let target =
@@ -7453,9 +7669,16 @@ fn handle_input(
                     // BOOTH's fleet first: it is the only region whose rows come
                     // from a cross-daemon list, so it is resolved against that
                     // list rather than against the geometry alone.
-                    if let Some(fleet_hit) =
-                        hit::on_fleet(*cols, *rows, view, &fleet, &fleet_machines, m.column, m.row)
-                    {
+                    if let Some(fleet_hit) = hit::on_fleet(
+                        *cols,
+                        *rows,
+                        view,
+                        &fleet,
+                        &fleet_spaces,
+                        &fleet_machines,
+                        m.column,
+                        m.row,
+                    ) {
                         // Armed, not dropped: every other list in the workbench
                         // can be dragged over and copied out of, and a column of
                         // agent titles and the machines they are on is one of
@@ -7483,7 +7706,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return page_bar_click(target, view, settings.ret, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return page_bar_click(target, view, settings.ret, tab_count, ws, here);
                         }
                         if let Some(flow) =
                             settings_click(view, settings, *cols, *rows, m.column, m.row)
@@ -7510,7 +7734,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return page_bar_click(target, view, help.ret, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return page_bar_click(target, view, help.ret, tab_count, ws, here);
                         }
                         if let Some(flow) = help_click(view, help, *cols, *rows, m.column, m.row) {
                             return flow;
@@ -7558,7 +7783,8 @@ fn handle_input(
                                 m.column,
                                 m.row,
                             );
-                            return run_click(target, view, tab_count, ws);
+                            let here = active_daemon(daemons, hosts, view);
+                            return run_click(target, view, tab_count, ws, here);
                         }
                         let owned = active_workspace(daemons, hosts, view).cloned();
                         let ch = owned.as_ref().and_then(|w| w.changes.clone());
@@ -7633,7 +7859,8 @@ fn handle_input(
                     if let hit::Target::Stage(px, py) = target {
                         forward_mouse(stage, px, py, &m);
                     }
-                    return run_click(target, view, tab_count, ws);
+                    let here = active_daemon(daemons, hosts, view);
+                    return run_click(target, view, tab_count, ws, here);
                 }
                 event::MouseEventKind::Drag(event::MouseButton::Left) => {
                     // A pane that grabbed the mouse gets the drag, unless Alt
@@ -7895,8 +8122,7 @@ fn handle_input(
                     // own would be the tab bar's, which is not what you are
                     // looking at.
                     if view.page == Page::Booth && view.focus == Focus::AllAgents {
-                        let fleet = all_agent_rows(daemons, hosts);
-                        view.overlay = fleet_menu(&fleet, view.all_agents_sel);
+                        view.overlay = fleet_menu_here(daemons, hosts, view, view.booth_sel);
                         return Flow::Continue;
                     }
                     let ws = active_workspace(daemons, hosts, view);
@@ -7917,8 +8143,9 @@ fn handle_input(
                 // and the unshifted key is a file verb on the rail. `alt-x` is
                 // the daemon's spelling of the same thing.
                 (event::KeyCode::Char('X'), false) => {
+                    let d = active_daemon(daemons, hosts, view);
                     if let Some(ws) = active_workspace(daemons, hosts, view) {
-                        view.overlay = Some(close_workspace_confirm(ws));
+                        view.overlay = Some(close_workspace_confirm(d, ws.id, &ws.name));
                     }
                 }
                 (event::KeyCode::Tab, false) => {
@@ -7961,7 +8188,7 @@ fn handle_input(
                         Focus::Agents | Focus::Processes | Focus::AllAgents
                     ) =>
                 {
-                    return stage_selected(view.focus, view.page, selection(view, view.focus))
+                    return stage_selected(view.focus, view.page)
                 }
                 (event::KeyCode::Enter, false) => view.focus = Focus::Stage,
                 (event::KeyCode::Down | event::KeyCode::Char('j'), false) => {
@@ -8134,7 +8361,11 @@ fn alt_verb(code: event::KeyCode) -> Option<ViewVerb> {
 
 /// How many rows each rail has, so a cursor cannot walk off the end.
 fn rail_counts(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Counts {
-    let all = all_agent_rows(daemons, hosts).len();
+    // BOOTH's cursor walks *rows* — machines and projects included, folded ones
+    // excluded — so the number that stops it walking off the bottom is the row
+    // count and not the agent count. Those were the same number back when a
+    // header was not a thing you could put a cursor on.
+    let all = booth_row_count(daemons, hosts, view);
     let Some(ws) = active_workspace(daemons, hosts, view) else { return (0, 0, 0, all) };
     // Counted from the rows the rail actually draws, headings included: the
     // cursor and Enter index the same list, so anything that can be selected
@@ -8172,6 +8403,138 @@ fn all_agent_rows<'a>(
         }
     }
     out
+}
+
+/// Every workspace open on every connected daemon, in tab order.
+///
+/// Built from the *tab list* rather than from the agents, which is the whole
+/// point: a project with nothing running in it has a `WorkspaceSummary` and no
+/// agents, and BOOTH is where you would go to start something in it. It also
+/// means a project appears the moment its daemon lists it, before its detail
+/// has arrived — [`all_agent_rows`] needs the detail and this does not.
+///
+/// The agent windows rely on `all_agent_rows` walking daemons and then tabs in
+/// this same order, so one project's agents are contiguous in it. That is a
+/// property of both functions, and `fleet_spaces_are_windows_onto_the_fleet`
+/// is what keeps it one.
+fn fleet_spaces<'a>(
+    daemons: &'a [Daemon],
+    all: &'a [chrome::AllAgentRow<'a>],
+    pinned: Option<&'a str>,
+) -> Vec<chrome::SpaceRow<'a>> {
+    let mut out = Vec::new();
+    for (d, daemon) in daemons.iter().enumerate() {
+        for (t, tab) in daemon.state.tabs.iter().enumerate() {
+            let _ = t;
+            let mine = |r: &&chrome::AllAgentRow<'_>| r.daemon == d && r.workspace_id == tab.id;
+            let first = all.iter().position(|r| mine(&r)).unwrap_or(all.len());
+            let n = all.iter().filter(mine).count();
+            out.push(chrome::SpaceRow {
+                name: &tab.name,
+                id: tab.id,
+                daemon: d,
+                agents: &all[first..first + n],
+                first,
+                // The project's own declaration first, then the client's pin.
+                // Two steps and no third: a project that wants a different
+                // agent says so in the file it already has for exactly that,
+                // which lives with the project, travels to the machine it runs
+                // on, and is shared with whoever else opens it. A client-side
+                // pin keyed by directory would be none of those three.
+                preferred: tab.autostart.first().map(String::as_str).or(pinned),
+                // The running count of this walk, which is `tab_index`'s own
+                // order — see `SpaceRow::tab`.
+                tab: out.len(),
+            });
+        }
+    }
+    out
+}
+
+/// What BOOTH's cursor is sitting on, resolved away from the borrowed row list.
+///
+/// Owned rather than a `BoothRow`, because building that list borrows the whole
+/// daemon set through three intermediates and every caller here wants to *act*
+/// — spawn, go there, fold — long after those temporaries would have died.
+#[derive(Debug, Clone, PartialEq)]
+enum BoothCursor {
+    Machine {
+        label: String,
+    },
+    Space {
+        name: String,
+        machine: String,
+        id: SessionId,
+        daemon: usize,
+        tab: usize,
+        preferred: Option<String>,
+    },
+    /// Index into the fleet list, which is what [`fleet_route`] resolves.
+    Agent {
+        sel: usize,
+    },
+    /// The fleet is empty, or the cursor has outrun it.
+    Nothing,
+}
+
+/// Resolve BOOTH's cursor.
+///
+/// Rebuilds the row list per call, for the reason [`all_agent_rows`] is rebuilt
+/// per paint: it is bounded by what a person actually has open, and a cache
+/// would be one more thing to invalidate on every push.
+fn booth_cursor(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> BoothCursor {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, view.pinned_agent.as_deref());
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    match rows.get(view.booth_sel) {
+        Some(chrome::BoothRow::Machine { label, .. }) => {
+            BoothCursor::Machine { label: (*label).to_string() }
+        }
+        Some(chrome::BoothRow::Space { space, machine, .. }) => BoothCursor::Space {
+            name: space.name.to_string(),
+            machine: (*machine).to_string(),
+            tab: space.tab,
+            id: space.id,
+            daemon: space.daemon,
+            preferred: space.preferred.map(str::to_string),
+        },
+        Some(chrome::BoothRow::Agent { sel, .. }) => BoothCursor::Agent { sel: *sel },
+        None => BoothCursor::Nothing,
+    }
+}
+
+/// The agent BOOTH's *middle column* is showing — the cursor's own, or, on a
+/// project row, the one in it that most needs you. See [`chrome::booth_preview`].
+fn booth_previewed(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Option<usize> {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    chrome::booth_preview(&chrome::booth_rows(&spaces, &machines, &view.folds), view.booth_sel)
+}
+
+/// The agent BOOTH's cursor is *on* — `None` on a machine or a project row.
+///
+/// Neither this nor [`booth_previewed`] is told the pin, because which agent a
+/// project would start decides the wording of its button and nothing about the
+/// shape of the list: the rows resolve identically either way.
+fn booth_selected_agent(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &View,
+) -> Option<usize> {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    chrome::booth_selected(&chrome::booth_rows(&spaces, &machines, &view.folds), view.booth_sel)
+}
+
+/// How many rows BOOTH's fleet is drawing, so the cursor cannot walk off it.
+fn booth_row_count(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> usize {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    chrome::booth_rows(&spaces, &machines, &view.folds).len()
 }
 
 /// Every connected daemon and its telemetry, for the BOOTH page's compute
@@ -8314,7 +8677,10 @@ fn selected_pane(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> O
         Focus::Agents => ws.agents.get(view.agent_sel).map(|a| a.pane),
         Focus::Processes => ws.processes.get(view.proc_sel).map(|p| p.pane),
         Focus::AllAgents => {
-            all_agent_rows(daemons, hosts).get(view.all_agents_sel).map(|r| r.agent.pane)
+            let all = all_agent_rows(daemons, hosts);
+            booth_selected_agent(daemons, hosts, view)
+                .and_then(|i| all.get(i))
+                .map(|r| r.agent.pane)
         }
         _ => None,
     }
@@ -8331,7 +8697,8 @@ fn selected_pane(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> O
 /// two agree by construction.
 fn selected_route(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Option<Route> {
     if view.focus == Focus::AllAgents {
-        return fleet_route(&all_agent_rows(daemons, hosts), view.all_agents_sel);
+        let sel = booth_selected_agent(daemons, hosts, view)?;
+        return fleet_route(&all_agent_rows(daemons, hosts), sel);
     }
     let d = active_daemon(daemons, hosts, view);
     let ws = active_workspace(daemons, hosts, view)?;
@@ -8364,27 +8731,112 @@ fn fleet_route(fleet: &[chrome::AllAgentRow<'_>], sel: usize) -> Option<Route> {
 ///
 /// Returns false when the row has gone — the fleet is live, and an agent can
 /// exit between the frame you clicked and the click arriving.
-fn open_fleet_agent(
-    daemons: &[Daemon],
-    hosts: &[Option<String>],
-    view: &mut View,
-    sel: usize,
-) -> bool {
-    let rows = all_agent_rows(daemons, hosts);
-    let Some(row) = rows.get(sel) else { return false };
-    let pane = row.agent.pane;
+/// **A project row goes there too**, and that is the whole of what its name
+/// being a link means: a project has no pane to preview, so travelling is the
+/// only thing pressing it could be asking for. It arrives with the keyboard on
+/// the AGENTS rail rather than on a stage, which is where the tab bar would
+/// have put you.
+fn open_fleet_row(daemons: &[Daemon], hosts: &[Option<String>], view: &mut View) -> bool {
+    let (daemon, workspace, pane) = match booth_cursor(daemons, hosts, view) {
+        BoothCursor::Agent { sel } => {
+            let rows = all_agent_rows(daemons, hosts);
+            let Some(row) = rows.get(sel) else { return false };
+            (row.daemon, row.workspace_id, Some(row.agent.pane))
+        }
+        // The row already knows its chip — see `SpaceRow::tab`.
+        BoothCursor::Space { tab, .. } => {
+            if tab >= tab_index(daemons, hosts).len() {
+                return false;
+            }
+            view.tab = tab;
+            view.page = Page::Agents;
+            // Nothing chosen to stage, so the workspace shows whatever it had.
+            view.staged = None;
+            view.focus = Focus::Agents;
+            return true;
+        }
+        // A machine is not a place. `z` is what a press on one means, and the
+        // key that folds is not the key that travels.
+        BoothCursor::Machine { .. } | BoothCursor::Nothing => return false,
+    };
+    // By id, not by name. Two machines routinely have a project of the same
+    // name open and one machine may have two, so matching the label would go to
+    // whichever came first in the tab bar.
     let Some(tab) = tab_index(daemons, hosts)
         .iter()
-        .position(|(d, t)| *d == row.daemon && daemons[*d].state.tabs[*t].name == row.workspace)
+        .position(|(d, t)| *d == daemon && daemons[*d].state.tabs[*t].id == workspace)
     else {
         return false;
     };
-    view.all_agents_sel = sel;
     view.tab = tab;
-    view.staged = Some(pane);
     view.page = Page::Agents;
-    view.focus = Focus::Stage;
+    match pane {
+        Some(pane) => {
+            view.staged = Some(pane);
+            view.focus = Focus::Stage;
+        }
+        None => {
+            // Nothing chosen to stage, so the workspace shows whatever it had.
+            view.staged = None;
+            view.focus = Focus::Agents;
+        }
+    }
     true
+}
+
+/// The agent picker, opened against a project of BOOTH's fleet.
+///
+/// Titled with the project rather than with `d pins as default`, because it
+/// carries no `d` — see [`chrome::ListKind::SpawnAgentIn`]. The agent list is
+/// that project's *own* daemon's: the client's pin is a name, and a machine is
+/// allowed not to have it.
+async fn fleet_agent_picker(
+    daemons: &[Daemon],
+    daemon: usize,
+    workspace: SessionId,
+    project: &str,
+) -> Result<Overlay> {
+    let Some(d) = daemons.get(daemon) else { anyhow::bail!("that machine has gone") };
+    let items: Vec<String> = d.api.get_as("/v1/agents").await?;
+    anyhow::ensure!(!items.is_empty(), "no agents configured");
+    Ok(Overlay::List(ListOverlay {
+        title: format!("START IN {project}"),
+        items,
+        values: None,
+        sel: 0,
+        kind: ListKind::SpawnAgentIn { daemon, workspace },
+    }))
+}
+
+/// `z` on an agent row folds the project it is *in*, and takes the cursor up to
+/// that project's row.
+///
+/// Leaving the cursor where it was would leave it on a row that is no longer
+/// drawn, and the clamp would then drop it to whatever happened to be at the
+/// same index — which is somebody else's agent. Moving it to the row that
+/// swallowed it is both the vim-tree behaviour and the only one that keeps the
+/// cursor on something you can see.
+fn fold_cursors_space(daemons: &[Daemon], hosts: &[Option<String>], view: &mut View) {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    let Some(header) = rows[..view.booth_sel.min(rows.len())]
+        .iter()
+        .rposition(|r| matches!(r, chrome::BoothRow::Space { .. }))
+    else {
+        return;
+    };
+    let chrome::BoothRow::Space { space, machine, .. } = rows[header] else { return };
+    let (machine, id) = (machine.to_string(), space.id);
+    view.booth_sel = header;
+    view.folds.toggle_space(&machine, id);
+}
+
+/// Keep BOOTH's cursor on a row that exists, after a fold took some away.
+fn clamp_booth_sel(daemons: &[Daemon], hosts: &[Option<String>], view: &mut View) {
+    let len = booth_row_count(daemons, hosts, view);
+    view.booth_sel = view.booth_sel.min(len.saturating_sub(1));
 }
 
 fn move_sel(view: &mut View, (agents, procs, changes, all_agents): Counts, delta: isize) {
@@ -8400,7 +8852,7 @@ fn move_sel(view: &mut View, (agents, procs, changes, all_agents): Counts, delta
         Focus::Agents => step(&mut view.agent_sel, agents),
         Focus::Processes => step(&mut view.proc_sel, procs),
         Focus::Changes => step(&mut view.changes_sel, changes),
-        Focus::AllAgents => step(&mut view.all_agents_sel, all_agents),
+        Focus::AllAgents => step(&mut view.booth_sel, all_agents),
         // Both GIT cursors live on the page's own state; `handle_git_key`
         // walks them.
         Focus::Refs | Focus::History | Focus::Stage => {}
@@ -8505,6 +8957,7 @@ fn paint(
     // Only BOOTH reads these, but they cost one pass over a list bounded by the
     // number of machines you are connected to, so they are not worth gating.
     let machines = machine_rows(daemons, hosts, &all_agents);
+    let spaces = fleet_spaces(daemons, &all_agents, view.pinned_agent.as_deref());
     // The staged pane's machine, when it has stopped answering. `hosts` is
     // indexed by daemon and holds `None` for the local one, which is exactly
     // the distinction the notice draws.
@@ -8522,6 +8975,7 @@ fn paint(
         workspace: ws,
         system: sys,
         all_agents: &all_agents,
+        spaces: &spaces,
         machines: &machines,
         files,
         docs,
@@ -9141,6 +9595,7 @@ mod tests {
                 header: "close this workspace?".into(),
                 yes: false,
                 kind: chrome::ConfirmKind::CloseWorkspace {
+                    daemon: 0,
                     id: butai_protocol::SessionId(1),
                     name: "proj".into(),
                 },
@@ -9227,6 +9682,7 @@ mod tests {
             agents: vec![],
             processes: vec![],
             stage: None,
+            autostart: Vec::new(),
             changes: Some(ChangesDto {
                 branch: "main".into(),
                 staged: vec![file("s.rs", "A")],
@@ -9739,6 +10195,7 @@ mod tests {
             processes: vec![],
             changes: None,
             stage: None,
+            autostart: Vec::new(),
         }
     }
 
@@ -9751,6 +10208,7 @@ mod tests {
             agents: vec![],
             processes: vec![],
             stage: None,
+            autostart: Vec::new(),
             changes: Some(changes),
         }
     }
@@ -10009,6 +10467,7 @@ mod tests {
             chrome::ConfirmKind::Discard { path: "u.rs".into() },
             chrome::ConfirmKind::DeleteFile { path: "u.rs".into() },
             chrome::ConfirmKind::CloseWorkspace {
+                daemon: 0,
                 id: butai_protocol::SessionId(1),
                 name: "proj".into(),
             },
@@ -10188,6 +10647,7 @@ mod tests {
             processes: vec![],
             changes: Some(changes.clone()),
             stage: None,
+            autostart: Vec::new(),
         };
         let rows = chrome::change_rows(&changes);
         // Walk every row, and for each one every verb its footer would draw.
@@ -10354,6 +10814,7 @@ mod tests {
             processes: vec![],
             changes: Some(changes),
             stage: None,
+            autostart: Vec::new(),
         };
         let press = |sel: usize, c: char| {
             let mut view = View { page: Page::Git, focus: Focus::Refs, ..View::default() };
@@ -11393,13 +11854,23 @@ mod tests {
     fn clicking_a_fleet_row_twice_does_not_leave_the_booth() {
         let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
         assert!(matches!(fleet_click(hit::FleetHit::Row(2), &mut view), Flow::Continue));
-        assert_eq!(view.all_agents_sel, 2, "the click must still move the cursor and the preview");
+        assert_eq!(view.booth_sel, 2, "the click must still move the cursor and the preview");
         // The second one on the same row is still a look, not a jump — which is
         // also what a double-click is, since a terminal has no such event.
         assert!(matches!(fleet_click(hit::FleetHit::Row(2), &mut view), Flow::Continue));
         assert_eq!(view.page, Page::Booth, "a click on a row left BOOTH");
         // And the button is the one thing that travels.
-        assert!(matches!(fleet_click(hit::FleetHit::Open(2), &mut view), Flow::OpenFleetAgent(2)));
+        assert!(matches!(fleet_click(hit::FleetHit::Open(2), &mut view), Flow::OpenFleetRow));
+        assert_eq!(view.booth_sel, 2, "and it aims at the row it was pressed on");
+        // A project's name travels the same way, and its `[+]` does not travel
+        // at all — the two acts a project row adds, neither of which is a
+        // second meaning for pressing an agent.
+        assert!(matches!(fleet_click(hit::FleetHit::Go(1), &mut view), Flow::OpenFleetRow));
+        assert!(matches!(
+            fleet_click(hit::FleetHit::New(1), &mut view),
+            Flow::NewFleetAgent { pick: false }
+        ));
+        assert_eq!(view.page, Page::Booth, "starting an agent must not move the page");
     }
 
     /// A fleet of two machines, for the tests about *where* an act on a row
@@ -11423,6 +11894,41 @@ mod tests {
                 host: Some("gpu-box"),
                 daemon: 1,
             },
+        ]
+    }
+
+    /// [`two_machine_fleet`] as BOOTH draws it, nothing folded: machine,
+    /// project, agent, twice over.
+    ///
+    /// Assembled by hand rather than through `fleet_spaces`, which needs live
+    /// daemons — the point of these tests being that a row's machine and
+    /// workspace travel *with the row* and not with whatever tab is up.
+    fn two_machine_rows<'a>(fleet: &'a [chrome::AllAgentRow<'a>]) -> Vec<chrome::BoothRow<'a>> {
+        use butai_protocol::SessionId;
+        let space = |name, daemon, first: usize, tab| chrome::SpaceRow {
+            name,
+            id: SessionId(1),
+            daemon,
+            agents: &fleet[first..first + 1],
+            first,
+            preferred: Some("claude"),
+            tab,
+        };
+        vec![
+            chrome::BoothRow::Machine { label: "local", agents: 1, daemon: 0, folded: false },
+            chrome::BoothRow::Space {
+                space: space("proj", 0, 0, 0),
+                machine: "local",
+                folded: false,
+            },
+            chrome::BoothRow::Agent { row: fleet[0], sel: 0 },
+            chrome::BoothRow::Machine { label: "gpu-box", agents: 1, daemon: 1, folded: false },
+            chrome::BoothRow::Space {
+                space: space("infra", 1, 1, 1),
+                machine: "gpu-box",
+                folded: false,
+            },
+            chrome::BoothRow::Agent { row: fleet[1], sel: 1 },
         ]
     }
 
@@ -11472,9 +11978,29 @@ mod tests {
         // Nothing to end is nothing to say — not a failure from the daemon about
         // a pane that was never named.
         assert!(handle_fleet_key(x, &fleet, 0).is_none());
-        // And it is the only one: the rest of the rails' table is about lists
-        // this page does not draw.
-        for c in ['r', 'a', 'A', 't', 'X'] {
+        // `a` and `A` are the rails' own two verbs, bound here unchanged —
+        // what moved is only what they act on, from the tab you are looking at
+        // to the project the cursor is in.
+        assert!(matches!(
+            handle_fleet_key(key(event::KeyCode::Char('a')), &fleet, 3),
+            Some(Flow::NewFleetAgent { pick: false })
+        ));
+        assert!(matches!(
+            handle_fleet_key(key(event::KeyCode::Char('A')), &fleet, 3),
+            Some(Flow::NewFleetAgent { pick: true })
+        ));
+        // …and `z`/`Z` are the DIFF page's fold pair, against a two-level tree.
+        assert!(matches!(
+            handle_fleet_key(key(event::KeyCode::Char('z')), &fleet, 3),
+            Some(Flow::FoldFleetRow)
+        ));
+        assert!(matches!(
+            handle_fleet_key(key(event::KeyCode::Char('Z')), &fleet, 3),
+            Some(Flow::FoldFleetAll)
+        ));
+        // And that is all of them: the rest of the rails' table is about lists
+        // this page still does not draw.
+        for c in ['r', 't', 'X', 'd', 's'] {
             assert!(
                 handle_fleet_key(key(event::KeyCode::Char(c)), &fleet, 3).is_none(),
                 "{c} is not a fleet verb"
@@ -11485,7 +12011,12 @@ mod tests {
         // pane is a live agent, and an `x` typed at it has to stay an `x` —
         // this returning `None` is what lets it fall through to the forward.
         let stage = View { page: Page::Booth, focus: Focus::Stage, ..Default::default() };
-        assert!(handle_fleet_key(x, &stage, 3).is_none(), "x on the preview must reach the agent");
+        for c in ['x', 'a', 'A', 'z', 'Z'] {
+            assert!(
+                handle_fleet_key(key(event::KeyCode::Char(c)), &stage, 3).is_none(),
+                "{c} typed at the preview must reach the agent"
+            );
+        }
     }
 
     /// The fleet's context menu names the row it was opened on, wherever that
@@ -11497,7 +12028,10 @@ mod tests {
         let agents =
             [agent_dto(10, "claude", AgentState::Idle), agent_dto(7, "codex", AgentState::Waiting)];
         let fleet = two_machine_fleet(&agents);
-        let Some(Overlay::List(list)) = fleet_menu(&fleet, 1) else { panic!("no menu") };
+        let rows = two_machine_rows(&fleet);
+        // Row 3 is the second machine's agent: machine, project, agent, machine,
+        // project, agent.
+        let Some(Overlay::List(list)) = fleet_menu(&rows, &fleet, 5) else { panic!("no menu") };
         assert_eq!(
             list.kind,
             ListKind::Menu(chrome::MenuTarget::Agent {
@@ -11509,7 +12043,63 @@ mod tests {
         // The same three rows the rails offer — one builder, so the pointer and
         // `m` cannot come to mean different things on different pages.
         assert_eq!(list.items, vec!["Close agent", "Close others", "Close all agents"]);
-        assert!(fleet_menu(&fleet, 9).is_none(), "a row that has gone has no menu");
+        assert!(fleet_menu(&rows, &fleet, 9).is_none(), "a row that has gone has no menu");
+
+        // A project row opens the tab bar's own menu, against *its* chip — the
+        // one on its machine, not the one you are looking at.
+        let Some(Overlay::List(list)) = fleet_menu(&rows, &fleet, 4) else { panic!("no menu") };
+        assert_eq!(list.kind, ListKind::Menu(chrome::MenuTarget::Tab(1)));
+        // A machine has none: there is nothing generic to offer about a host
+        // here that the tab bar does not already offer about its tabs.
+        assert!(fleet_menu(&rows, &fleet, 3).is_none(), "a machine row opened a menu");
+    }
+
+    /// Closing a workspace from BOOTH asks first, and asks about the row's own
+    /// machine.
+    ///
+    /// The routing half is the bug this found: `Flow::CloseWorkspace` carried
+    /// an id and the dispatch sent the DELETE to `active_daemon`. From the tab
+    /// bar those are the same machine by construction; from a fleet row they
+    /// are routinely not, and a `SessionId` is only unique on its own daemon —
+    /// so `[x]` on a `gpu-box` row would have closed whatever held that id here.
+    /// The same failure `x` on a rail row had, and the same fix.
+    #[test]
+    fn closing_a_fleet_workspace_asks_and_names_its_machine() {
+        let overlay = close_workspace_confirm(1, SessionId(1), "infra");
+        let Overlay::Confirm(c) = &overlay else { panic!("{overlay:?}") };
+        assert!(!c.yes, "it must open on `no`");
+        assert!(c.header.contains("infra"), "the box names what goes: {:?}", c.header);
+        assert_eq!(
+            c.kind,
+            chrome::ConfirmKind::CloseWorkspace {
+                daemon: 1,
+                id: SessionId(1),
+                name: "infra".into()
+            }
+        );
+
+        // …and answering it sends the DELETE to that machine, not to whichever
+        // tab happens to be up.
+        let mut view = View { page: Page::Booth, overlay: Some(overlay), ..Default::default() };
+        let flow = press(&mut view, key(event::KeyCode::Char('y')), &Keymap::default());
+        assert!(
+            matches!(flow, Flow::CloseWorkspace { daemon: 1, workspace: SessionId(1) }),
+            "{flow:?}"
+        );
+    }
+
+    /// The `[x]` on a project row asks; a press beside it does not.
+    #[test]
+    fn the_fleet_close_button_asks_rather_than_closing() {
+        let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        assert!(matches!(
+            fleet_click(hit::FleetHit::Close(3), &mut view),
+            Flow::AskCloseFleetSpace
+        ));
+        assert_eq!(view.booth_sel, 3, "and it aims at the row it was pressed on");
+        // Nothing has gone yet: the flow opens a box, and only the box closes
+        // anything.
+        assert_eq!(view.page, Page::Booth);
     }
 
     /// BOOTH's preview is a pane, so a key typed at it reaches the agent.
@@ -11649,13 +12239,9 @@ mod tests {
     fn enter_on_booth_travels_where_enter_on_a_rail_stages() {
         let keymap = Keymap::default();
         let enter = key(event::KeyCode::Enter);
-        let mut view = View {
-            page: Page::Booth,
-            focus: Focus::AllAgents,
-            all_agents_sel: 3,
-            ..Default::default()
-        };
-        assert!(matches!(press(&mut view, enter, &keymap), Flow::OpenFleetAgent(3)));
+        let mut view =
+            View { page: Page::Booth, focus: Focus::AllAgents, booth_sel: 3, ..Default::default() };
+        assert!(matches!(press(&mut view, enter, &keymap), Flow::OpenFleetRow));
         // A rail cursor stages the pane it names, as it always has.
         let mut view = View { focus: Focus::Agents, agent_sel: 3, ..Default::default() };
         assert!(matches!(press(&mut view, enter, &keymap), Flow::StageSelected));
@@ -11765,7 +12351,7 @@ mod tests {
 
         // The chip, which goes the long way round through `run_click`.
         let mut view = View { focus: Focus::Stage, ..Default::default() };
-        run_click(hit::Target::Space(Page::Booth), &mut view, 1, None);
+        run_click(hit::Target::Space(Page::Booth), &mut view, 1, None, 0);
         assert_eq!((view.page, view.focus), (Page::Booth, Focus::AllAgents));
 
         // And leaving hands it back, or the cursor would be in a list the next
@@ -12127,7 +12713,7 @@ mod tests {
         let keymap = Keymap::default();
         let mut view = View::default();
         assert!(matches!(
-            run_click(hit::Target::Footer("[layout]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[layout]"), &mut view, 1, None, 0),
             Flow::ToggleLayout
         ));
         assert!(!view.zen, "[layout] is not the zen key");
@@ -12165,7 +12751,7 @@ mod tests {
             let mut files = at("src", 3);
             let mut docs = at("docs", 2);
             let flow = match target {
-                Some(t) => run_click(t, &mut view, 1, None),
+                Some(t) => run_click(t, &mut view, 1, None, 0),
                 None => handle_input(
                     event::Event::Key(key(event::KeyCode::Char('?'))),
                     &mut view,
@@ -12204,7 +12790,7 @@ mod tests {
         let mut help = chrome::Help::default();
         let mut view = View { page: Page::Docker, ..Default::default() };
         assert!(matches!(
-            run_click(hit::Target::Footer("[help]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[help]"), &mut view, 1, None, 0),
             Flow::OpenHelp
         ));
         // The loop is what carries the page across; do it the way the loop does.
@@ -12213,7 +12799,7 @@ mod tests {
 
         // Both ways out: the button again, and `esc` on the page.
         assert!(matches!(
-            run_click(hit::Target::Footer("[help]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[help]"), &mut view, 1, None, 0),
             Flow::CloseHelp
         ));
         let flow = handle_help_key(key(event::KeyCode::Esc), &mut view, &mut help, 120, 40);
@@ -12270,14 +12856,14 @@ mod tests {
     fn the_footer_settings_button_enters_and_leaves() {
         let mut view = View { page: Page::Docker, ..Default::default() };
         assert!(matches!(
-            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None, 0),
             Flow::OpenSettings
         ));
         // The loop is what carries the page across; do it the way the loop does.
         let ret = view.page;
         view.page = Page::Settings;
         assert!(matches!(
-            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None),
+            run_click(hit::Target::Footer("[settings]"), &mut view, 1, None, 0),
             Flow::CloseSettings
         ));
         assert_eq!(ret, Page::Docker, "and it goes back where it was opened from");
@@ -12290,35 +12876,35 @@ mod tests {
         let ret = Page::Docker;
         // A space names where it is going, and goes there rather than to `ret`.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(Page::Booth), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(Page::Booth), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, Page::Booth, "clicking BOOTH left SETTINGS up");
 
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(Page::Files), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(Page::Files), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, Page::Files);
 
         // The space that *is* `ret` still goes there, rather than reading as a
         // press on the page you are already on and toggling to AGENTS.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        page_bar_click(hit::Target::Space(ret), &mut view, ret, 1, None);
+        page_bar_click(hit::Target::Space(ret), &mut view, ret, 1, None, 0);
         assert_eq!(view.page, ret, "the space you came from toggled instead");
 
         // A chip names no page, so it puts back the one SETTINGS was over.
         let mut view = View { page: Page::Settings, tab: 0, ..Default::default() };
-        page_bar_click(hit::Target::Tab(1), &mut view, ret, 2, None);
+        page_bar_click(hit::Target::Tab(1), &mut view, ret, 2, None, 0);
         assert_eq!(view.page, ret, "a workspace chip left SETTINGS up over it");
         assert_eq!(view.tab, 1, "and it still selects the workspace");
 
         // `[help]` names a page of its own, and it is the loop that carries the
         // page across — so what this pins is the flow, not `view.page`.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        let flow = page_bar_click(hit::Target::Footer("[help]"), &mut view, ret, 1, None);
+        let flow = page_bar_click(hit::Target::Footer("[help]"), &mut view, ret, 1, None, 0);
         assert!(matches!(flow, Flow::OpenHelp), "help from SETTINGS went nowhere");
 
         // And its own button stays a toggle: putting the page back first would
         // turn the press into a fresh `OpenSettings` and pin the page open.
         let mut view = View { page: Page::Settings, ..Default::default() };
-        let flow = page_bar_click(hit::Target::Footer("[settings]"), &mut view, ret, 1, None);
+        let flow = page_bar_click(hit::Target::Footer("[settings]"), &mut view, ret, 1, None, 0);
         assert!(matches!(flow, Flow::CloseSettings), "[settings] stopped closing");
     }
 
@@ -12487,7 +13073,7 @@ mod tests {
                     // And it opens the same list the button does.
                     let mut view = View::default();
                     assert!(matches!(
-                        run_click(hit::Target::Spaces, &mut view, 1, None),
+                        run_click(hit::Target::Spaces, &mut view, 1, None, 0),
                         Flow::PickSpace
                     ));
                 }
@@ -12532,7 +13118,7 @@ mod tests {
                 hit::Target::Machines => {
                     assert_eq!(alt('h'), Some(ViewVerb::Host));
                     let mut view = View::default();
-                    assert!(matches!(run_click(target, &mut view, 1, None), Flow::PickHost));
+                    assert!(matches!(run_click(target, &mut view, 1, None, 0), Flow::PickHost));
                 }
                 // All four footer buttons, by the label the footer draws.
                 hit::Target::Footer(_) => {
@@ -12637,21 +13223,21 @@ mod tests {
     fn clicking_a_row_selects_it_and_clicking_it_again_stages_it() {
         let mut view = View::default();
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 2), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 2), &mut view, 1, None, 0),
             Flow::Continue
         ));
         assert_eq!((view.focus, view.agent_sel), (Focus::Agents, 2));
 
         // A different row is still only a selection.
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None, 0),
             Flow::Continue
         ));
         assert_eq!(view.agent_sel, 3);
 
         // The row already under the cursor is the one that stages.
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Agents, 3), &mut view, 1, None, 0),
             Flow::StageSelected
         ));
 
@@ -12660,7 +13246,7 @@ mod tests {
         view.focus = Focus::Changes;
         view.changes_sel = 1;
         assert!(matches!(
-            run_click(hit::Target::Rail(Focus::Changes, 1), &mut view, 1, None),
+            run_click(hit::Target::Rail(Focus::Changes, 1), &mut view, 1, None, 0),
             Flow::OpenSelectedDiff
         ));
     }
@@ -12676,7 +13262,7 @@ mod tests {
     fn every_left_rail_verb_does_what_the_word_under_the_list_says() {
         let ws = ws_with_agents();
         let mut view = View::default();
-        let run = |view: &mut View, t| run_click(t, view, 1, Some(&ws));
+        let run = |view: &mut View, t| run_click(t, view, 1, Some(&ws), 0);
 
         assert!(matches!(run(&mut view, hit::Target::AgentsVerb('x')), Flow::KillSelected));
         assert_eq!(view.focus, Focus::Agents, "a verb acts on its own section's cursor");
@@ -12783,14 +13369,14 @@ mod tests {
     #[test]
     fn choosing_a_workspace_on_booth_leaves_it() {
         let mut view = View { page: Page::Booth, tab: 0, ..Default::default() };
-        assert!(matches!(run_click(hit::Target::Tab(1), &mut view, 3, None), Flow::Continue));
+        assert!(matches!(run_click(hit::Target::Tab(1), &mut view, 3, None, 0), Flow::Continue));
         assert_eq!(view.tab, 1, "the chip should still select its workspace");
         assert_eq!(view.page, Page::Agents, "BOOTH kept the screen after a workspace was chosen");
 
         // A tree page is a view of a workspace, so it stays up and re-points.
         for page in [Page::Files, Page::Docs, Page::Docker] {
             let mut view = View { page, tab: 0, ..Default::default() };
-            run_click(hit::Target::Tab(2), &mut view, 3, None);
+            run_click(hit::Target::Tab(2), &mut view, 3, None, 0);
             assert_eq!(view.tab, 2);
             assert_eq!(view.page, page, "{page:?} should survive a tab change");
         }
@@ -12829,9 +13415,9 @@ mod tests {
     #[test]
     fn a_click_on_a_tab_that_has_gone_is_ignored() {
         let mut view = View { tab: 1, ..Default::default() };
-        run_click(hit::Target::Tab(5), &mut view, 2, None);
+        run_click(hit::Target::Tab(5), &mut view, 2, None, 0);
         assert_eq!(view.tab, 1, "the cursor followed a tab that does not exist");
-        run_click(hit::Target::Tab(0), &mut view, 2, None);
+        run_click(hit::Target::Tab(0), &mut view, 2, None, 0);
         assert_eq!(view.tab, 0);
     }
 

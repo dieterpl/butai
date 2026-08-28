@@ -265,6 +265,21 @@ export class Actions {
     return this.run(`end ${what}`, `kill:${pane}`, () => api.killPane(q(ws), q(pane)));
   };
 
+  /**
+   * Close a workspace, and everything running in it.
+   *
+   * Asks first, which `kill` above does not have to justify and this does: an
+   * agent is a process whose transcript is on disk, and a workspace is every
+   * pane in it at once. The qualified id carries the machine, so this reaches
+   * the daemon the project is actually on rather than whichever tab is up —
+   * which is the whole reason ids on this client are `<daemon>:<n>`.
+   */
+  closeWorkspace = async (ws: Qid, name: string): Promise<Reply> => {
+    const ok = await this.o.confirm(`Close ${name}?`, "Everything running in it goes with it.");
+    if (!ok) return null;
+    return this.run(`close ${name}`, `close:${ws}`, () => api.killWorkspace(q(ws)));
+  };
+
   restart = (ws: Qid, pane: Qid, name: string) =>
     this.run(`restart ${name}`, `restart:${pane}`, () => api.restartProcess(q(ws), q(pane)));
 

@@ -192,6 +192,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four, refreshes `Cargo.lock`, and stops — the commit and the tag are yours,
   being the two steps that are hard to take back.
 
+- **BOOTH lists projects, not just agents — and you can start work in one from
+  there.** The page could show you every agent on every machine and let you
+  watch them; it could not let you act on the answer. Reaching a project meant
+  `[open]` to it, `a` on the rail, then back — and a project you had not started
+  anything in did not appear at all, because the rows were built by walking the
+  agent list and emitting a header whenever the workspace changed.
+
+  The rows come from the machine and project lists now, so a project with
+  nothing running has a row and a connected machine with nothing open has one
+  too. `a` starts that project's agent and `A` picks which — the AGENTS rail's
+  own two verbs, bound here unchanged, acting on the project the cursor is in
+  rather than on the tab you are looking at. The new agent appears in the fleet
+  and the preview points at it; the page does not move.
+
+  A project's `[+ claude]` button is the same act under the pointer, and it names
+  what it will start for the reason the rail's does: a button that spawns on a
+  single click with nothing in between is the only place you can see what that
+  click is about to do.
+
+- **A project's `.butai.toml` says which agent it uses.** `[agents] autostart`
+  already declared what a workspace starts when it opens; it is now published on
+  the workspace and read whenever a client offers to start one. So the answer to
+  "which agent does this project use" is two steps — the project's own
+  declaration, then the client's `default_agent` pin — and most projects need no
+  new configuration at all. The preference lives with the project, travels to
+  the machine it runs on, and is shared with whoever else opens it, which a
+  client-side pin keyed by directory would not.
+
+- **A project's name goes to that workspace.** An agent row still only moves the
+  cursor, because a click meaning "let me look at this" must not throw the
+  workbench onto somebody else's project. A project row has nothing to preview,
+  so going there is the only thing pressing its name could be asking for.
+
+- **`[x]` closes a workspace from BOOTH**, and `x` with the cursor on a project
+  row does the same. It ends what the row *is*: on an agent that is the session
+  and it does not ask, because an agent is a process whose transcript is on
+  disk; on a project it is the workspace and everything running in it, so it
+  asks — in the tab bar's own box and its own words, since that is the same act
+  reached from somewhere else.
+
+  The button is drawn on the cursor's row and nowhere else, which is the tab
+  bar's rule for its own `[x]`: a button that ends a workspace has to be one you
+  aimed at, not one sitting under a row you were passing.
+
+- **`z` and `Z` fold BOOTH's fleet**, with the DIFF page's keys and its marks
+  (`v` open, `>` folded) — this workbench already had a fold idiom and a second
+  one for the same concept would be drift. `Z` leaves an index of every machine,
+  every project, and what is running in each. A folded project draws its agents'
+  sprites where their rows were, so folding costs you the titles and the buttons
+  and not the states.
+
+### Changed
+
+- **BOOTH's compute column is one row per machine, and it names what is wrong.**
+  It drew the SYSTEM rail's whole gauge stack per machine — twelve to twenty rows
+  for a workstation, which is right for the rail (it describes the one machine
+  you are working on) and wrong on a page whose question is which of four
+  machines is in trouble. Four machines did not fit.
+
+  A machine is a line now: what it is, how many agents it is running, and the
+  *worst* of its four readings, named. Not the CPU — a box at 30% CPU with a full
+  root filesystem is in trouble and its CPU number says it is fine. `z` or a
+  click expands one back to the stack, drawn by the same renderer the rail uses,
+  so the two cannot come to two opinions of what 41% means.
+
+- **BOOTH's cursor walks rows rather than agents**, since a machine and a project
+  are now things you can sit on. The agent under it is derived — one function for
+  what `x` and the menu act on, one for what the middle column shows. On a
+  project row the pane shows the agent in it that most needs you, so walking the
+  fleet is a fly-over of each project's screen.
+
+- The TUI groups the fleet's projects by *id* rather than by name, as the web
+  client already did. Two machines routinely have a project of the same name
+  open, and one machine may have two.
+
 ### Removed
 
 - **The `..` row, from both clients.** It existed because descending read as a
@@ -209,6 +284,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way to run one beside your own — stopped the real daemon on the way past. It
   now resolves the socket the way `paths.rs` does: `BUTAI_HOME` first, then
   `BUTAI_SOCKET`, then `~/.butai`.
+
+- **Closing a workspace sent the DELETE to the machine the *active tab* was on.**
+  From the tab bar those are the same daemon by construction, so it never bit;
+  from BOOTH's fleet they are routinely not, and a `SessionId` is only unique on
+  its own daemon — so closing a `gpu-box` project would have closed whatever
+  held that id at home. `ConfirmKind::CloseWorkspace` carries the machine now,
+  the same way `MenuTarget::Agent` already did after `x` on a fleet row had the
+  identical bug.
 
 ## [1.2.0] - 2026-08-24
 
