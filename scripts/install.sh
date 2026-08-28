@@ -21,9 +21,23 @@
 # because it restarts itself afterwards.
 #
 # Knobs (all optional):
-#   BUTAI_VERSION=v0.3.0    install a specific tag instead of the latest
+#   BUTAI_VERSION=v0.3.0     install a specific tag instead of the latest
+#   BUTAI_CHANNEL=dev        take the newest prerelease off the dev track
 #   BUTAI_INSTALL_DIR=~/bin  install somewhere other than the default
 #   BUTAI_NO_RESTART=1       install the binary and leave the daemon alone
+#
+# The two channels are two sets of tags. A version with a `-` in it — `1.3.0-dev.1`
+# — is cut from `develop` and published as a GitHub prerelease, which is kept out
+# of `releases/latest`; a bare one is cut from `main`. That is why a stable
+# install never sees a dev build, and why reaching one has to be asked for.
+#
+# A dev install is normally a *second* butai rather than a replacement:
+#
+#   BUTAI_CHANNEL=dev BUTAI_INSTALL_DIR=~/.butai-dev/bin BUTAI_NO_RESTART=1 sh install.sh
+#   BUTAI_HOME=~/.butai-dev ~/.butai-dev/bin/butai
+#
+# `BUTAI_HOME` gives it its own socket, session store, pane dumps and logs, so
+# the stable butai beside it keeps running and the two never meet.
 #
 set -eu
 
@@ -90,8 +104,35 @@ else
 fi
 
 # ── which version? ───────────────────────────────────────────────────────
+channel="${BUTAI_CHANNEL:-stable}"
+case "$channel" in
+    stable|dev) ;;
+    *) err "BUTAI_CHANNEL is \`stable\` or \`dev\`, not \`$channel\`" ;;
+esac
+
 version="${BUTAI_VERSION:-}"
-if [ -z "$version" ]; then
+if [ -n "$version" ]; then
+    :
+elif [ "$channel" = dev ]; then
+    say "==> finding the latest dev release"
+    # `releases/latest` is exactly what the dev track is not, so this reads the
+    # list. One chunk per release object: GitHub answers on a single line, and
+    # tag_name, draft and prerelease sit together in the same chunk, between the
+    # author object and the assets array.
+    #
+    # Newest *published*, not highest version — the list is in publish order,
+    # and comparing versions is not something to write in `sed`. A stable patch
+    # cut after a dev tag is the case where the two differ, and `BUTAI_VERSION`
+    # is the way to say exactly which one you meant. The installed butai then
+    # keeps itself current with the real comparison; see `crates/butai-update`.
+    version=$(fetch_so "https://api.github.com/repos/$REPO/releases?per_page=30" \
+        | tr '{' '\n' \
+        | grep '"prerelease"[[:space:]]*:[[:space:]]*true' \
+        | grep -v '"draft"[[:space:]]*:[[:space:]]*true' \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1)
+    [ -n "$version" ] || err "this repository publishes no prerelease — install a stable build, or set BUTAI_VERSION=vX.Y.Z-dev.N"
+else
     say "==> finding the latest release"
     version=$(fetch_so "https://api.github.com/repos/$REPO/releases/latest" \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -200,7 +241,16 @@ fi
 # The socket file is the test rather than `butai ls`, which would *start* a
 # daemon to answer: every command that talks to one connects-or-spawns. A stale
 # socket left by a crash is harmless here — `kill-server` cleans it up.
-sock="${BUTAI_SOCKET:-$HOME/.butai/butai.sock}"
+# Which daemon this install replaces, in the order `crates/butai-protocol`'s
+# `paths.rs` resolves it: `BUTAI_HOME` moves a whole butai and takes its socket
+# along, `BUTAI_SOCKET` moves that one socket, and neither is `~/.butai`. This
+# used to read only `BUTAI_SOCKET`, so installing a second butai with
+# `BUTAI_HOME=~/.butai-dev` stopped the *real* daemon on the way past.
+if [ -n "${BUTAI_HOME:-}" ]; then
+    sock="$BUTAI_HOME/butai.sock"
+else
+    sock="${BUTAI_SOCKET:-$HOME/.butai/butai.sock}"
+fi
 if [ "$had_one" -eq 1 ] && [ -S "$sock" ] && [ -z "${BUTAI_NO_RESTART:-}" ]; then
     if [ -n "${BUTAI:-}" ]; then
         # Inside a pane of the very daemon we would be stopping.
@@ -218,6 +268,18 @@ if [ "$had_one" -eq 1 ] && [ -S "$sock" ] && [ -z "${BUTAI_NO_RESTART:-}" ]; the
         say ""
         say "    butai kill-server"
     fi
+fi
+
+if [ "$channel" = dev ]; then
+    say ""
+    say "this is a dev build. To keep it on that track — prereleases as well as"
+    say "stable ones — add this to ${BUTAI_HOME:-$HOME/.butai}/config.toml:"
+    say ""
+    say "    [update]"
+    say "    channel = \"dev\""
+    say ""
+    say "or set it from SETTINGS, under ABOUT. Without it, this build follows the"
+    say "stable track and sits quiet until stable overtakes it."
 fi
 
 case ":$PATH:" in

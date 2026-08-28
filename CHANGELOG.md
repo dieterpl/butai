@@ -7,6 +7,209 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The FILES browser is a Finder-style trail of columns.** It was one directory
+  and one cursor, and descending into a folder replaced both. That made every
+  folder a one-way trip you could only reverse by remembering you had: nothing
+  on screen said where you were or how you got there, and the `..` row — added
+  to say *that* up existed — still could not say what was up there.
+
+  Every directory on the path from the workspace root to where you are is now a
+  column of its own, side by side, with the row you came through still marked in
+  each. Where you are is the shape of the whole thing rather than a line of text
+  you have to read.
+
+  ```
+  ┌ crates ───────────┬ butai-client ─────┬ src ────────[find]┐
+  │  butai           ▸│  src             ▸│  chrome          ▸│
+  │● butai-client    ▸│  Cargo.toml       │  hit.rs           │
+  │  butai-server    ▸│                   │● workbench.rs     │
+  └───────────────────┴───────────────────┴───────────────────┘
+  ```
+
+  `←`/`h` and `→`/`l` walk the trail, and the columns to the right of the cursor
+  are **kept, not dropped** — so `←` then `→` is two local moves and no round
+  trip, which over ssh is the difference between browsing and waiting. Moving
+  the cursor is what drops them, and that is the point rather than a side
+  effect: those columns are what the *old* selection contained, so leaving them
+  under a new one would draw a path that does not exist.
+
+  The browser grows a column at a time and stops at half the band, so a trail
+  walked six deep still leaves the file the room; on a terminal too narrow for a
+  browser and a file at once it goes to nothing rather than squeezing the thing
+  you came to read. The trail scrolls left as it grows, so the column you are
+  working in is the one that stays on screen.
+
+  **`space` peeks.** It reads the file the cursor is on without handing it the
+  keyboard, so the next `j` walks to the next name and shows you that one
+  instead — a way to read down a directory a file at a time without committing
+  to any of them. `enter` is the same read with the keyboard going to the file,
+  and `←` from inside the file hands it back. Both clients bind all four, out of
+  the same verb table.
+
+- **A minimap down the right of the open file.** A file is read through a window
+  a few dozen rows tall, and nothing on screen said how big the thing behind it
+  was or where in it you were. The scrollbar answer is "somewhere between the
+  top and the bottom"; this answers with the shape of the code — where the blank
+  lines are, where a comment block sits, where the deeply indented middle of a
+  function is — so a jump is aimed at something you recognise rather than at a
+  fraction.
+
+  Sixteen cells cannot hold a line of code and it does not try: each cell stands
+  for a rectangle of the file, drawn as one shaded block whose density is how
+  much ink is in that rectangle and whose colour is what that ink mostly *was*.
+  A comment block is a muted slab, a run of strings is green, an indent is the
+  blank left edge. Click anywhere on it to jump, and what you clicked lands in
+  the middle of the window rather than on its top row — you aimed at a shape in
+  order to read what is around it.
+
+  It takes all sixteen cells or none. Below a floor the scale stops meaning
+  anything, and a minimap you cannot read is sixteen cells of code you no longer
+  have — so a narrow terminal, or a trail walked several deep, keeps the file.
+
+  The web client draws the same picture from what it has: it prints files as
+  plain text rather than highlighting them, so its texture is one colour at
+  varying weight instead of a palette of token colours. Inventing a second
+  highlighter there would have been a lot of code for a picture sixty pixels
+  wide.
+
+- **`BUTAI_HOME`, so a build you are still deciding about can be run against
+  real work.** There was nowhere to put an unfinished butai. A build from the
+  tree either replaced the installed binary or fought the running daemon for
+  `~/.butai/butai.sock`, and the only isolation on offer was a fake `$HOME` —
+  which is the right tool for a test and the wrong one for a build you mean to
+  *use*, because it takes away the ssh config, the shell profile, the git
+  identity and the repositories that make trying it worth anything.
+
+  One variable now moves butai's state and nothing else: socket, lock, config,
+  themes, logs, `session.json`, `panes/`, `scratch/`.
+
+  ```sh
+  BUTAI_HOME=~/.butai-dev target/release/butai
+  ```
+
+  Your own daemon keeps running beside it and the two never meet. It is read in
+  one place, `paths::butai_dir`, so every path follows it at once — no
+  combination of variables can leave a daemon holding one butai's socket and
+  another's session store. Panes inherit it, so a `butai` shelled out inside a
+  dev pane reaches the dev daemon.
+
+  **It outranks `$BUTAI_SOCKET`,** which is the part that took a second attempt.
+  A daemon exports `$BUTAI_SOCKET` into every pane it creates, so any command
+  run inside butai already has one pointing at the daemon drawing that pane —
+  and the socket variable used to be read first. `BUTAI_HOME=~/.butai-dev butai`
+  typed in an ordinary butai pane therefore did the exact opposite of what it
+  said: the dev daemon tried to bind the *real* socket, refused because it was
+  taken, and the client attached to the real daemon with an unused state
+  directory sitting beside it. The order is now `--socket`, then `BUTAI_HOME`,
+  then `BUTAI_SOCKET` — `BUTAI_HOME` beats what butai exports at you and yields
+  to what you typed. `--socket` also stopped being a clap `env` argument, which
+  is what had been filling it in from the environment before anything else could
+  be heard.
+
+- **A `develop` branch, and dev releases separate from stable ones.** Feature
+  branches land on `develop`; `develop` lands on `main` when it is worth a
+  stable release, and `main` moves for nothing else — the README's install line
+  fetches `scripts/install.sh` from `main` by raw URL, so what is on `main` is
+  what a stranger's `curl | sh` runs today.
+
+  One tag shape decides the track, and decides it by itself: `v1.3.0-dev.1` is
+  published as a GitHub **prerelease**, `v1.3.0` as a release. That single flag
+  is the whole separation, and it works because of something already true —
+  `releases/latest` excludes prereleases, and `releases/latest` is the only
+  endpoint `butai-update` asks and `scripts/install.sh` reads. So a dev tag is
+  invisible to every stable install without either of them filtering anything,
+  and reaching one is deliberate: `BUTAI_VERSION=v1.3.0-dev.1`. That is also how
+  a remote machine gets a dev build, which is the case that matters — a
+  workbench attached over `ssh host butai proxy` is talking to a daemon on the
+  far side, and the far side is the one that has to be running the code.
+
+  A prerelease takes its notes from `## [Unreleased]` and does not fail on a
+  thin one; a stable tag with no section for its version still fails, as it did.
+  CI now gates `develop` the way it gates `main`.
+
+- **`[update] channel = "dev"`, so a dev build keeps itself current.** The dev
+  track published builds nobody could follow. `releases/latest` is the endpoint
+  that makes a prerelease invisible to a stable install, and it was the only one
+  either half asked — so a machine on `1.3.0-dev.1` was offered `1.3.0-dev.2`
+  never and `1.3.0` eventually, and moving between dev builds meant running the
+  installer by hand each time.
+
+  Underneath it, the version comparison learned what a prerelease is. It used to
+  cut the suffix and compare the three integers, which made every `-dev.N` of a
+  release *the same version* as every other — the reason a dev channel could not
+  have worked even with the right endpoint. It is semver's ordering now:
+  `1.3.0-dev.10` is ahead of `1.3.0-dev.9`, and the `1.3.0` they were leading to
+  is ahead of both, so a dev install lands on stable when stable catches up.
+
+  The key is read by **both** halves, and it has to be: the client checks for
+  the binary a person runs, and the daemon checks for itself when `POST
+  /v1/update` asks it to, so a daemon reading the other track would answer
+  "already on the latest" to a machine whose client can see a newer one. It
+  lives in the config of whichever `BUTAI_HOME` an install uses, which is what
+  keeps a dev butai's track out of the stable one beside it.
+  `BUTAI_CHANNEL=dev scripts/install.sh` installs the newest prerelease, and
+  SETTINGS → ABOUT → **release channel** writes the key.
+
+- **A daemon on a different build is asked about, not reported.** The handshake
+  has always noticed — the daemon names its own version in it, and the client is
+  the only thing holding both numbers — and what it did with that was put
+  `daemon is 1.2.0, client is 1.3.0 — restart it: butai kill-server` in the
+  footer. A line naming a command you have to leave butai to run, about a daemon
+  the client has a socket to. On a track that cuts a build every few days, that
+  is a sentence you read and step over.
+
+  It asks now. On this machine the question is a restart and nothing is
+  downloaded — a local daemon is spawned from the client's own binary, so
+  stopping the old one *is* the upgrade, and the workspaces come back the way
+  they do from any `kill-server`. On a tab from another machine it is the
+  update question that already existed, since that daemon fetches its own build
+  and this client's version says nothing about what it would get. Once per
+  session, never over another box, and the footer line is still there when the
+  box cannot go up.
+
+- **`scripts/vet.sh`, which runs every check CI runs and then hands you the
+  build.** `cargo fmt`, `clippy` and `test` under `-D warnings`, the
+  generated-bindings diff, the four `bun` steps and `testsuite/run.sh` — each
+  reported as passed, failed or skipped, and skipped cleanly when a tool is
+  absent rather than failed. A named branch is checked out `--detach` into a
+  throwaway worktree; no argument means this tree, uncommitted changes included,
+  which is the case worth optimising for.
+
+  `--run` is the part CI cannot do: it builds the branch and starts a daemon on
+  it under `BUTAI_HOME=~/.butai-dev`, seeded once with a **copy** of your real
+  `config.toml` and `themes/`. A copy and not a symlink, because the client
+  writes back to `config.toml` — answering no to an update prompt lands a
+  `declined_version` in it — and a build you are still vetting should not be
+  able to edit the config your real butai reads.
+
+- **`scripts/cut.sh <version>`.** The version appears four times in the root
+  `Cargo.toml`: `[workspace.package] version` and the three internal `butai-*`
+  pins, which carry a `version` beside their `path` so `cargo publish` has
+  something to rewrite. Four strings that have to agree, edited by hand, is how
+  a release ships with a crate still pinned to the last one. This rewrites all
+  four, refreshes `Cargo.lock`, and stops — the commit and the tag are yours,
+  being the two steps that are hard to take back.
+
+### Removed
+
+- **The `..` row, from both clients.** It existed because descending read as a
+  one-way trip and something had to say up existed. The trail says it — the
+  directory you came from is the column to the left, still listed — so `..`
+  became a row in every column whose only meaning was "the column immediately
+  left of this one", which is the sort of thing you have to learn not to click.
+  `backspace` still walks up, and so does `←`.
+
+### Fixed
+
+- **`scripts/install.sh` stopped the wrong daemon when `BUTAI_HOME` was set.**
+  It read `BUTAI_SOCKET` and nothing else to find the daemon it was replacing,
+  so installing a second butai with `BUTAI_HOME=~/.butai-dev` — the supported
+  way to run one beside your own — stopped the real daemon on the way past. It
+  now resolves the socket the way `paths.rs` does: `BUTAI_HOME` first, then
+  `BUTAI_SOCKET`, then `~/.butai`.
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

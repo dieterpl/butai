@@ -2550,11 +2550,17 @@ impl ServerCore {
                     return None;
                 }
                 self.updating = true;
+                // This machine's channel, not the asking client's: the daemon
+                // is the thing being replaced, and the track it follows is a
+                // property of the install here.
+                let channel = self.config.update.channel;
                 tokio::spawn(async move {
                     // Blocking throughout — `ureq`, sha2, gzip — so it goes on
                     // the blocking pool rather than a runtime worker.
-                    let result = tokio::task::spawn_blocking(|| {
-                        butai_update::check()?.map(|offer| butai_update::stage(&offer)).transpose()
+                    let result = tokio::task::spawn_blocking(move || {
+                        butai_update::check(channel)?
+                            .map(|offer| butai_update::stage(&offer))
+                            .transpose()
                     })
                     .await
                     .map_err(|e| format!("the download did not finish: {e}"))

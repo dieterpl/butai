@@ -32,17 +32,32 @@ pub struct Drag {
     pub clip: Option<LRect>,
 }
 
+/// What the page's own state adds to a geometry that is otherwise the screen's.
+///
+/// Two numbers the rectangles depend on and the screen cannot supply, both from
+/// the page struct the caller holds: how many cells of line numbers the open
+/// file is drawing, and how many columns the Finder trail has been walked to.
+/// They travel together because every site that needs one needs the other.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PageMetrics {
+    /// Cells of line numbers down the left of the text, from
+    /// [`crate::chrome::editor_gutter_w`] — zero on every page that has none.
+    pub gutter: u16,
+    /// Columns in the Files trail, from [`crate::chrome::Files::depth`]. One
+    /// everywhere else, since the browser is the only thing sized by it.
+    pub depth: usize,
+}
+
 impl Drag {
     /// Begin a drag at `(x, y)`, confined to whatever region it landed in.
     ///
-    /// `gutter` is how many cells of line numbers the open file is drawing, from
-    /// [`crate::chrome::editor_gutter_w`] — zero on every page that has none.
-    /// It is passed in rather than looked up because only the caller holds the
-    /// buffer, and the width depends on how many lines are in it.
-    pub fn press(&mut self, view: &View, cols: u16, rows: u16, x: u16, y: u16, gutter: u16) {
+    /// `m` is what the caller knows and the geometry does not — see
+    /// [`PageMetrics`]. Passed in rather than looked up because only the caller
+    /// holds the page structs those numbers come off.
+    pub fn press(&mut self, view: &View, cols: u16, rows: u16, x: u16, y: u16, m: PageMetrics) {
         self.anchor = Some((x, y));
         self.span = None;
-        self.clip = region(view, cols, rows, x, y, gutter);
+        self.clip = region(view, cols, rows, x, y, m);
     }
 
     /// Extend to `(x, y)`. Does nothing before a press, so a drag that began
@@ -153,7 +168,7 @@ pub fn highlight(screen: &mut Buffer, a: (u16, u16), b: (u16, u16), clip: Option
 /// and a drag that started on one would otherwise be free to run over the whole
 /// screen. Everything else answers with the box interior it landed in, so a
 /// selection stays in one column.
-pub fn region(view: &View, cols: u16, rows: u16, x: u16, y: u16, gutter: u16) -> Option<LRect> {
+pub fn region(view: &View, cols: u16, rows: u16, x: u16, y: u16, m: PageMetrics) -> Option<LRect> {
     if y == 0 || y + 1 >= rows {
         return None;
     }
@@ -161,7 +176,7 @@ pub fn region(view: &View, cols: u16, rows: u16, x: u16, y: u16, gutter: u16) ->
     // A full-screen page owns everything between the bars — but it still has
     // columns inside it, and "one column" is the whole point of a clip.
     if view.page != Page::Agents {
-        return Some(page_region(view, cols, &geom, x, y, gutter));
+        return Some(page_region(view, cols, &geom, x, y, m));
     }
     for r in [geom.agents_rows, geom.procs_rows, geom.system_rows] {
         if r.contains(x, y) {
@@ -203,18 +218,28 @@ fn page_region(
     geom: &crate::chrome::Chrome,
     x: u16,
     y: u16,
-    gutter: u16,
+    m: PageMetrics,
 ) -> LRect {
     use crate::chrome as c;
+    let gutter = m.gutter;
     // Each column is (where a press counts as being in it, what it clips to).
     // The two differ exactly where a gutter is: pressing *on* the line numbers
     // is still pressing on the file, and must clip to the file rather than fall
     // through to the whole band.
     let columns: [(LRect, LRect); 4] = match view.page {
         Page::Files | Page::Docs => {
-            let body = c::files_body_inner(geom);
+            let body = c::files_body_inner(geom, m.depth);
             let text = (body, trim_left(body, gutter));
-            [(c::files_row_area(geom), c::files_row_area(geom)), text, text, text]
+            // A drag in the browser stays in the column it began in, or a copy
+            // of one directory's names would come back with a neighbour's
+            // interleaved a row at a time.
+            // Nothing rather than the body when the press is not over a column:
+            // the columns are searched in order, so a fallback that overlapped
+            // the text would answer for it and hand back an unclipped body —
+            // taking the line numbers with the copy.
+            let column =
+                c::files_col_at(geom, m.depth, x).map(|(_, r)| r).unwrap_or(LRect::new(0, 0, 0, 0));
+            [(column, column), text, text, text]
         }
         Page::Docker => {
             let logs = c::docker_logs_inner(geom.stage_box);
@@ -293,6 +318,16 @@ fn inner_of(r: LRect) -> LRect {
 
 #[cfg(test)]
 mod tests {
+
+    /// A one-column Files trail with no gutter — what most of these tests want.
+    fn one() -> PageMetrics {
+        PageMetrics { gutter: 0, depth: 1 }
+    }
+
+    /// The same, with a gutter of `n`.
+    fn gut(n: u16) -> PageMetrics {
+        PageMetrics { gutter: n, depth: 1 }
+    }
     use super::*;
 
     fn screen(lines: &[&str]) -> Buffer {
@@ -383,11 +418,11 @@ mod tests {
     fn a_click_without_a_drag_copies_nothing() {
         let b = screen(&["hello"]);
         let mut d = Drag::default();
-        d.press(&View::default(), 80, 24, 2, 3, 0);
+        d.press(&View::default(), 80, 24, 2, 3, PageMetrics::default());
         assert_eq!(d.finish(&b), None);
         // And a drag over blank space copies nothing either.
         let mut d = Drag::default();
-        d.press(&View::default(), 80, 24, 0, 0, 0);
+        d.press(&View::default(), 80, 24, 0, 0, PageMetrics::default());
         d.to(4, 0);
         assert_eq!(d.finish(&screen(&["     "])), None);
     }
@@ -397,9 +432,12 @@ mod tests {
     #[test]
     fn the_tab_bar_and_the_footer_start_no_selection() {
         let view = View::default();
-        assert_eq!(region(&view, 120, 40, 10, 0, 0), None, "tab bar");
-        assert_eq!(region(&view, 120, 40, 10, 39, 0), None, "footer");
-        assert!(region(&view, 120, 40, 10, 5, 0).is_some(), "a rail row should be selectable");
+        assert_eq!(region(&view, 120, 40, 10, 0, PageMetrics::default()), None, "tab bar");
+        assert_eq!(region(&view, 120, 40, 10, 39, PageMetrics::default()), None, "footer");
+        assert!(
+            region(&view, 120, 40, 10, 5, PageMetrics::default()).is_some(),
+            "a rail row should be selectable"
+        );
     }
 
     /// The pages that own the whole band are still two columns, and a copy out
@@ -422,12 +460,15 @@ mod tests {
                     crate::chrome::docker_logs_inner(geom.stage_box),
                 )
             } else {
-                (crate::chrome::files_row_area(&geom), crate::chrome::files_body_inner(&geom))
+                (
+                    crate::chrome::files_columns(&geom, 1).remove(0),
+                    crate::chrome::files_body_inner(&geom, 1),
+                )
             };
             let in_list =
-                region(&view, COLS, ROWS, list.x + 1, list.y + 1, 0).expect("{page:?} list");
+                region(&view, COLS, ROWS, list.x + 1, list.y + 1, one()).expect("{page:?} list");
             let in_body =
-                region(&view, COLS, ROWS, body.x + 1, body.y + 1, 0).expect("{page:?} body");
+                region(&view, COLS, ROWS, body.x + 1, body.y + 1, one()).expect("{page:?} body");
             assert_ne!(in_list, in_body, "{page:?}: both columns gave one region");
             assert!(
                 in_body.x >= list.right(),
@@ -454,15 +495,15 @@ mod tests {
         for page in [Page::Files, Page::Docs] {
             let view = View { page, ..Default::default() };
             let geom = crate::chrome::page_geom(COLS, ROWS, &view);
-            let body = crate::chrome::files_body_inner(&geom);
-            let clip = region(&view, COLS, ROWS, body.x + GUTTER + 1, body.y + 1, GUTTER)
+            let body = crate::chrome::files_body_inner(&geom, 1);
+            let clip = region(&view, COLS, ROWS, body.x + GUTTER + 1, body.y + 1, gut(GUTTER))
                 .expect("the file column");
             assert_eq!(clip.x, body.x + GUTTER, "{page:?}: the numbers are still in the clip");
             assert_eq!(clip.right(), body.right(), "{page:?}: the text lost its right edge");
             // Pressing *on* the numbers is still pressing on the file: it must
             // clip to the text, not fall through to the whole band.
-            let on_gutter =
-                region(&view, COLS, ROWS, body.x, body.y + 1, GUTTER).expect("the file column");
+            let on_gutter = region(&view, COLS, ROWS, body.x, body.y + 1, gut(GUTTER))
+                .expect("the file column");
             assert_eq!(on_gutter, clip, "{page:?}: a press on the numbers escaped the column");
         }
         // The diff goes the same way, and its gutter is told to it for the same
@@ -482,8 +523,9 @@ mod tests {
                 Page::Git => inner_of(crate::chrome::git_columns(geom.stage_box).body_box),
                 _ => to_lrect(geom.stage_inner),
             };
-            let clip = region(&view, COLS, ROWS, body.x + diff_gutter + 1, body.y + 1, diff_gutter)
-                .expect("the diff body");
+            let clip =
+                region(&view, COLS, ROWS, body.x + diff_gutter + 1, body.y + 1, gut(diff_gutter))
+                    .expect("the diff body");
             assert_eq!(clip.x, body.x + diff_gutter, "{page:?}: the gutter is still in the clip");
         }
     }
@@ -497,7 +539,8 @@ mod tests {
         let view = View { page: Page::Booth, ..Default::default() };
         let geom = crate::chrome::page_geom(COLS, ROWS, &view);
         let h = crate::chrome::booth_columns(crate::chrome::booth_area(COLS, &geom));
-        let at = |r: LRect| region(&view, COLS, ROWS, r.x + 1, r.y + 1, 0).expect("a BOOTH column");
+        let at =
+            |r: LRect| region(&view, COLS, ROWS, r.x + 1, r.y + 1, one()).expect("a BOOTH column");
         let (tray, fleet, stage, compute) =
             (at(h.tray_rows), at(h.fleet_rows), at(h.stage_inner), at(h.compute_rows));
         assert_ne!(tray, fleet, "the tray and the list are one region");

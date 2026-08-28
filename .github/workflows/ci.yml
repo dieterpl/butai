@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `develop` is where feature branches land and where dev tags are cut from,
+    # so it gets the same gate `main` does. Feature branches themselves are
+    # covered by `pull_request` below, which has no branch filter.
+    branches: [main, develop]
   pull_request:
   schedule:
     # Nightly soak, and the only scheduled run that exercises the real agent

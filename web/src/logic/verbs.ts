@@ -78,6 +78,12 @@ export const VerbId = Object.freeze(ids([
   // The files page. `DeleteFile` is its own id rather than the rail's `Discard`
   // — one puts a file back to what git has, the other removes it.
   "Upload", "Download", "Edit", "Save", "CancelEdit", "ViewFile", "ViewDiff", "DeleteFile",
+  // …and walking the Finder trail. `TreeUp`/`TreeInto` are not `Up`/`Down`
+  // wearing another name: those move the cursor *within* a column, these move
+  // between columns, and a client that answered one with the other would walk
+  // the wrong axis. `Peek` reads a file without leaving the browser — the
+  // difference from `Open`, which hands it the keyboard.
+  "TreeUp", "TreeInto", "Peek",
   // The docker page.
   "DockerLogs", "DockerShell", "DockerRestart", "DockerStop",
   // The GIT page. `Show` reads a commit or a stash into the body; `Scope`
@@ -656,6 +662,11 @@ export function filesVerbs(editing: boolean): readonly Verb[] {
 }
 const FILES: readonly Verb[] = Object.freeze([
   verb("enter", "open", VerbId.Open),
+  // In the footer, because walking the trail is the page's main gesture and a
+  // key nothing writes down is a key nobody finds. `h`/`l` are the spelling and
+  // `←`/`→` are aliases for them, exactly as `j`/`k` own the vertical axis and
+  // the arrows alias those — one table, two ways to press it.
+  verb(" ", "peek", VerbId.Peek),
   verb("e", "edit", VerbId.Edit),
   verb("d", "diff", VerbId.ViewDiff),
   verb("f", "file", VerbId.ViewFile),
@@ -664,6 +675,8 @@ const FILES: readonly Verb[] = Object.freeze([
   danger("x", "delete", VerbId.DeleteFile),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
+  quiet("h", "up a level", VerbId.TreeUp),
+  quiet("l", "into", VerbId.TreeInto),
   quiet("tab", "next rail", VerbId.FocusCycle),
   quiet("?", "keys", VerbId.Help),
 ]);
@@ -1118,7 +1131,14 @@ export const TARGETS = Object.freeze({
 
   // -- FILES ---------------------------------------------------------------
   "files.upload": t("FILES", [VerbId.Upload]),
-  "files.row": t("FILES", [VerbId.Down, VerbId.Up, VerbId.Open]),
+  "files.row": t("FILES", [
+    VerbId.Down,
+    VerbId.Up,
+    VerbId.Open,
+    VerbId.TreeUp,
+    VerbId.TreeInto,
+    VerbId.Peek,
+  ]),
   "files.edit": t("FILES", [VerbId.Edit]),
   "files.save": t("FILES", [VerbId.Save]),
   "files.cancel": t("FILES", [VerbId.CancelEdit]),

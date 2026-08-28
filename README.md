@@ -89,6 +89,18 @@ and updating the one in front of you leaves the one doing the work as it was.
 whole job to the daemon over there: check, download, verify, restart, workspaces
 restored. It has to be allowed on that side, with `[update] allow_remote = true`.
 
+**And a daemon left running across an upgrade is asked about.** The two halves
+name their versions to each other at the handshake, so a client talking to a
+daemon from a build ago knows it — and offers the restart rather than reporting
+the mismatch. Locally nothing is downloaded: the daemon comes back from the
+binary the client is already running, workspaces and scrollback restored.
+
+**Following the dev builds.** `[update] channel = "dev"` takes the prereleases
+cut from `develop` as well as the stable releases, and
+`BUTAI_CHANNEL=dev` installs one. Pair it with `BUTAI_HOME` and it is a second
+butai beside the one you use, with its own socket, session and config — see
+[docs/development.md](docs/development.md#installing-the-dev-track).
+
 Pin a version or pick your own directory:
 
 ```sh

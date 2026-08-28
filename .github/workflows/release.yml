@@ -4,6 +4,19 @@ name: Release
 # publishes one tarball per target, plus a SHA256SUMS file, to the GitHub
 # release that scripts/install.sh reads.
 #
+# There are two tracks, and one workflow serves both because the artifacts are
+# identical — only how the release is *labelled* differs:
+#
+#   v1.3.0        cut on `main`     a stable release
+#   v1.3.0-dev.1  cut on `develop`  a prerelease
+#
+# A tag with a `-` in it is the dev track, published with `--prerelease`. That
+# one flag is the whole separation, and it is load-bearing on both ends:
+# GitHub keeps a prerelease out of `releases/latest`, which is the endpoint
+# `crates/butai-update` asks and `scripts/install.sh` reads — so a dev tag is
+# invisible to every stable install without either of them filtering anything.
+# Reaching one is deliberate: `BUTAI_VERSION=v1.3.0-dev.1`.
+#
 # `workflow_dispatch` builds the same matrix without publishing, which is how
 # you prove the matrix still compiles before cutting a tag.
 on:
@@ -150,40 +163,95 @@ jobs:
           sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
-      # The changelog's own section for this tag, verbatim. `awk` rather than a
-      # markdown tool: the heading shape is fixed by Keep a Changelog, and the
-      # section is everything between this version's heading and the next one.
-      - name: Release notes from the changelog
+      # Which track is this? A prerelease identifier — the `-` in
+      # `1.3.0-dev.1`, as semver defines it — is the only thing that says so.
+      # The branch does not: a tag is a commit, and by the time this job runs
+      # there is nothing to ask about where it was cut.
+      - name: Classify the tag
+        id: track
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          awk -v v="## [$version]" '
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "::notice::$GITHUB_REF_NAME is a $([ "$prerelease" = true ] && echo dev prerelease || echo stable release)"
+
+      # The changelog's own section for this tag, verbatim. `awk` rather than a
+      # markdown tool: the heading shape is fixed by Keep a Changelog, and the
+      # section is everything between this version's heading and the next one.
+      #
+      # A dev tag reads `## [Unreleased]` instead, and does not fail when it is
+      # thin. The two tracks are asking different questions: a stable release
+      # is an announcement, and shipping one whose changes nobody wrote down is
+      # a mistake worth stopping for. A dev tag is a build you cut to try
+      # something — the notes are a convenience, and failing the publish over
+      # them would only mean the binaries you wanted never got built.
+      - name: Release notes from the changelog
+        run: |
+          set -euo pipefail
+          version="${{ steps.track.outputs.version }}"
+          heading="## [$version]"
+          if [ "${{ steps.track.outputs.prerelease }}" = "true" ]; then
+            heading="## [Unreleased]"
+          fi
+          awk -v v="$heading" '
             index($0, v) == 1 { found = 1; next }
             found && /^## \[/  { exit }
             found             { print }
           ' CHANGELOG.md > notes.md
-          # A tag with no entry is a mistake worth failing on: it means the
-          # changelog was not updated for a release that is about to ship.
-          if [ ! -s notes.md ]; then
-            echo "::error::CHANGELOG.md has no section for $GITHUB_REF_NAME"
-            exit 1
+
+          if [ "${{ steps.track.outputs.prerelease }}" = "true" ]; then
+            if [ ! -s notes.md ]; then
+              echo "_Cut from \`develop\`; see the commit log._" > notes.md
+            fi
+            {
+              echo
+              echo "---"
+              echo
+              echo "**This is a development build, not a stable release.** It is"
+              echo "not offered to anyone by \`butai update\`, and \`install.sh\`"
+              echo "will not find it on its own. To install it deliberately:"
+              echo
+              echo "\`\`\`sh"
+              echo "BUTAI_VERSION=$GITHUB_REF_NAME curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh"
+              echo "\`\`\`"
+              echo
+              echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
+            } >> notes.md
+          else
+            # A stable tag with no entry is a mistake worth failing on: it means
+            # the changelog was not updated for a release that is about to ship.
+            if [ ! -s notes.md ]; then
+              echo "::error::CHANGELOG.md has no section for $GITHUB_REF_NAME"
+              exit 1
+            fi
+            {
+              echo
+              echo "---"
+              echo
+              echo "Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh\`"
+              echo
+              echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
+            } >> notes.md
           fi
-          {
-            echo
-            echo "---"
-            echo
-            echo "Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh\`"
-            echo
-            echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
-          } >> notes.md
           echo "--- notes.md ---"; cat notes.md
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          flags=()
+          if [ "${{ steps.track.outputs.prerelease }}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
+            "${flags[@]}" \
             dist/*.tar.gz dist/SHA256SUMS

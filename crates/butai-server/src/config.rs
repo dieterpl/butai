@@ -1,7 +1,8 @@
 //! The daemon's half of `~/.butai/config.toml`.
 //!
 //! One file, two readers. This one takes the shell, the scrollback and restore
-//! budgets, `[api]`, `[[agents]]` and `[update] allow_remote`; the client's
+//! budgets, `[api]`, `[[agents]]` and `[update] allow_remote` and `channel`;
+//! the client's
 //! `config::Config` takes `[keys]`, `[theme]`, `[ui]`, `[[remote]]`, the prefix
 //! and the rest of `[update]`. Neither struct declares the other's tables and
 //! serde ignores what it does not know, so each side parses the whole file and
@@ -86,12 +87,19 @@ impl Default for General {
 }
 
 /// The daemon's share of `[update]`. The client reads `check` and
-/// `declined_version` out of the same table and ignores this key, as this
-/// struct ignores those — the "one file, two readers" split at the top of this
-/// module.
+/// `declined_version` out of the same table and ignores those, as this struct
+/// ignores them — the "one file, two readers" split at the top of this module.
+///
+/// `channel` is the one key both sides declare, and it has to be: the client
+/// checks for the binary a person runs, and this daemon checks for itself when
+/// `POST /v1/update` asks it to. A daemon reading the other track would answer
+/// "already on the latest" to a machine whose client can see a newer one.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Update {
+    /// Which releases this daemon's own check follows — `"stable"` or
+    /// `"dev"`. See [`butai_update::Channel`].
+    pub channel: butai_update::Channel,
     /// Let a client attached to this daemon make it update *itself* —
     /// `POST /v1/update`, and `butai update --daemon` on top of it.
     ///
@@ -319,6 +327,24 @@ impl WorkspaceFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `[update]` table is one table with two readers, and `channel` is the
+    /// key they share: a daemon asked to update itself checks the track this
+    /// machine follows, not the asking client's.
+    #[test]
+    fn the_daemon_reads_the_channel_and_leaves_the_client_keys_alone() {
+        let cfg: Config = toml::from_str(
+            "[update]\nchannel = \"dev\"\nallow_remote = true\ndeclined_version = \"1.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.update.channel, butai_update::Channel::Dev);
+        assert!(cfg.update.allow_remote);
+
+        // And the defaults are the cautious ones on both keys.
+        let cfg = Config::with_defaults();
+        assert_eq!(cfg.update.channel, butai_update::Channel::Stable);
+        assert!(!cfg.update.allow_remote);
+    }
 
     #[test]
     fn defaults_have_builtins() {

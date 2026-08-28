@@ -79,13 +79,15 @@ pub struct RemoteDef {
 /// ```toml
 /// [update]
 /// check = true                 # look for a newer release at all
+/// channel = "stable"           # or "dev": prereleases too
 /// declined_version = "1.1.0"   # written when you answer no; that one stops asking
 /// ```
 ///
-/// Client-side, because the client is the side that can ask a question and the
-/// side that owns the binary a person actually runs. The daemon never declares
-/// this table and serde ignores what it does not know, so it costs the daemon
-/// nothing.
+/// `check` and `declined_version` are client-side, because the client is the
+/// side that can ask a question and the side that owns the binary a person
+/// actually runs. `channel` is the exception: the daemon declares it too, since
+/// it checks for itself when asked to update. Each side still ignores the other
+/// keys, and serde ignores what it does not know.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -96,6 +98,15 @@ pub struct UpdateConfig {
     /// — here, or with `BUTAI_NO_UPDATE_CHECK` for a packaged install whose
     /// updates arrive some other way — stops it entirely.
     pub check: bool,
+    /// Which releases to follow: `"stable"` — every tag cut on `main`, and the
+    /// default — or `"dev"`, which takes the `-dev.N` prereleases as well.
+    ///
+    /// It belongs to the *install*, and lands here because the config is the
+    /// only per-install thing there is: a dev butai run with its own
+    /// `BUTAI_HOME` carries this key, and the stable one beside it never sees
+    /// it. Installing a dev build does not set it — a build is a file, and the
+    /// track it came from is not recorded in one.
+    pub channel: crate::update::Channel,
     /// A version that was offered and turned down.
     ///
     /// Answering no to the prompt is an answer about *that release*, not about
@@ -108,7 +119,7 @@ pub struct UpdateConfig {
 
 impl Default for UpdateConfig {
     fn default() -> Self {
-        Self { check: true, declined_version: None }
+        Self { check: true, channel: crate::update::Channel::default(), declined_version: None }
     }
 }
 
@@ -512,6 +523,22 @@ impl Config {
         })
     }
 
+    /// Which releases to follow: `[update] channel`.
+    pub fn save_update_channel(channel: crate::update::Channel) -> std::io::Result<()> {
+        Self::save_update_channel_at(&Self::path(), channel)
+    }
+
+    /// [`save_update_channel`](Self::save_update_channel) against an explicit
+    /// path.
+    pub fn save_update_channel_at(
+        path: &Path,
+        channel: crate::update::Channel,
+    ) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            table(doc, "update")["channel"] = toml_edit::value(channel.as_str());
+        })
+    }
+
     /// Remember a machine connected from `[+ host]`, as a `[[remote]]` block.
     ///
     /// **Only a deliberate connection is written.** A machine that announced
@@ -788,6 +815,53 @@ mod tests {
         // release has to ask once of its own.
         assert!(!cfg.update.declined("1.2.0"));
         assert!(!cfg.update.declined("1.0.9"));
+    }
+
+    #[test]
+    fn the_release_channel_defaults_to_stable_and_reads_dev() {
+        assert_eq!(Config::default().update.channel, crate::update::Channel::Stable);
+
+        let text = "[update]\nchannel = \"dev\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.update.channel, crate::update::Channel::Dev);
+        // The keys in this table are independent: following the dev track says
+        // nothing about whether to look, or about what was turned down.
+        assert!(cfg.update.check);
+        assert_eq!(cfg.update.declined_version, None);
+    }
+
+    /// A misspelled channel is a parse error naming both words, which
+    /// `load_from` turns into a warning. Silently reading it as stable would
+    /// leave an install that believes it is on dev quietly months behind.
+    #[test]
+    fn a_channel_that_is_neither_word_is_reported() {
+        let err = toml::from_str::<Config>("[update]\nchannel = \"beta\"\n").unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("stable") && err.contains("dev"), "{err}");
+    }
+
+    #[test]
+    fn save_update_channel_preserves_other_content() {
+        let dir = std::env::temp_dir().join(format!("butai-save-channel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# my setup\n[update]\ncheck = true\ndeclined_version = \"1.1.0\"\n")
+            .unwrap();
+
+        Config::save_update_channel_at(&path, crate::update::Channel::Dev).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my setup"), "{text}");
+        // Written into the table that is already there, not a second one.
+        assert_eq!(text.matches("[update]").count(), 1, "{text}");
+
+        let (cfg, warnings) = Config::load_from(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cfg.update.channel, crate::update::Channel::Dev);
+        assert!(cfg.update.check);
+        assert!(cfg.update.declined("1.1.0"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

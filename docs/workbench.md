@@ -754,35 +754,93 @@ listing filtered to markdown, READMEs, and every directory except `target` and
 `node_modules`. They keep separate cursors and separate open buffers, so
 switching between them does not lose your place in the other.
 
-The tree column is a third of the band, clamped to 16..40 columns, with `[find]`
-on its top border and the directory as its title (` docs · src ` on DOCS). A row
-is `●` in amber when git sees a change in that file, or in something under that
-directory **that this page shows** — so on DOCS a folder holding nothing but
-changed code stays unmarked, and the dot always leads somewhere. Then the name,
-with `/` appended for a directory. The listing puts a `..` row at the top of
-every subdirectory; the root has none, because walking up from it would leave
-the workspace.
+### The browser is a trail of columns
 
-The filter is the daemon's (`?filter=docs`), not each client's, for that reason:
-the marker and the rows are one decision, and splitting them is what used to let
-a trail of dots end in an empty box.
+Every directory on the path from the workspace root to where you are is a column
+of its own, side by side, with the row you came through still marked in each —
+the Finder's column view, in a terminal.
+
+```
+┌ crates ───────────┬ butai-client ─────┬ src ────────[find]┐
+│  butai           ▸│  src             ▸│  chrome          ▸│
+│● butai-client    ▸│  Cargo.toml       │  hit.rs           │
+│  butai-server    ▸│                   │● workbench.rs     │
+└───────────────────┴───────────────────┴───────────────────┘
+```
+
+It was one directory and one cursor, and descending replaced both. That made
+every folder a one-way trip you could only reverse by remembering you had:
+nothing on screen said where you were or how you got there. **A trail says both
+at once**, and where you are is the shape of the whole thing rather than a line
+of text you have to read.
+
+A column is 20 cells. The browser grows one at a time and stops at half the
+band, so a trail walked six deep still leaves the file the room — and on a
+terminal too narrow for a browser and a file at once, the browser goes to
+nothing rather than squeezing the thing you came to read. The trail scrolls left
+as it grows, so the column you are working in is the one that stays on screen;
+`←` past the left edge pans the other way. `[find]` is on the top border and each
+column wears its own directory's name (` docs ` for the root on DOCS).
+
+A row is `●` in amber when git sees a change in that file, or in something under
+that directory **that this page shows** — so on DOCS a folder holding nothing but
+changed code stays unmarked, and the dot always leads somewhere. Then the name,
+then `▸` if it is a folder, on the edge the next column opens from.
+
+**There is no `..` row.** There used to be, because descending read as a one-way
+trip and something had to say up existed. The trail says it — the directory you
+came from is the column to the left, still listed — and `←` walks back to it, so
+a row whose only meaning is "the column immediately left of this one" is a row
+you have to learn not to click. `backspace` still works, and so does `←` when the
+trail does not reach where you are.
+
+The columns to the right of the cursor are **kept, not dropped**, so `←` then `→`
+is two local moves and no round trip — over ssh that is the difference between
+browsing and waiting. Moving the cursor is what drops them, and that is the point
+rather than a side effect: those columns are what the *old* selection contained.
+
+The filter is the daemon's (`?filter=docs`), not each client's: the marker and
+the rows are one decision, and splitting them is what used to let a trail of dots
+end in an empty box.
+
+### The file, and the minimap beside it
 
 The right column is the open file with a line-number gutter and syntax colours,
 titled with its path and a `*` when it has unsaved changes — the asterisk goes
-where the eye already is rather than into a status line further away. Its bottom
-row is either a notice, `… truncated; download to see the rest` when the daemon
-stopped at its cap, or the keys:
+where the eye already is rather than into a status line further away.
+
+Down its right edge is a **minimap**: the whole file as sixteen cells of texture,
+with the rows you are looking at marked on it. Sixteen cells cannot hold a line
+of code and it does not try — each cell stands for a rectangle of the file, drawn
+as one shaded block whose density is how much ink is in that rectangle and whose
+colour is what that ink mostly *was*. A comment block is a muted slab, a run of
+strings is green, an indent is the blank left edge. At that size indentation is
+the signal, which is exactly what makes a file recognisable from across the room.
+Click anywhere on it to jump, and what you clicked lands in the middle of the
+window rather than on its top row — you aimed at a shape in order to read what is
+around it.
+
+It takes all sixteen cells or none: below a floor the scale stops meaning
+anything, and a minimap you cannot read is sixteen cells of code you no longer
+have. On a narrow terminal, or with the trail walked several deep, the file
+column keeps the file.
+
+The bottom row is either a notice, `… truncated; download to see the rest` when
+the daemon stopped at its cap, or the keys:
 
 ```
-read-only   j/k scroll   q close
-e edit      j/k scroll   q close
+read-only   ←/→ walk   space peek   q close
+e edit      j/k scroll             q close
 C-s save    esc stop editing
 ```
 
 | | |
 |---|---|
-| `j` `k` | walk the tree; once the cursor is on the file, scroll it |
-| `enter` | open a file, or descend |
+| `j` `k` | walk the column; once the cursor is on the file, scroll it |
+| `←` `h` | up a level — the column to the left, or out of the file back into the browser |
+| `→` `l` | into the selected directory, or open the selected file |
+| `space` | peek: read the file the cursor is on **without** handing it the keyboard, so the next `j` walks to the next name |
+| `enter` | open — the same read, and the keyboard goes to the file |
 | `backspace` | up a directory |
 | `/`, `[find]` | search the workspace |
 | `e` (or `i`) | edit the open file |
@@ -790,6 +848,10 @@ C-s save    esc stop editing
 | `esc` | stop editing |
 | `x` | delete the file the cursor is on, after a confirm box. Refused on a directory |
 | `q` `esc` | close the page. A changed buffer refuses once; the second press discards |
+
+`space` and `enter` both put the file in the viewer and differ only in where they
+leave the keyboard. That is what makes one of them a *peek*: a way to read down a
+directory a file at a time without committing to any of them.
 
 `x` is the only key on this page that destroys something, and it is the only one
 whose damage git cannot undo — the CHANGES rail's `x` puts a file back to what
@@ -1285,7 +1347,8 @@ lockfile in the repo. Two consequences worth knowing:
 | BOOTH: columns, tray, fleet order, `[open]` | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `booth_tray`, `fleet_open_span`) |
 | BOOTH: what a press on the fleet or the tray lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`, `booth_tray_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |
 | BOOTH: `x`, the row menu, and which machine they act on | `crates/butai-client/src/workbench.rs` (`handle_fleet_key`, `fleet_menu`, `fleet_route`, `selected_route`) |
-| FILES / DOCS: tree, editor, gutter, `[find]` | `crates/butai-client/src/chrome/mod.rs` (`Files`, `Editor`, `draw_files_page`), `crates/butai-client/src/syntax.rs` |
+| FILES / DOCS: the trail, editor, gutter, `[find]` | `crates/butai-client/src/chrome/mod.rs` (`Files`, `Column`, `Editor`, `draw_files_page`), `crates/butai-client/src/syntax.rs` |
+| FILES: the minimap | `crates/butai-client/src/chrome/minimap.rs` |
 | The `●` markers, and the DOCS filter that decides them | `crates/butai-protocol/src/api.rs` (`TreeFilter`, `is_doc`), `crates/butai-server/src/pane/git.rs` (`Marked`), `crates/butai-server/src/core.rs` (`build_tree`) |
 | GIT: REFS rows, history, scope, columns | `crates/butai-client/src/chrome/mod.rs` (`Git`, `ref_rows`, `git_columns`, `draw_git_*`) |
 | the commit graph's lanes and glyphs | `crates/butai-client/src/graph.rs` |

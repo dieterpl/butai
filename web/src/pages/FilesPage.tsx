@@ -1,10 +1,29 @@
-// The FILES page — a lazy tree and a file — and DOCS, which is this same page
-// over a second listing.
+// The FILES page — a Finder-style trail of directories and a file — and DOCS,
+// which is this same page over a second listing.
 //
 // The port of `web/ui/files.js`, itself the port of `<butai-files>`: a directory
-// tree on the left (`GET .../tree`, one directory at a time), and on the right
-// the file itself (`.../file`), its diff (`.../diff`), an editor over it, or
-// rendered markdown.
+// browser on the left (`GET .../tree`, one directory at a time), and on the
+// right the file itself (`.../file`), its diff (`.../diff`), an editor over it,
+// or rendered markdown.
+//
+// ## The browser is a trail of columns, not an expanding tree
+//
+// It was an indented tree: click a folder and its contents appear underneath,
+// pushed right. That reads well two levels down and stops reading at four — the
+// path you are on is a diagonal you have to trace by eye through everything you
+// opened on the way, and every folder you ever expanded stays on screen
+// competing with it.
+//
+// The Finder's answer is columns, and it is the one this page takes now.
+// Every directory on the path from the workspace root to where you are is a
+// column of its own, side by side, with the row you came through still marked in
+// each. Where you are is the shape of the whole thing rather than an indent
+// level you have to count, and the columns you are *not* in are still lists you
+// can reach back into with one click.
+//
+// `←`/`→` walk it and `space` peeks at a file without leaving the browser — the
+// same four keys the terminal binds, from the same table, because the two
+// clients teaching different keys is the thing `verbs.ts` exists to stop.
 //
 // ## …and the DOCS page, which is this widget over a second listing
 //
@@ -45,6 +64,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Code } from "@/components/Code";
 import { Empty } from "@/components/Empty";
 import { HintBar, type Hint } from "@/components/HintBar";
+import { Minimap } from "@/components/Minimap";
 import { Patch } from "@/components/Patch";
 import { Path } from "@/components/Path";
 import { Prose } from "@/components/Prose";
@@ -69,7 +89,27 @@ import {
 } from "@/logic/docs.ts";
 import { RAIL_COLS } from "@/logic/dom.ts";
 import type { QualifiedWorkspace } from "@/logic/events.ts";
-import { MAX_ROWS, VerbId, click, filesVerbs, fits, keyText, type TargetId } from "@/logic/verbs.ts";
+import {
+  ROOT,
+  type Trail,
+  here as hereOf,
+  holds,
+  into,
+  left,
+  point,
+  rowIn,
+  trim,
+} from "@/logic/trail.ts";
+import {
+  MAX_ROWS,
+  VerbId,
+  click,
+  filesVerbs,
+  fits,
+  keyName,
+  keyText,
+  type TargetId,
+} from "@/logic/verbs.ts";
 
 /**
  * The one write this page has, and the two ways in.
@@ -124,17 +164,8 @@ interface Listing {
   error?: string | undefined;
 }
 
-/**
- * One line of the flattened tree: an entry, or the note a directory shows while
- * it has no entries to show.
- *
- * The vanilla page pushed a *fake entry* for those two states — a `path` with a
- * `#loading` suffix and a `pending` flag — which meant every consumer of a row
- * had to know that some rows are not files. A second arm says it in the type.
- */
-type Line =
-  | { kind: "entry"; key: string; depth: number; entry: DocRow }
-  | { kind: "note"; key: string; depth: number; text: string };
+/** Pixels one column of the trail takes. */
+const COL_W = 208;
 
 /** What the right-hand column is showing. */
 type Body =
@@ -185,31 +216,39 @@ function verbTarget(target: TargetId, run: () => void) {
 }
 
 /**
- * The open tree, flattened depth-first — one pass over the cache, so a child
- * sits under its own parent and the list the cursor walks is the list on screen.
+ * The name a column wears above it.
  *
- * A directory that is open but not yet answered contributes a `loading…` line
- * of its own rather than nothing, because a tree that swallows the click that
- * opened it reads as a tree that is broken.
+ * The workspace root has no basename, so it is `/` — except on DOCS, where the
+ * root of the trail *is* the docs listing and saying so is the one thing that
+ * tells the two pages apart at a glance.
  */
-function treeRows(
-  dirs: Readonly<Record<string, Listing | undefined>>,
-  open: ReadonlySet<string>,
-  path: string,
-  depth = 0,
-  out: Line[] = [],
-): Line[] {
-  const dir = dirs[path];
-  if (!dir?.entries) return out;
-  for (const entry of dir.entries) {
-    out.push({ kind: "entry", key: entry.path, depth, entry });
-    if (!entry.is_dir || !open.has(entry.path)) continue;
-    const sub = dirs[entry.path];
-    if (!sub) out.push({ kind: "note", key: entry.path + "#loading", depth: depth + 1, text: "loading…" });
-    else if (sub.error) out.push({ kind: "note", key: entry.path + "#error", depth: depth + 1, text: sub.error });
-    else treeRows(dirs, open, entry.path, depth + 1, out);
-  }
-  return out;
+export function columnLabel(dir: string, docs: boolean): string {
+  if (!dir) return docs ? "docs" : "/";
+  return dir.split("/").pop() || dir;
+}
+
+/**
+ * The keyboard, resolved against the page's own verb table.
+ *
+ * Not one key letter: the table says which letter means what, and the arrows are
+ * `j`/`k`/`h`/`l` under the names a keyboard gives them — which is exactly the
+ * rule `logic/keys.ts` follows, written here because that dispatcher is the
+ * vanilla client's and this page owns its own keydown.
+ */
+export function filesVerb(e: { key: string; ctrlKey?: boolean }, editing: boolean): VerbId | null {
+  const arrows: Record<string, VerbId> = {
+    arrowdown: VerbId.Down,
+    arrowup: VerbId.Up,
+    arrowleft: VerbId.TreeUp,
+    arrowright: VerbId.TreeInto,
+  };
+  const table = filesVerbs(editing);
+  const name = keyName(e);
+  const arrow = arrows[name];
+  // An arrow still has to be in the table, or it means nothing here.
+  const bound = arrow ? table.find((v) => v.id === arrow) : undefined;
+  const spelled = e.ctrlKey ? "C-" + name : name;
+  return (bound ?? table.find((v) => v.key === spelled))?.id ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,15 +267,29 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
   // re-fetched every open directory on every click, including the ones nothing
   // had touched.
   const [dirs, setDirs] = useState<Record<string, Listing | undefined>>({});
-  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set<string>());
+  // Which directories are on screen and where the cursor is, as one value —
+  // `logic/trail.ts` owns the moves, and this page owns what to fetch and draw
+  // when one of them lands.
+  const [trail, setTrail] = useState<Trail>(ROOT);
   const [sel, setSel] = useState<string | null>(null);
   const [mode, setMode] = useState<"file" | "diff">("file");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [curDir, setCurDir] = useState("");
   const [body, setBody] = useState<Body | null>(null);
   const [nonce, setNonce] = useState(0);
   const picker = useRef<HTMLInputElement | null>(null);
+  const browser = useRef<HTMLDivElement | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  // Enter asked for the file to take the keyboard, and the file is not on screen
+  // yet — it is a fetch away. Focusing at the keystroke focuses nothing; this
+  // remembers the intent until there is something to focus. See the effect below.
+  const wantFile = useRef(false);
+
+  // Uploads land in the directory the cursor is in. A reference topic is not in
+  // a directory at all, so it must not move the destination somewhere that is
+  // not a place.
+  const here = hereOf(trail);
+  const curDir = isBuiltin(here) ? "" : here;
 
   // Which side to diff is not a preference, it is which list the file is in.
   const changes = ws?.changes ?? null;
@@ -254,11 +307,10 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
   // not necessarily anything here.
   useEffect(() => {
     setDirs({});
-    setOpen(new Set<string>());
+    setTrail(ROOT);
     setSel(null);
     setMode("file");
     setEditing(false);
-    setCurDir("");
     setBody(null);
   }, [id, kind]);
 
@@ -285,37 +337,77 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
 
   useEffect(() => {
     if (!id) return;
-    load("");
-    for (const path of open) load(path);
-    // `open` is not a dependency: a directory is loaded when it is opened, by
-    // the click that opened it. Re-running this on every expansion would
-    // re-fetch every directory already on screen, which is the vanilla page's
-    // behaviour and the thing this cache exists to stop.
+    for (const path of trail.dirs) load(path);
+    // `trail` is not a dependency: a directory is loaded by the move that
+    // descends into it. Re-running this on every step would re-fetch every
+    // directory already on screen, which is the vanilla page's behaviour and the
+    // thing this cache exists to stop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, kind, nonce]);
 
-  const toggleDir = (path: string) => {
-    setOpen((o) => {
-      const next = new Set(o);
-      if (next.has(path)) next.delete(path);
-      else {
-        next.add(path);
-        if (!dirs[path]) load(path);
-      }
-      return next;
-    });
-    // Uploads land in the directory you just entered.
-    setCurDir(path);
+  // The column the trail has panned to has to stay on screen, or walking deep
+  // enough leaves the keyboard driving something off the right-hand edge.
+  useEffect(() => {
+    browser.current?.children[trail.col]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [trail.col, trail.dirs.length]);
+
+  const entriesOf = (dir: string): readonly DocRow[] => dirs[dir]?.entries ?? [];
+  const rowOf = (dir: string) => rowIn(trail, dir, entriesOf(dir).length);
+
+  /** Land a new trail, dropping a selection no column holds any more. */
+  const walk = (next: Trail) => {
+    setTrail(next);
+    if (sel && !isBuiltin(sel) && !holds(next, dirOf(sel))) setSel(null);
   };
 
   const pickFile = (path: string) => {
     setSel(path);
     setMode("file");
     setEditing(false); // a fresh selection starts in read mode
-    // Uploads land alongside the file you selected — but a reference page is not
-    // in a directory, so it must not move the destination somewhere that is not
-    // a place.
-    if (!isBuiltin(path)) setCurDir(dirOf(path));
+  };
+
+  /**
+   * Open what the cursor in column `i` is on.
+   *
+   * A directory becomes the column to the right and takes the keyboard with it;
+   * a file becomes the body. `focusBody` is the whole of what separates Enter
+   * from Space: both read the file, and only one of them stops you walking.
+   */
+  const enter = (i: number, focusBody: boolean) => {
+    const dir = trail.dirs[i] ?? "";
+    const e = entriesOf(dir)[rowOf(dir)];
+    if (!e) return;
+    if (e.is_dir) {
+      walk(into(trail, i, e.path));
+      setSel(null);
+      if (!dirs[e.path]) load(e.path);
+      return;
+    }
+    setTrail(trim(trail, i));
+    pickFile(e.path);
+    wantFile.current = focusBody;
+  };
+
+  /**
+   * Click a row: put the cursor on it, then open it — the Finder's single click.
+   *
+   * Pointed first even though opening moves again, because pointing is what
+   * drops the columns the *old* selection owned. Opening straight from the click
+   * would put the new folder's listing beside the stale ones.
+   */
+  const clickRow = (i: number, row: number) => {
+    const e = entriesOf(trail.dirs[i] ?? "")[row];
+    const pointed = point(trail, i, row);
+    if (!e) {
+      walk(pointed);
+    } else if (e.is_dir) {
+      walk(into(pointed, i, e.path));
+      setSel(null);
+      if (!dirs[e.path]) load(e.path);
+    } else {
+      walk(trim(pointed, i));
+      pickFile(e.path);
+    }
   };
 
   const builtin = sel != null && isBuiltin(sel);
@@ -376,6 +468,14 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
       live = false;
     };
   }, [id, kind, docs, prefix, sel, mode, staged, nonce]);
+
+  // Hand the keyboard to the file once it has arrived, if that is what opened
+  // it. `←` gives it back — see `FileBody`'s `onBack`.
+  useEffect(() => {
+    if (!wantFile.current || body?.kind !== "text") return;
+    wantFile.current = false;
+    scroller.current?.focus();
+  }, [body]);
 
   // -- the writes ------------------------------------------------------------
 
@@ -476,12 +576,42 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
     ? { [VerbId.Save]: () => void save(), [VerbId.CancelEdit]: () => setEditing(false) }
     : {
         [VerbId.Upload]: openPicker,
+        // Walking the trail. These are in the same table the footer is drawn
+        // from, so the key and the entry that documents it dispatch one
+        // function — the property that keeps a footer from lying.
+        [VerbId.Down]: () =>
+          walk(point(trail, trail.col, Math.min(rowOf(here) + 1, entriesOf(here).length - 1))),
+        [VerbId.Up]: () => walk(point(trail, trail.col, Math.max(rowOf(here) - 1, 0))),
+        [VerbId.TreeUp]: () => setTrail(left(trail)),
+        [VerbId.TreeInto]: () => enter(trail.col, false),
+        [VerbId.Open]: () => enter(trail.col, true),
+        // Quick Look: read the file the cursor is on without handing it the
+        // keyboard, so the next `j` walks to the next name and shows you that
+        // one instead. A directory has nothing to peek at — its contents are
+        // what `→` shows — so it is left alone rather than made a second
+        // descend key.
+        [VerbId.Peek]: () => {
+          const e = entriesOf(here)[rowOf(here)];
+          if (e && !e.is_dir) pickFile(e.path);
+        },
         ...(canDiff ? { [VerbId.ViewFile]: () => setMode("file"), [VerbId.ViewDiff]: () => setMode("diff") } : {}),
         ...(canEdit ? { [VerbId.Edit]: () => void startEdit() } : {}),
         ...(sel != null && !builtin
           ? { [VerbId.Download]: download, [VerbId.DeleteFile]: () => void remove() }
           : {}),
       };
+
+  // The browser's keyboard. Every key is looked up in the table above rather
+  // than matched here, so this cannot bind a letter the footer does not draw.
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.metaKey || e.altKey) return;
+    const id = filesVerb(e, editing);
+    const run = id ? runs[id] : undefined;
+    if (!run) return;
+    e.preventDefault();
+    e.stopPropagation();
+    run();
+  };
 
   // Packed at the terminal's own column count, which reads like a layout
   // decision and is not one: it decides *which verbs are worth writing down*,
@@ -494,20 +624,41 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
     onSelect: runs[v.id],
   }));
 
-  const lines = treeRows(dirs, open, "");
   const root = dirs[""];
   const title = body?.kind === "md" && body.title ? body.title : sel;
   const label = docs ? "docs" : "files";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* The browser grows a column at a time and stops at half the page: a trail
+          six deep on a wide screen would otherwise leave the file whatever strip
+          it had not claimed, and the deeper you went the less of the file you
+          could read — a sidebar eating the page it is a sidebar of.
+
+          The width is a *grid track*, not a width on the card. As a percentage
+          on the card it would have resolved against a track sized `auto` — which
+          is sized from the card — and a circular percentage silently becomes
+          half of whatever the browser guessed, leaving a dead column down the
+          middle of the page. Here the `50%` is half the grid, which is the thing
+          the sentence above is actually about. */}
       <div
+        style={
+          {
+            // Rounded down to whole columns, so the trail never ends in a
+            // half-drawn one — a column cut off mid-name reads as a listing that
+            // failed rather than as a listing that scrolls.
+            // The `+ 2px` is the card's own inset rule, one pixel down each
+            // side. Without it the last column's chevrons are drawn under it.
+            "--browser":
+              `calc(min(round(down, 50%, ${COL_W}px), ${trail.dirs.length * COL_W}px) + 2px)`,
+          } as React.CSSProperties
+        }
         className={
           "flex min-h-0 flex-1 flex-col gap-3 p-3 md:grid " +
-          "md:[grid-template-columns:minmax(200px,300px)_1fr] md:[grid-template-rows:minmax(0,1fr)]"
+          "md:[grid-template-columns:var(--browser)_minmax(0,1fr)] md:[grid-template-rows:minmax(0,1fr)]"
         }
       >
-        <Card className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden p-0">
+        <Card className="flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden p-0">
           <SectionTitle
             action={
               <Button
@@ -522,42 +673,84 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
           >
             {label}
           </SectionTitle>
-          {/* Both axes: a deep tree is wider than the rail, and a path that
-              silently loses its left-hand end is the audit's worst finding
-              wearing a different hat. `w-max min-w-full` on the list is what
-              gives the viewport something to scroll. */}
-          <ScrollArea type="auto" className="min-h-0 flex-1">
-            {!ws ? (
-              <Empty>no workspace open</Empty>
-            ) : root?.error ? (
-              <Empty>{root.error}</Empty>
-            ) : !root ? (
-              <Empty>loading…</Empty>
-            ) : !lines.length ? (
-              <Empty>{docs ? "nothing to read here" : "empty"}</Empty>
-            ) : (
-              <div role="listbox" aria-label={label} className="flex w-max min-w-full flex-col">
-                {lines.map((line) =>
-                  line.kind === "note" ? (
-                    <Empty key={line.key} indent={line.depth} compact>
-                      {line.text}
-                    </Empty>
-                  ) : (
-                    <TreeRow
-                      key={line.key}
-                      entry={line.entry}
-                      depth={line.depth}
-                      open={open.has(line.entry.path)}
-                      selected={sel === line.entry.path}
-                      onSelect={() =>
-                        line.entry.is_dir ? toggleDir(line.entry.path) : pickFile(line.entry.path)
+          {!ws ? (
+            <Empty>no workspace open</Empty>
+          ) : root?.error ? (
+            <Empty>{root.error}</Empty>
+          ) : !root ? (
+            <Empty>loading…</Empty>
+          ) : (
+            // One focusable element for the whole browser rather than one per
+            // row: the cursor is the page's state, so the rows are drawn from
+            // it and never hold the focus themselves — which is what stops tab
+            // from walking a thousand filenames.
+            <div
+              ref={browser}
+              role="tree"
+              aria-label={label}
+              tabIndex={0}
+              onKeyDown={onKey}
+              className="flex min-h-0 flex-1 overflow-x-auto outline-none"
+            >
+              {trail.dirs.map((dir, i) => {
+                const listing = dirs[dir];
+                const rows = listing?.entries;
+                return (
+                  <div
+                    key={dir || "/"}
+                    className="flex min-h-0 shrink-0 flex-col border-r border-border last:border-r-0"
+                    style={{ width: COL_W }}
+                  >
+                    {/* The column's own name, over it. Dim unless it is the
+                        one the keyboard is in, so which column `j`/`k` is
+                        about to move is something you can see rather than
+                        something you remember. */}
+                    <div
+                      className={
+                        "h-row shrink-0 truncate border-b border-border px-2 text-12 leading-[--spacing(row)] " +
+                        (i === trail.col ? "text-foreground" : "text-faint")
                       }
-                    />
-                  ),
-                )}
-              </div>
-            )}
-          </ScrollArea>
+                      title={dir || "/"}
+                    >
+                      {columnLabel(dir, docs)}
+                    </div>
+                    {/* A plain scroller, not `ScrollArea`: that one's viewport
+                        is content-sized, so a row asked to fill it fills the
+                        longest filename instead of the column and pushes its
+                        chevron out past the edge. The scrollbars are themed in
+                        `styles.css` either way. */}
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      {listing?.error ? (
+                        <Empty compact>{listing.error}</Empty>
+                      ) : !rows ? (
+                        <Empty compact>loading…</Empty>
+                      ) : !rows.length ? (
+                        <Empty compact>{docs ? "nothing to read here" : "empty"}</Empty>
+                      ) : (
+                        <div role="group" className="flex flex-col">
+                          {rows.map((entry, row) => (
+                            <ColumnRow
+                              key={entry.path}
+                              entry={entry}
+                              /* Three states, not two. The column with the
+                                 keyboard marks its row the way every list in
+                                 this client does; the columns behind it mark
+                                 the row you came *through*, which is what
+                                 makes the trail a path rather than several
+                                 directories that happen to be adjacent. */
+                              selected={row === rowOf(dir) && i === trail.col}
+                              trail={row === rowOf(dir) && i !== trail.col}
+                              onSelect={() => clickRow(i, row)}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </Card>
 
         <Card className="flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden p-0">
@@ -652,6 +845,8 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
             onDraft={setDraft}
             onSave={() => void save()}
             onCancel={() => setEditing(false)}
+            scroller={scroller}
+            onBack={() => browser.current?.focus()}
           />
         </Card>
       </div>
@@ -677,18 +872,19 @@ export function FilesPage({ ws, kind = "files", prefix, actions }: FilesPageProp
 }
 
 // ---------------------------------------------------------------------------
-// The tree
+// The trail
 // ---------------------------------------------------------------------------
 
-interface TreeRowProps {
+interface ColumnRowProps {
   entry: DocRow;
-  depth: number;
-  open: boolean;
+  /** The cursor, in the column that has the keyboard. */
   selected: boolean;
+  /** The row a *deeper* column came through — the path, drawn behind the cursor. */
+  trail: boolean;
   onSelect: () => void;
 }
 
-function TreeRow({ entry, depth, open, selected, onSelect }: TreeRowProps) {
+function ColumnRow({ entry, selected, trail, onSelect }: ColumnRowProps) {
   // Four states, and each one is a palette role rather than a colour: a folder,
   // a page that is built into the client, a file git has something to say about,
   // and everything else.
@@ -702,24 +898,32 @@ function TreeRow({ entry, depth, open, selected, onSelect }: TreeRowProps) {
   return (
     <Row
       compact
-      indent={depth}
       selected={selected}
+      // `w-full` is load-bearing: a `Row` is `shrink-0`, so in a fixed-width
+      // column it takes its *content's* width and a long filename pushes the
+      // chevron out past the column's edge instead of eliding.
+      className={"w-full" + (trail ? " bg-muted" : "")}
       onSelect={onSelect}
       title={entry.path}
       {...verbTarget("files.row", onSelect)}
     >
-      <span aria-hidden="true" className="w-3 shrink-0 text-dim">
-        {entry.is_dir ? (open ? "▾" : "▸") : ""}
-      </span>
-      {/* Mono, and never truncated: this is a filename, the list scrolls
-          sideways rather than eliding it, and two names that differ in one
-          character have to be diffable by eye. */}
-      <span className={"shrink-0 whitespace-nowrap font-mono " + tone}>{entry.name}</span>
+      {/* Mono, and truncated here where the tree let names run: a column is a
+          fixed width on purpose — four directories on screen at once is the
+          whole point — so a name longer than one has to give way rather than
+          push the trail sideways. The full path is on the row's `title`. */}
+      <span className={"min-w-0 flex-1 truncate font-mono " + tone}>{entry.name}</span>
       {entry.changed ? (
         <span className="shrink-0 text-warn" title="changed">
           ●
         </span>
       ) : null}
+      {/* The chevron the next column opens from, on the edge it opens towards.
+          It says what the tree's `▸`/`▾` said and does not have to change to
+          say it — a folder either has more in it or it does not, and which
+          column is showing that is the trail's business, not the row's. */}
+      <span aria-hidden="true" className="w-3 shrink-0 text-right text-dim">
+        {entry.is_dir ? "›" : ""}
+      </span>
     </Row>
   );
 }
@@ -737,9 +941,24 @@ interface FileBodyProps {
   onDraft: (text: string) => void;
   onSave: () => void;
   onCancel: () => void;
+  /** The file's scroller, so the minimap can aim it and the keyboard can reach it. */
+  scroller: React.RefObject<HTMLDivElement | null>;
+  /** Hand the keyboard back to the browser — what `←` means from inside a file. */
+  onBack: () => void;
 }
 
-function FileBody({ body, sel, docs, editing, draft, onDraft, onSave, onCancel }: FileBodyProps) {
+function FileBody({
+  body,
+  sel,
+  docs,
+  editing,
+  draft,
+  onDraft,
+  onSave,
+  onCancel,
+  scroller,
+  onBack,
+}: FileBodyProps) {
   if (editing) {
     return (
       <Textarea
@@ -775,5 +994,27 @@ function FileBody({ body, sel, docs, editing, draft, onDraft, onSave, onCancel }
       </ScrollArea>
     );
   }
-  return <Code text={body.text} className="min-h-0 flex-1" />;
+  // The file, with the whole of it beside it. `tabIndex` so Enter on a row can
+  // hand the keyboard here and the file pages with the keys every scroller
+  // answers to — which is the difference Space is refusing to make.
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <Code
+        ref={scroller}
+        tabIndex={0}
+        text={body.text}
+        lineNumbers
+        className="min-h-0 min-w-0 flex-1 outline-none"
+        // The one key the file claims. Everything else — the arrows, page
+        // up and down, Home — belongs to the scroller, which is the whole
+        // reason Enter hands the keyboard over here in the first place.
+        onKeyDown={(e) => {
+          if (filesVerb(e, false) !== VerbId.TreeUp) return;
+          e.preventDefault();
+          onBack();
+        }}
+      />
+      <Minimap text={body.text} scroller={scroller} />
+    </div>
+  );
 }

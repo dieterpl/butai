@@ -126,6 +126,59 @@ impl Drop for Staged {
 
 // ── deciding whether to look ─────────────────────────────────────────────
 
+/// Which releases an install follows: `[update] channel`.
+///
+/// The two tracks are already separate on the publishing side — a tag with a
+/// prerelease identifier is cut from `develop` and published with
+/// `--prerelease`, a bare one is cut from `main` — and GitHub keeps a
+/// prerelease out of `releases/latest`. That is what makes [`Stable`] a single
+/// request with no filter of its own, and it is also why a stable install can
+/// only reach a dev build by being told its tag.
+///
+/// Both halves read it, because both check: the client for the binary a person
+/// runs, the daemon for `POST /v1/update` on a machine nobody is sitting at.
+///
+/// [`Stable`]: Channel::Stable
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    /// Stable releases only — every tag cut on `main`, and the default.
+    #[default]
+    Stable,
+    /// Prereleases as well: the `-dev.N` tags cut on `develop`, and the stable
+    /// releases they lead to, whichever of the two is highest.
+    Dev,
+}
+
+impl Channel {
+    /// The word this channel is written and read as.
+    ///
+    /// One function for both directions with [`from_name`], because the config
+    /// is written by SETTINGS and read by serde: a name written here that serde
+    /// would not take is a setting that saves and then cannot be loaded, and
+    /// the test at the bottom of this file is what keeps the two agreeing.
+    ///
+    /// [`from_name`]: Channel::from_name
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Dev => "dev",
+        }
+    }
+
+    /// The channel a word means, or `None` for one that is neither.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "stable" => Some(Self::Stable),
+            "dev" => Some(Self::Dev),
+            _ => None,
+        }
+    }
+
+    /// Both channels, in the order SETTINGS offers them.
+    pub const ALL: [Channel; 2] = [Channel::Stable, Channel::Dev];
+}
+
 /// Whether the launch check should run at all.
 ///
 /// The declined version is checked later, against what the release actually
@@ -139,26 +192,83 @@ pub fn enabled(check: bool) -> bool {
 
 /// Is `latest` a higher version than `mine`?
 ///
-/// Numerically, on three integers, because `1.0.10` is newer than `1.0.9` and
-/// a string comparison says the opposite. Anything that does not parse as
-/// `X.Y.Z` answers `false`: an unrecognised tag is a reason to say nothing,
-/// not a reason to guess.
+/// Semver's ordering over the two parts a butai tag has: three integers, then
+/// the prerelease identifier the dev track carries. Numerically on the
+/// integers, because `1.0.10` is newer than `1.0.9` and a string comparison
+/// says the opposite. Anything that does not parse as `X.Y.Z` answers `false`:
+/// an unrecognised tag is a reason to say nothing, not a reason to guess.
+///
+/// **The prerelease half is what makes [`Channel::Dev`] possible.** This used
+/// to cut the suffix and compare, so `1.3.0-dev.2` and `1.3.0-dev.1` were the
+/// same version and a build on the dev track could never be offered the next
+/// one — only the stable release it was already ahead of.
 pub fn newer(latest: &str, mine: &str) -> bool {
-    match (parts(latest), parts(mine)) {
+    match (parse(latest), parse(mine)) {
         (Some(l), Some(m)) => l > m,
         _ => false,
     }
 }
 
-/// `1.2.3` -> `(1, 2, 3)`. Any prerelease or build suffix is cut first, so a
-/// hand-cut `1.2.3-rc1` compares as `1.2.3` rather than as nothing at all.
-fn parts(v: &str) -> Option<(u64, u64, u64)> {
-    let core = v.trim().trim_start_matches('v').split(['-', '+']).next()?;
+/// A version, in the parts that order it.
+///
+/// `Ord` is derived, so the field order *is* the comparison order: the triple
+/// decides, and the prerelease only breaks a tie between two tags of the same
+/// release.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    core: (u64, u64, u64),
+    pre: Pre,
+}
+
+/// The prerelease identifier of a version, ordered as semver orders it.
+///
+/// The variant order is the whole point and it is the reverse of the reading
+/// order: `1.3.0-dev.4` is *below* the `1.3.0` it leads to, so the prerelease
+/// variant is declared first and the derived `Ord` follows.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Pre {
+    /// `-dev.4`, split on its dots.
+    Identifiers(Vec<Id>),
+    /// No suffix at all — the release itself.
+    Release,
+}
+
+/// One dot-separated piece of a prerelease identifier.
+///
+/// Numeric pieces compare as numbers and rank below alphanumeric ones, which
+/// is again the declaration order. `dev.10` is ahead of `dev.9`; a string
+/// comparison of the whole suffix says the opposite, and that is the bug this
+/// type exists to not have.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Id {
+    Numeric(u64),
+    Alphanumeric(String),
+}
+
+/// `1.2.3-dev.4` -> the [`Version`] that orders it, or `None` for anything that
+/// is not `X.Y.Z` with an optional suffix.
+///
+/// Build metadata (`+…`) is dropped rather than parsed: semver excludes it from
+/// precedence, and butai publishes none.
+fn parse(v: &str) -> Option<Version> {
+    let v = v.trim().trim_start_matches('v').split('+').next()?;
+    let (core, pre) = match v.split_once('-') {
+        Some((core, pre)) => (core, Pre::Identifiers(pre.split('.').map(identifier).collect())),
+        None => (v, Pre::Release),
+    };
     let mut it = core.split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
     let patch = it.next()?.parse().ok()?;
-    it.next().is_none().then_some((major, minor, patch))
+    it.next().is_none().then_some(Version { core: (major, minor, patch), pre })
+}
+
+/// One piece of a prerelease identifier, numeric where it can be.
+fn identifier(s: &str) -> Id {
+    match s.parse() {
+        Ok(n) => Id::Numeric(n),
+        Err(_) => Id::Alphanumeric(s.to_string()),
+    }
 }
 
 /// The artifact a release publishes for this build, e.g.
@@ -252,6 +362,11 @@ fn is_cargo_cache_dir(dir: &Path) -> bool {
 #[derive(serde::Deserialize)]
 struct Release {
     tag_name: String,
+    /// Unpublished, and therefore unreachable: a draft's assets 404 for
+    /// anyone but its author. Only [`pick`] reads it, since `releases/latest`
+    /// has already excluded drafts by the time the stable channel parses one.
+    #[serde(default)]
+    draft: bool,
     #[serde(default)]
     assets: Vec<Asset>,
 }
@@ -262,24 +377,73 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// The latest published release, if it is newer than this build.
+/// How many releases [`Channel::Dev`] reads. GitHub answers newest-first, and
+/// a page of thirty is more tags than either track has cut in a year.
+const DEV_PAGE: u32 = 30;
+
+/// The newest release on `channel`, if it is newer than this build.
 ///
 /// Blocking — `ureq` is — so every caller runs it off the event loop. `Ok(None)`
 /// means there is nothing to offer, which covers both "already current" and
 /// "the check is switched off"; an `Err` is a real failure worth reporting to
 /// somebody who asked for the check by hand, and worth swallowing on launch.
 ///
-/// `releases/latest` rather than the full release list because it already
-/// excludes drafts and prereleases, which is the filter we would otherwise
-/// have to write.
-pub fn check() -> Result<Option<Offer>> {
+/// The two channels ask GitHub different questions. `releases/latest` is one
+/// answer GitHub has already filtered — no drafts, no prereleases — which is
+/// exactly the stable track and no filter to write here. The dev track has no
+/// such endpoint, so it reads the list and chooses; see [`pick`].
+pub fn check(channel: Channel) -> Result<Option<Offer>> {
     let install = writable_install_path()?;
 
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let body = get_string(&url).context("ask GitHub for the latest release")?;
-    let release: Release =
-        serde_json::from_str(&body).context("parse GitHub's answer as a release")?;
+    let release = match channel {
+        Channel::Stable => {
+            let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+            let body = get_string(&url).context("ask GitHub for the latest release")?;
+            serde_json::from_str(&body).context("parse GitHub's answer as a release")?
+        }
+        Channel::Dev => {
+            let url = format!("https://api.github.com/repos/{REPO}/releases?per_page={DEV_PAGE}");
+            let body = get_string(&url).context("ask GitHub for the published releases")?;
+            let releases: Vec<Release> =
+                serde_json::from_str(&body).context("parse GitHub's answer as a release list")?;
+            // A repository that has published nothing this build can compare
+            // itself against. Nothing to offer, and nothing wrong either.
+            let Some(release) = pick(releases) else { return Ok(None) };
+            release
+        }
+    };
 
+    offer(release, install)
+}
+
+/// The highest release in a list — the answer GitHub gives directly for the
+/// stable track and not at all for the dev one.
+///
+/// **By version, never by position.** The list comes back in publish order, and
+/// publish order is not version order: a stable `1.2.1` cut as a fix *after*
+/// `1.3.0-dev.1` is the first entry, and taking the head would offer it as an
+/// upgrade to a build already ahead of it — then offer it again every six
+/// hours, forever.
+///
+/// Drafts are dropped because their assets are not public: an offer pointing at
+/// one is an update that cannot be carried out. A tag that does not parse is
+/// dropped for the reason [`newer`] gives — an unrecognised version is not
+/// something to guess at.
+fn pick(releases: Vec<Release>) -> Option<Release> {
+    releases
+        .into_iter()
+        .filter(|r| !r.draft)
+        .filter_map(|r| parse(&r.tag_name).map(|v| (v, r)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, r)| r)
+}
+
+/// What a release offers this build, or `None` when it is not ahead of it.
+///
+/// The tail both channels share: the same comparison, the same artifact lookup
+/// and the same checksums, so the only thing a channel decides is which release
+/// arrives here.
+fn offer(release: Release, install: PathBuf) -> Result<Option<Offer>> {
     let version = release.tag_name.trim_start_matches('v').to_string();
     if !newer(&version, CURRENT) {
         return Ok(None);
@@ -513,10 +677,102 @@ mod tests {
         assert!(!newer("", "1.0.0"));
     }
 
+    /// The rule that makes a dev channel able to move at all.
     #[test]
-    fn a_prerelease_suffix_compares_as_its_release() {
-        assert!(newer("1.1.0-rc1", "1.0.0"));
-        assert!(!newer("1.0.0-rc1", "1.0.0"));
+    fn a_prerelease_is_below_the_release_it_leads_to() {
+        assert!(newer("1.1.0-rc1", "1.0.0"), "a higher triple wins whatever the suffix");
+        assert!(!newer("1.0.0-rc1", "1.0.0"), "a prerelease is not ahead of its own release");
+        assert!(newer("1.3.0", "1.3.0-dev.4"), "and the release is ahead of it");
+    }
+
+    /// The comparison the dev track lives on. It used to cut the suffix, which
+    /// made every `-dev.N` of one release the same version as every other: a
+    /// dev build was offered nothing until stable overtook it.
+    #[test]
+    fn one_dev_build_is_newer_than_the_one_before_it() {
+        assert!(newer("1.3.0-dev.2", "1.3.0-dev.1"));
+        assert!(!newer("1.3.0-dev.1", "1.3.0-dev.2"));
+        assert!(!newer("1.3.0-dev.1", "1.3.0-dev.1"));
+        // Numerically, for the same reason `1.0.10` beats `1.0.9` — a string
+        // comparison puts `dev.10` below `dev.9`.
+        assert!(newer("1.3.0-dev.10", "1.3.0-dev.9"));
+        // A dev tag of the *next* release is ahead of a finished one.
+        assert!(newer("1.4.0-dev.1", "1.3.0"));
+    }
+
+    #[test]
+    fn a_numeric_identifier_ranks_below_a_worded_one() {
+        // Semver's rule, and butai has a use for it: an `-rc.1` cut after the
+        // `-dev.N` series is ahead of all of them.
+        assert!(newer("1.3.0-rc.1", "1.3.0-dev.9"));
+        assert!(!newer("1.3.0-dev.9", "1.3.0-rc.1"));
+    }
+
+    /// The list arrives in publish order, and this is the case that proves
+    /// picking the head is wrong: a stable fix released *after* a dev tag it
+    /// is behind.
+    #[test]
+    fn the_dev_channel_takes_the_highest_version_not_the_newest_entry() {
+        let body = r#"[
+            {"tag_name": "v1.2.1", "draft": false, "assets": []},
+            {"tag_name": "v1.3.0-dev.2", "draft": false, "assets": []},
+            {"tag_name": "v1.3.0-dev.1", "draft": false, "assets": []},
+            {"tag_name": "v1.2.0", "draft": false, "assets": []}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(body).unwrap();
+        assert_eq!(pick(releases).unwrap().tag_name, "v1.3.0-dev.2");
+    }
+
+    #[test]
+    fn a_draft_is_never_picked() {
+        // Its assets 404 for everyone but its author, so an offer pointing at
+        // one is an update that cannot be carried out.
+        let body = r#"[
+            {"tag_name": "v9.9.9", "draft": true, "assets": []},
+            {"tag_name": "v1.3.0-dev.1", "draft": false, "assets": []}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(body).unwrap();
+        assert_eq!(pick(releases).unwrap().tag_name, "v1.3.0-dev.1");
+    }
+
+    #[test]
+    fn a_tag_that_is_not_a_version_is_passed_over_rather_than_guessed_at() {
+        let body = r#"[
+            {"tag_name": "nightly", "draft": false, "assets": []},
+            {"tag_name": "v1.3.0-dev.1", "draft": false, "assets": []}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(body).unwrap();
+        assert_eq!(pick(releases).unwrap().tag_name, "v1.3.0-dev.1");
+
+        // And a list of nothing else is nothing to offer, not an error.
+        let only = r#"[{"tag_name": "nightly", "draft": false, "assets": []}]"#;
+        let releases: Vec<Release> = serde_json::from_str(only).unwrap();
+        assert!(pick(releases).is_none());
+    }
+
+    /// SETTINGS writes `as_str`, serde reads it back. A word written here that
+    /// serde would refuse is a setting that saves and then loses the whole
+    /// config file to a parse warning on the next start.
+    #[test]
+    fn every_channel_writes_a_word_it_can_be_read_back_from() {
+        for channel in Channel::ALL {
+            let name = channel.as_str();
+            assert_eq!(Channel::from_name(name), Some(channel));
+            assert_eq!(serde_json::from_str::<Channel>(&format!("\"{name}\"")).unwrap(), channel);
+        }
+        assert_eq!(Channel::from_name("beta"), None);
+    }
+
+    #[test]
+    fn the_channel_defaults_to_stable_and_reads_its_two_names() {
+        assert_eq!(Channel::default(), Channel::Stable);
+        assert_eq!(serde_json::from_str::<Channel>("\"stable\"").unwrap(), Channel::Stable);
+        assert_eq!(serde_json::from_str::<Channel>("\"dev\"").unwrap(), Channel::Dev);
+        // A typo is an error naming both, not a silent fall back to stable:
+        // an install that believes it is on dev and is not would go quiet for
+        // months without saying why.
+        let err = serde_json::from_str::<Channel>("\"beta\"").unwrap_err().to_string();
+        assert!(err.contains("stable") && err.contains("dev"), "{err}");
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub struct Settings {
     pub bindings: (usize, usize),
     /// Whether butai looks for a newer release: `[update] check`.
     pub update_check: bool,
+    /// Which releases it looks at: `[update] channel`.
+    pub update_channel: crate::update::Channel,
     /// A newer release, once a check has found one. `None` covers both "no
     /// check has answered yet" and "this is the latest", which the ABOUT row
     /// draws the same way — there is nothing to offer either way.
@@ -92,6 +94,7 @@ impl Default for Settings {
             remotes: Vec::new(),
             bindings: (0, 0),
             update_check: true,
+            update_channel: crate::update::Channel::default(),
             update_available: None,
             loaded: false,
             ret: Page::Agents,
@@ -140,6 +143,7 @@ pub enum RowId {
     SystemRows,
     Links,
     UpdateCheck,
+    UpdateChannel,
     /// Read-only. Several rows share it because none of them acts.
     Fact,
 }
@@ -206,6 +210,8 @@ pub enum Edit {
     Links(bool),
     /// Look for a newer release, or stop looking.
     UpdateCheck(bool),
+    /// Follow the stable releases, or the dev track's prereleases too.
+    UpdateChannel(crate::update::Channel),
     /// `view.geom` has already moved; persist it to `[ui]`.
     Geom,
 }
@@ -384,6 +390,22 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                     value: on_off(s.update_check).into(),
                     kind: Kind::Toggle(s.update_check),
                 },
+                Row {
+                    id: RowId::UpdateChannel,
+                    label: "release channel",
+                    key: "[update] channel",
+                    // Says what changes rather than what a track is: the two
+                    // words are only meaningful next to the sentence that
+                    // tells you a dev build arrives every few days.
+                    desc: "`dev` takes the prereleases cut from develop, not just stable ones.",
+                    value: s.update_channel.as_str().into(),
+                    kind: Kind::Choice(
+                        crate::update::Channel::ALL
+                            .iter()
+                            .map(|c| c.as_str().to_string())
+                            .collect(),
+                    ),
+                },
                 Row::info(
                     "config",
                     "",
@@ -394,7 +416,7 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                     "socket",
                     "",
                     butai_protocol::paths::socket_path().display().to_string(),
-                    "BUTAI_SOCKET overrides it. HTTP and the framed protocol share it.",
+                    "BUTAI_HOME, then BUTAI_SOCKET, override it. HTTP and framing share it.",
                 ),
             ],
         },

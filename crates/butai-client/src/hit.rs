@@ -366,10 +366,22 @@ fn changes_target(
 pub enum PageTarget {
     /// A row of the page's list, by index into it — the scroll is already
     /// applied, so this is the entry, not the screen row.
-    Row(usize),
+    ///
+    /// `col` is which of the browser's Finder columns it landed in, and it is
+    /// how a click reaches a directory two levels up: the trail draws them, so
+    /// the pointer has to be able to name them. Always 0 on Docker, which has
+    /// one list.
+    Row {
+        col: usize,
+        row: usize,
+    },
     /// The right-hand column: the open file, or the logs.
     Body,
-    /// The `[find]` button on the tree box's border.
+    /// A row of the minimap down the right of the open file, by screen row
+    /// within it. What the file scrolls to is [`chrome::minimap::scroll_to`]'s
+    /// to say, because it is the same arithmetic the paint used.
+    Minimap(u16),
+    /// The `[find]` button on the browser's border.
     Find,
     Nothing,
 }
@@ -377,34 +389,67 @@ pub enum PageTarget {
 /// Resolve a click on the Files or Docker page.
 ///
 /// Kept apart from [`at`] because these resolve against a scroll offset, which
-/// is page state rather than geometry. `sel` is where that page's cursor is,
-/// which is all the scroll depends on — passed in rather than reached for, so
-/// this stays a function of the screen and one number instead of two page
-/// structs.
-pub fn on_page(cols: u16, rows: u16, view: &View, sel: usize, x: u16, y: u16) -> PageTarget {
+/// is page state rather than geometry. `sels` is where each column's cursor is
+/// — one entry on Docker, one per column of the Finder trail on Files — and
+/// `col` is which of them has the keyboard, which is what decides how far the
+/// trail has panned. Passed in rather than reached for, so this stays a function
+/// of the screen and a slice instead of two page structs.
+pub fn on_page(
+    cols: u16,
+    rows: u16,
+    view: &View,
+    sels: &[usize],
+    col: usize,
+    x: u16,
+    y: u16,
+) -> PageTarget {
     if !view.page.is_tree() && view.page != Page::Docker {
         return PageTarget::Nothing;
     }
     let geom = chrome::page_geom(cols, rows, view);
-    let list = if view.page.is_tree() {
-        chrome::files_row_area(&geom)
-    } else {
-        chrome::docker_row_area(&geom)
-    };
-    // `[find]` sits on the tree box's top border, above the rows.
-    if view.page.is_tree() {
-        let tree_box = chrome::files_tree_box(&geom);
-        let (start, end) = chrome::files_find_span(&tree_box);
-        if y == tree_box.y && x >= start && x < end {
-            return PageTarget::Find;
+    if view.page == Page::Docker {
+        let list = chrome::docker_row_area(&geom);
+        if list.contains(x, y) {
+            let first = chrome::first_visible(sels.first().copied().unwrap_or(0), list.height);
+            return PageTarget::Row { col: 0, row: first + (y - list.y) as usize };
+        }
+        if geom.stage_box.contains(x, y) && x >= list.right() {
+            return PageTarget::Body;
+        }
+        return PageTarget::Nothing;
+    }
+
+    let depth = sels.len().max(1);
+    let tree_box = chrome::files_tree_box(&geom, depth);
+    // `[find]` sits on the browser's top border, above the rows.
+    let (start, end) = chrome::files_find_span(&tree_box);
+    if tree_box.width > 0 && y == tree_box.y && x >= start && x < end {
+        return PageTarget::Find;
+    }
+    if let Some((i, rect)) = chrome::files_col_at(&geom, depth, x) {
+        if rect.contains(x, y) {
+            let shown = chrome::files_cols_shown(geom.stage_box.width, depth);
+            let trail = chrome::files_first_col(depth, shown, col) + i;
+            let first = chrome::first_visible(sels.get(trail).copied().unwrap_or(0), rect.height);
+            return PageTarget::Row { col: trail, row: first + (y - rect.y) as usize };
         }
     }
-    if list.contains(x, y) {
-        let first = chrome::first_visible(sel, list.height);
-        return PageTarget::Row(first + (y - list.y) as usize);
+    // The minimap is drawn inside the file column, so it has to be tested before
+    // the column it is inside of — or every click on it would scroll nothing and
+    // move the focus instead.
+    let inner = chrome::files_body_inner(&geom, depth);
+    let map_w = chrome::minimap::width(inner.width);
+    let map_h = inner.height.saturating_sub(1);
+    if map_w > 0
+        && x >= inner.right() - map_w
+        && x < inner.right()
+        && y >= inner.y
+        && y < inner.y + map_h
+    {
+        return PageTarget::Minimap(y - inner.y);
     }
-    // Everything right of the list, inside the page's box, is the body.
-    if geom.stage_box.contains(x, y) && x >= list.right() {
+    // Everything right of the trail, inside the page's box, is the body.
+    if geom.stage_box.contains(x, y) && x >= tree_box.right() {
         return PageTarget::Body;
     }
     PageTarget::Nothing
@@ -1319,29 +1364,36 @@ mod tests {
     #[test]
     fn a_page_row_is_an_entry_not_a_screen_row() {
         let view = View { page: Page::Files, ..Default::default() };
-        let geom =
-            Chrome::compute(COLS, ROWS, false, view.geom, chrome::system_h_wanted(&view.gauges));
-        let list = chrome::files_row_area(&geom);
+        // `page_geom`, not `Chrome::compute`: a full-screen page has no rails,
+        // and rectangles measured with them are a different page's.
+        let geom = chrome::page_geom(COLS, ROWS, &view);
+        let list = chrome::files_columns(&geom, 1).remove(0);
         let (x, top) = (list.x + 1, list.y);
 
         // Unscrolled, the first visible row is entry 0.
-        assert_eq!(on_page(COLS, ROWS, &view, 0, x, top), PageTarget::Row(0));
-        assert_eq!(on_page(COLS, ROWS, &view, 0, x, top + 3), PageTarget::Row(3));
+        assert_eq!(on_page(COLS, ROWS, &view, &[0], 0, x, top), PageTarget::Row { col: 0, row: 0 });
+        assert_eq!(
+            on_page(COLS, ROWS, &view, &[0], 0, x, top + 3),
+            PageTarget::Row { col: 0, row: 3 }
+        );
 
         // With the cursor past the bottom, the list has scrolled and the same
         // screen row is a later entry.
         let scrolled = list.height as usize + 5;
         let first = chrome::first_visible(scrolled, list.height);
         assert!(first > 0, "the list should have scrolled, or this proves nothing");
-        assert_eq!(on_page(COLS, ROWS, &view, scrolled, x, top), PageTarget::Row(first));
+        assert_eq!(
+            on_page(COLS, ROWS, &view, &[scrolled], 0, x, top),
+            PageTarget::Row { col: 0, row: first }
+        );
 
-        // Right of the list is the open file, and the rails are not on this
+        // Right of the trail is the open file, and the rails are not on this
         // page at all.
-        let body_x = list.right() + 2;
-        assert_eq!(on_page(COLS, ROWS, &view, 0, body_x, top), PageTarget::Body);
+        let body_x = chrome::files_tree_box(&geom, 1).right() + 2;
+        assert_eq!(on_page(COLS, ROWS, &view, &[0], 0, body_x, top), PageTarget::Body);
         // On the agents page nothing here is a page row.
         let work = View::default();
-        assert_eq!(on_page(COLS, ROWS, &work, 0, x, top), PageTarget::Nothing);
+        assert_eq!(on_page(COLS, ROWS, &work, &[0], 0, x, top), PageTarget::Nothing);
     }
 
     /// A click on the stage arrives in the pane's own coordinates, because that

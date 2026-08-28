@@ -47,8 +47,23 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Daemon socket to talk to.
-    #[arg(long, global = true, env = "BUTAI_SOCKET", value_name = "PATH")]
+    // Deliberately *not* a clap `env = "BUTAI_SOCKET"` argument, which is what
+    // it used to be. That filled this in from the environment before anything
+    // else got a say — and since a daemon exports `$BUTAI_SOCKET` into every
+    // pane it creates, "the environment" inside butai always has one, pointing
+    // at the daemon drawing the pane. `BUTAI_HOME` could then never be heard,
+    // so `BUTAI_HOME=~/.butai-dev butai` run from inside butai quietly attached
+    // to the real daemon it was stepping away from.
+    //
+    // Left `None`, the question goes to `paths::socket_path`, which is the one
+    // place that knows the order the two variables go in. `--socket` still
+    // beats both, because that one really was typed for this command.
+    //
+    // A `//` comment and not a `///` one: clap renders doc comments into
+    // `--help`, and this is a note for whoever edits the line, not four
+    // paragraphs for everyone who types `butai pane --help`.
+    /// Daemon socket to talk to [env: BUTAI_SOCKET, BUTAI_HOME]
+    #[arg(long, global = true, value_name = "PATH")]
     pub socket: Option<PathBuf>,
 
     /// Workspace to act in, by id or name.
@@ -264,7 +279,21 @@ fn update(socket: &std::path::Path, out: &Out, check_only: bool, assume_yes: boo
     use butai_client::update;
 
     let current = update::CURRENT;
-    let Some(offer) = update::check()? else {
+    // The config of *this* install — a dev butai on its own `BUTAI_HOME` reads
+    // its own, which is the whole way the two tracks stay apart.
+    //
+    // Warnings are said out loud here rather than swallowed, which they are on
+    // the paths that only *read* a key or two. A config this could not parse
+    // falls back to the defaults, and the default channel is stable: an install
+    // that believes it is on the dev track would go quiet for months and the
+    // one line explaining why would be the one nobody printed.
+    let (config, warnings) = butai_client::config::Config::load();
+    if !out.is_quiet() {
+        for w in &warnings {
+            eprintln!("butai: config: {w}");
+        }
+    }
+    let Some(offer) = update::check(config.update.channel)? else {
         let value = serde_json::json!({
             "current": current,
             "target": update::TARGET,

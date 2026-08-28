@@ -25,6 +25,7 @@ pub use model::*;
 pub mod help;
 pub use help::Help;
 
+pub mod minimap;
 pub mod settings;
 pub mod usage;
 pub use settings::Settings;
@@ -891,20 +892,67 @@ pub fn docker_rows<'a>(stacks: &[Stack<'a>]) -> Vec<DockerRow<'a>> {
     rows
 }
 
-/// The Files page's contents, fetched from `/v1/*` and drawn here.
+/// One column of the browser: a directory, its rows, and the cursor in it.
 ///
-/// A directory listing and, when one is open, an editor. The daemon used to own
-/// a `FileTreePane` and an `EditorPane` with their own expansion, cursor,
-/// scroll and text buffer, and render both into cells; none of that is state
-/// the daemon can act on, so all of it lives here now.
-#[derive(Debug, Default)]
-pub struct Files {
+/// The unit the Finder-style trail is made of. It carries its own cursor rather
+/// than sharing one because that cursor is what the column to its right *is* —
+/// walking back left has to find the row you came through still selected, or
+/// the trail stops being a path and becomes a list of unrelated directories.
+#[derive(Debug, Default, Clone)]
+pub struct Column {
     /// Directory being listed, relative to the workspace root (`""` = root).
     pub dir: String,
     pub entries: Vec<FileEntry>,
     pub sel: usize,
+}
+
+impl Column {
+    pub fn selected(&self) -> Option<&FileEntry> {
+        self.entries.get(self.sel)
+    }
+}
+
+/// The Files page's contents, fetched from `/v1/*` and drawn here.
+///
+/// A directory browser and, when one is open, an editor. The daemon used to own
+/// a `FileTreePane` and an `EditorPane` with their own expansion, cursor,
+/// scroll and text buffer, and render both into cells; none of that is state
+/// the daemon can act on, so all of it lives here now.
+///
+/// ## Why a trail of columns rather than one listing
+///
+/// This was one directory and one cursor, and descending into a folder replaced
+/// both. That made every folder a one-way trip you could only reverse by
+/// remembering you had: nothing on screen said where you were or how you got
+/// there, and `..` — added to say *that* up existed — still could not say what
+/// was up there.
+///
+/// A trail answers both at once, the way the Finder's column view does. Every
+/// directory on the path from the workspace root to where you are is a column,
+/// still listed, with the row you came through still selected; `←` and `→` walk
+/// it. Where you are is the shape of the whole thing, not a line of text you
+/// have to read.
+///
+/// The columns to the right of the cursor are kept, not dropped, so `←` then `→`
+/// lands back where it was without asking the daemon again. Moving the cursor
+/// *is* what drops them — see [`Files::move_sel`].
+#[derive(Debug)]
+pub struct Files {
+    /// The path from the workspace root to the deepest directory opened, one
+    /// column each. **Never empty**: `cols[0]` is the root, and the whole page
+    /// is written against that guarantee rather than against an `Option`.
+    pub cols: Vec<Column>,
+    /// Which column the cursor is in. Independent of the trail's length, since
+    /// `←` walks back through columns without discarding them.
+    pub col: usize,
     /// The open file, if there is one.
     pub open: Option<Editor>,
+}
+
+impl Default for Files {
+    fn default() -> Self {
+        Self { cols: vec![Column::default()], col: 0, open: None }
+    }
 }
 
 /// One row of the tree.
@@ -944,6 +992,15 @@ pub struct Editor {
     /// than computed per paint because a block comment's state depends on every
     /// line above it, so highlighting row 900 means highlighting rows 1..900.
     highlighted: Vec<Vec<(Token, String)>>,
+    /// The same buffer as one byte per column, for the minimap to read.
+    ///
+    /// Held for the opposite reason to `highlighted`: that one is cached because
+    /// it is expensive to *build*, this one because it is expensive to **walk**.
+    /// Painting the text touches the rows on screen; painting a minimap touches
+    /// the whole file by definition, and doing that over `String` runs once a
+    /// frame is a scan of every character in the buffer at sixty hertz. See
+    /// [`minimap::texture`].
+    pub(crate) texture: Vec<Vec<u8>>,
     pub mode: EditMode,
     /// Changed since the last load or save.
     pub dirty: bool,
@@ -967,11 +1024,13 @@ impl Editor {
         // is parked on the streamed pane.
         area.set_cursor_line_style(Style::default());
         area.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        let highlighted = Highlighter::lines(lang, &lines);
         Self {
             path,
             area,
             lang,
-            highlighted: Highlighter::lines(lang, &lines),
+            texture: minimap::texture(&highlighted),
+            highlighted,
             mode: EditMode::View,
             dirty: false,
             discard_armed: false,
@@ -1021,6 +1080,7 @@ impl Editor {
 
     fn rehighlight(&mut self) {
         self.highlighted = Highlighter::lines(self.lang, self.area.lines());
+        self.texture = minimap::texture(&self.highlighted);
     }
 
     /// The bytes to write, as the file should end up on disk.
@@ -1055,23 +1115,171 @@ impl Editor {
 }
 
 impl Files {
-    pub fn move_sel(&mut self, delta: isize) {
-        if self.entries.is_empty() {
-            self.sel = 0;
-            return;
-        }
-        let next = self.sel as isize + delta;
-        self.sel = next.clamp(0, self.entries.len() as isize - 1) as usize;
+    /// The column the cursor is in. Never `None` — see [`Files::cols`].
+    pub fn here(&self) -> &Column {
+        let i = self.col.min(self.cols.len().saturating_sub(1));
+        self.cols.get(i).expect("the trail always holds a root column")
+    }
+
+    fn here_mut(&mut self) -> &mut Column {
+        let i = self.col.min(self.cols.len().saturating_sub(1));
+        self.cols.get_mut(i).expect("the trail always holds a root column")
+    }
+
+    /// Directory the cursor is in, relative to the workspace root.
+    pub fn dir(&self) -> &str {
+        &self.here().dir
+    }
+
+    pub fn entries(&self) -> &[FileEntry] {
+        &self.here().entries
+    }
+
+    pub fn sel(&self) -> usize {
+        self.here().sel
     }
 
     pub fn selected(&self) -> Option<&FileEntry> {
-        self.entries.get(self.sel)
+        self.here().selected()
     }
 
-    /// The parent of the directory being listed, or `None` at the root.
-    pub fn parent(&self) -> Option<String> {
-        parent_of(&self.dir)
+    /// How many columns the trail holds.
+    pub fn depth(&self) -> usize {
+        self.cols.len()
     }
+
+    /// Move the cursor within its column, dropping the trail to the right of it.
+    ///
+    /// The drop is the point, not a side effect: the columns to the right are
+    /// what the old selection *contained*, so leaving them under a new one would
+    /// draw a path that does not exist. `←`/`→` move between columns without
+    /// coming through here, which is what lets them walk back and forth over a
+    /// trail they did not have to re-fetch.
+    pub fn move_sel(&mut self, delta: isize) {
+        let here = self.here_mut();
+        if here.entries.is_empty() {
+            here.sel = 0;
+        } else {
+            let next = here.sel as isize + delta;
+            here.sel = next.clamp(0, here.entries.len() as isize - 1) as usize;
+        }
+        if delta != 0 {
+            self.cols.truncate(self.col + 1);
+        }
+    }
+
+    /// Step the cursor one column left, towards the root.
+    ///
+    /// The trail is kept, so the column just left is still listed and `→` walks
+    /// straight back into it.
+    pub fn go_left(&mut self) -> bool {
+        if self.col == 0 {
+            return false;
+        }
+        self.col -= 1;
+        true
+    }
+
+    /// Step the cursor one column right, if the selected directory is already
+    /// the next column of the trail.
+    ///
+    /// `false` means the listing is not held and the caller has to fetch it.
+    pub fn go_right(&mut self) -> bool {
+        let Some(want) = self.selected().filter(|e| e.is_dir).map(|e| e.path.clone()) else {
+            return false;
+        };
+        if self.cols.get(self.col + 1).is_some_and(|c| c.dir == want) {
+            self.col += 1;
+            return true;
+        }
+        false
+    }
+
+    /// The parent of the directory the cursor is in, or `None` at the root.
+    pub fn parent(&self) -> Option<String> {
+        parent_of(self.dir())
+    }
+
+    /// Put the cursor on `row` of trail column `col` — what a click does.
+    ///
+    /// `true` when that moved it, which is what tells a click it is the first of
+    /// the pair rather than the one that opens. Out-of-range asks are ignored
+    /// rather than clamped: they come from a pointer over a column that has
+    /// since been dropped, and clamping would silently open the wrong row.
+    pub fn point_at(&mut self, col: usize, row: usize) -> bool {
+        let Some(column) = self.cols.get(col) else { return false };
+        if row >= column.entries.len() {
+            return false;
+        }
+        let moved = self.col != col || column.sel != row;
+        self.col = col;
+        self.cols[col].sel = row;
+        if moved {
+            self.cols.truncate(col + 1);
+        }
+        moved
+    }
+
+    /// Put a fresh listing of `dir` where it belongs in the trail.
+    ///
+    /// One rule covers descending, walking up and jumping somewhere unrelated:
+    /// **the trail is the path from the root to `dir`**, so the columns that are
+    /// still ancestors of it stay, and this listing goes immediately after them.
+    /// Descending keeps everything to the left; walking up drops everything to
+    /// the right; a jump keeps whatever prefix the two paths share.
+    ///
+    /// Re-listing the directory you are already in replaces that column and
+    /// leaves the ones above it, because a directory is not its own ancestor —
+    /// which is what makes this the right thing to call after a delete.
+    pub fn land(&mut self, dir: String, entries: Vec<FileEntry>) {
+        let keep = self.cols.iter().take_while(|c| is_ancestor(&c.dir, &dir)).count();
+        // The cursor in the column that was already showing this directory is
+        // worth keeping: a re-list after a delete should not throw the reader
+        // back to the top of a long folder.
+        let was = self.cols.get(keep).filter(|c| c.dir == dir).map(|c| c.sel).unwrap_or(0);
+        self.cols.truncate(keep);
+        self.cols.push(Column { dir, entries, sel: was });
+        self.col = self.cols.len() - 1;
+        self.clamp_all();
+        self.mark_trail();
+    }
+
+    /// Keep every column's cursor inside its own listing.
+    fn clamp_all(&mut self) {
+        for c in &mut self.cols {
+            c.sel = c.sel.min(c.entries.len().saturating_sub(1));
+        }
+        self.col = self.col.min(self.cols.len().saturating_sub(1));
+    }
+
+    /// Point each column's cursor at the row the next column came through.
+    ///
+    /// Without this a trail rebuilt by anything other than walking it — the
+    /// listing that follows a delete, say — would draw the right directories
+    /// with the wrong rows highlighted, which reads as a path that forks.
+    fn mark_trail(&mut self) {
+        for i in 0..self.cols.len().saturating_sub(1) {
+            let want = self.cols[i + 1].dir.clone();
+            if let Some(n) = self.cols[i].entries.iter().position(|e| e.path == want) {
+                self.cols[i].sel = n;
+            }
+        }
+    }
+}
+
+/// Whether `dir` is a strict ancestor of `of`, both workspace-relative.
+///
+/// The root (`""`) is an ancestor of everything but itself. Compared segment by
+/// segment rather than by `starts_with`, or `src/co` would come out an ancestor
+/// of `src/core` and the trail would keep a column that is not on the path.
+fn is_ancestor(dir: &str, of: &str) -> bool {
+    if dir == of {
+        return false;
+    }
+    if dir.is_empty() {
+        return true;
+    }
+    of.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// The directory above `dir`, or `None` when `dir` is the workspace root.
@@ -1950,6 +2158,15 @@ pub enum ConfirmKind {
     /// nothing to record — `declined_version` is this client's file, about this
     /// client's binary.
     UpdateDaemon { host: String },
+    /// The daemon on *this* machine is a different build from the client
+    /// talking to it, and should be stopped so it comes back on this one.
+    ///
+    /// Not [`ConfirmKind::UpdateDaemon`] with the host left out, because
+    /// nothing is fetched: the build being asked for is the one already
+    /// running here, and a local daemon is spawned from this binary. And not
+    /// [`ConfirmKind::Update`] either — that replaces the file on disk, this
+    /// only restarts what is running.
+    RestartDaemon,
 }
 
 /// A titled list with a cursor.
@@ -5309,27 +5526,62 @@ fn draw_stage_box(
     draw_box(buf, geom.stage_box, &title, theme.border(view.focus == Focus::Stage), theme.ground);
 }
 
-/// Width of the tree column on the Files page.
+/// Width of the list column on the Docker page.
 ///
 /// A share of the stage rather than a constant, so a wide terminal gives the
-/// file being read the room, and a narrow one still lists names.
+/// logs the room, and a narrow one still lists names. The Files page used this
+/// too while it was one listing; it is the Finder trail now, and that one is
+/// sized by how deep it has been walked — see [`files_cols_shown`].
 fn tree_width(stage_w: u16) -> u16 {
     (stage_w / 3).clamp(16, 40).min(stage_w.saturating_sub(20))
 }
 
-/// The Files page: a lazy directory listing beside the file it opens.
-/// The Files page's tree column: where its rows are drawn, and where a click
-/// on one lands. Both go through this so the two cannot disagree.
-pub fn files_row_area(geom: &Geom) -> LRect {
-    let outer = geom.stage_box;
-    let w = tree_width(outer.width);
-    LRect::new(outer.x + 1, outer.y + 1, w.saturating_sub(2), outer.height.saturating_sub(2))
+/// Cells one Finder column takes, its left separator included.
+///
+/// Twenty leaves nineteen to write in, which is a change marker, a space, about
+/// fifteen characters of name and the `▸` that says a folder opens. Names are
+/// clipped at that, and they have to be: the point of the trail is that four
+/// directories are on screen at once, and a column wide enough for the longest
+/// name in a `node_modules` would put one there.
+pub const FILES_COL_W: u16 = 20;
+
+/// Cells the open file keeps whatever the trail does.
+pub const FILES_FILE_MIN_W: u16 = 24;
+
+/// How many of the trail's columns are drawn beside a `stage_w`-wide stage.
+///
+/// A floor and a ceiling, and they answer different worries. The floor is the
+/// file's: under it there is no room for a browser and a file at once, and this
+/// page is about the file — so the browser goes to nothing rather than squeezing
+/// the thing you came to read, which is what the old single column did on a
+/// narrow terminal too.
+///
+/// The ceiling is a half share of the stage. Without it, walking six directories
+/// deep on a wide terminal would leave the file whatever strip the trail had not
+/// claimed, and the deeper you went the less of the file you could see — a
+/// browser that eats the page it is a sidebar of.
+pub fn files_cols_shown(stage_w: u16, depth: usize) -> usize {
+    if stage_w < FILES_COL_W + 1 + FILES_FILE_MIN_W {
+        return 0;
+    }
+    let room = (stage_w / 2).min(stage_w - FILES_FILE_MIN_W).saturating_sub(1);
+    ((room / FILES_COL_W) as usize).clamp(1, depth.max(1))
 }
 
-/// The `[find]` button on the tree box's top border.
+/// Trail index of the leftmost drawn column.
+///
+/// The trail scrolls left as it grows, so the deepest column — the one you are
+/// working in — is the one that stays on screen. Walking `←` back past the left
+/// edge pans the other way, which is the only time the deepest column leaves.
+pub fn files_first_col(depth: usize, shown: usize, col: usize) -> usize {
+    let first = depth.saturating_sub(shown);
+    first.min(col)
+}
+
+/// The `[find]` button on the browser's top border.
 pub const FILES_FIND_LABEL: &str = "[find]";
 
-/// Where `[find]` sits, right-aligned on the tree box's border. Draw and hit
+/// Where `[find]` sits, right-aligned on the browser's border. Draw and hit
 /// test both come through here, so the button cannot be painted in one place
 /// and clicked in another.
 pub fn files_find_span(tree_box: &LRect) -> (u16, u16) {
@@ -5338,11 +5590,49 @@ pub fn files_find_span(tree_box: &LRect) -> (u16, u16) {
     (end.saturating_sub(w), end)
 }
 
-/// The tree box on the Files and Docs pages — the outer rectangle whose border
-/// carries `[find]`, as against [`files_row_area`]'s rows inside it.
-pub fn files_tree_box(geom: &Geom) -> LRect {
+/// The browser box on the Files and Docs pages — the outer rectangle whose
+/// border carries the column names and `[find]`.
+///
+/// One box around the whole trail rather than a box per column: adjacent boxes
+/// would put two border cells between every pair of columns, and at four columns
+/// that is eight cells of rule down the middle of a listing. The separators
+/// inside it are drawn by [`draw_files_page`].
+pub fn files_tree_box(geom: &Geom, depth: usize) -> LRect {
     let outer = geom.stage_box;
-    LRect::new(outer.x, outer.y, tree_width(outer.width), outer.height)
+    let n = files_cols_shown(outer.width, depth) as u16;
+    let w = if n == 0 { 0 } else { n * FILES_COL_W + 1 };
+    LRect::new(outer.x, outer.y, w, outer.height)
+}
+
+/// Where each drawn column's rows go, left to right.
+///
+/// The separators sit at `x + i * FILES_COL_W` for every `i` from the left
+/// border to the right one, so every column is the same width — including the
+/// last, which is what stops the trail from having a runt on the end.
+pub fn files_columns(geom: &Geom, depth: usize) -> Vec<LRect> {
+    let outer = files_tree_box(geom, depth);
+    if outer.width == 0 || outer.height < 2 {
+        return Vec::new();
+    }
+    let n = files_cols_shown(geom.stage_box.width, depth);
+    (0..n)
+        .map(|i| {
+            LRect::new(
+                outer.x + i as u16 * FILES_COL_W + 1,
+                outer.y + 1,
+                FILES_COL_W - 1,
+                outer.height.saturating_sub(2),
+            )
+        })
+        .collect()
+}
+
+/// The drawn column `x` is over, if any.
+///
+/// Shared by the hit test and by a drag's clip, so a press cannot select in one
+/// column and copy out of another.
+pub fn files_col_at(geom: &Geom, depth: usize, x: u16) -> Option<(usize, LRect)> {
+    files_columns(geom, depth).into_iter().enumerate().find(|(_, r)| x >= r.x && x < r.right())
 }
 
 /// The interior of the box the open file is drawn in — the other column of the
@@ -5350,9 +5640,9 @@ pub fn files_tree_box(geom: &Geom) -> LRect {
 ///
 /// The hint row at the bottom is left in: it is a row of the same box, and a
 /// selection that stopped one row short of what is drawn is a clip you can see.
-pub fn files_body_inner(geom: &Geom) -> LRect {
+pub fn files_body_inner(geom: &Geom, depth: usize) -> LRect {
     let outer = geom.stage_box;
-    let tree_w = tree_width(outer.width);
+    let tree_w = files_tree_box(geom, depth).width;
     LRect::new(
         outer.x + tree_w + 1,
         outer.y + 1,
@@ -5399,6 +5689,24 @@ pub fn rail_first(sel: usize, len: usize, height: u16) -> usize {
     first_visible(sel.min(len.saturating_sub(1)), height)
 }
 
+/// The name a trail column wears on the border above it.
+///
+/// The workspace root has no basename, so it is `/` — except on DOCS, where the
+/// root of the trail *is* the docs listing and saying so is the one thing that
+/// tells the two pages apart at a glance.
+fn column_label(page: Page, dir: &str, root: bool) -> String {
+    if dir.is_empty() {
+        return if page == Page::Docs { " docs ".into() } else { " / ".into() };
+    }
+    let base = dir.rsplit('/').next().unwrap_or(dir);
+    if root {
+        format!(" {dir} ")
+    } else {
+        format!(" {base} ")
+    }
+}
+
+/// The Files page: a Finder-style trail of directories beside the file it opens.
 fn draw_files_page(
     buf: &mut Buffer,
     geom: &Geom,
@@ -5408,58 +5716,137 @@ fn draw_files_page(
     theme: &Theme,
 ) {
     let outer = geom.stage_box;
-    let tree_w = tree_width(outer.width);
-    let tree_box = files_tree_box(geom);
-    let view_box =
-        LRect::new(outer.x + tree_w, outer.y, outer.width.saturating_sub(tree_w), outer.height);
-
     let empty = if page == Page::Docs { " DOCS " } else { " FILES " };
     let Some(files) = files else {
         draw_box(buf, outer, empty, theme.rule, theme.ground);
         return;
     };
-    let dir = match files.dir.as_str() {
-        "" => "/",
-        d => d,
-    };
-    let dir = if page == Page::Docs { format!(" docs · {dir} ") } else { format!(" {dir} ") };
-    draw_box(buf, tree_box, &dir, theme.border(true), theme.ground);
-    // `[find]` on the tree box's own border, where the daemon drew it: the
-    // search is about the files in front of you, so its button belongs on them
-    // rather than on a footer at the other end of the screen.
-    let (fx, _) = files_find_span(&tree_box);
-    put_str(
-        buf,
-        fx,
-        tree_box.y,
-        FILES_FIND_LABEL,
-        tree_box.right(),
-        Pen::new(theme.faint, theme.ground),
-    );
 
-    let rows = files_row_area(geom);
-    let bound = rows.x + rows.width;
-    let visible = rows.height as usize;
-    let first = first_visible(files.sel, rows.height);
-    for (i, e) in files.entries.iter().skip(first).take(visible).enumerate() {
-        let y = rows.y + i as u16;
-        let cursor = first + i == files.sel;
-        let bg = theme.row_bg(cursor);
-        for x in rows.x..bound {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ");
-                cell.set_bg(bg);
+    let depth = files.depth();
+    let tree_box = files_tree_box(geom, depth);
+    let columns = files_columns(geom, depth);
+    let shown = columns.len();
+    let first = files_first_col(depth, shown, files.col);
+    let view_box = LRect::new(
+        outer.x + tree_box.width,
+        outer.y,
+        outer.width.saturating_sub(tree_box.width),
+        outer.height,
+    );
+    // The browser has the keyboard whenever the file does not. Its cursor stays
+    // drawn either way — a trail with no row marked is a path with no position
+    // on it — but dimmed, so which of the two columns `j`/`k` is about to move
+    // is something you can see rather than something you remember.
+    let browsing = view.focus != Focus::Stage;
+
+    if tree_box.width > 0 {
+        draw_box(buf, tree_box, "", theme.border(browsing), theme.ground);
+        let (find_x, _) = files_find_span(&tree_box);
+        // The separators between columns, and each column's name over it. Drawn
+        // after the box so the `┬`/`┴` land on top of its border row.
+        for (i, rows) in columns.iter().enumerate() {
+            let sep = rows.x - 1;
+            if i > 0 {
+                for y in tree_box.y..tree_box.bottom() {
+                    put_str(
+                        buf,
+                        sep,
+                        y,
+                        "│",
+                        sep + 1,
+                        Pen::new(theme.border(browsing), theme.ground),
+                    );
+                }
+                put_str(
+                    buf,
+                    sep,
+                    tree_box.y,
+                    "┬",
+                    sep + 1,
+                    Pen::new(theme.border(browsing), theme.ground),
+                );
+                let bottom = tree_box.bottom().saturating_sub(1);
+                put_str(
+                    buf,
+                    sep,
+                    bottom,
+                    "┴",
+                    sep + 1,
+                    Pen::new(theme.border(browsing), theme.ground),
+                );
+            }
+            let trail = first + i;
+            let Some(column) = files.cols.get(trail) else { continue };
+            let here = trail == files.col;
+            let label = column_label(page, &column.dir, trail == 0 && !column.dir.is_empty());
+            // The last drawn column shares its border with `[find]`, so its name
+            // stops before the button rather than running under it.
+            let room = if i + 1 == shown {
+                find_x.saturating_sub(rows.x) as usize
+            } else {
+                rows.width as usize
+            };
+            let fg = if here && browsing { theme.ink } else { theme.faint };
+            put_str(
+                buf,
+                rows.x,
+                tree_box.y,
+                &ellipsize(&label, room),
+                tree_box.right(),
+                Pen::new(fg, theme.ground),
+            );
+        }
+        // `[find]` on the browser's own border, where the daemon drew it: the
+        // search is about the files in front of you, so its button belongs on
+        // them rather than on a footer at the other end of the screen.
+        put_str(
+            buf,
+            find_x,
+            tree_box.y,
+            FILES_FIND_LABEL,
+            tree_box.right(),
+            Pen::new(theme.faint, theme.ground),
+        );
+    }
+
+    for (i, rows) in columns.iter().enumerate() {
+        let Some(column) = files.cols.get(first + i) else { continue };
+        let here = first + i == files.col;
+        let bound = rows.x + rows.width;
+        let visible = rows.height as usize;
+        let start = first_visible(column.sel, rows.height);
+        for (n, e) in column.entries.iter().skip(start).take(visible).enumerate() {
+            let y = rows.y + n as u16;
+            let cursor = start + n == column.sel;
+            // Three states, not two. The column with the keyboard marks its row
+            // the way every list in this workbench does; the columns behind it
+            // mark the row you came *through*, which is what makes the trail a
+            // path rather than four directories that happen to be adjacent.
+            let bg = match (cursor, here && browsing) {
+                (false, _) => theme.ground,
+                (true, true) => theme.selection,
+                (true, false) => theme.surface,
+            };
+            for x in rows.x..bound {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol(" ");
+                    cell.set_bg(bg);
+                }
+            }
+            // `●` for a change and `▸` for a folder, both single-cell: the rail
+            // rules apply here too. The chevron replaces the trailing `/` the
+            // single listing used — it says the same thing in the same cell, and
+            // it says it on the edge the next column opens from.
+            let marker = if e.changed { "●" } else { " " };
+            let fg = if e.is_dir { theme.accent } else { theme.ink };
+            put_str(buf, rows.x, y, marker, bound, Pen::new(theme.attention, bg));
+            let room = rows.width.saturating_sub(if e.is_dir { 3 } else { 2 });
+            let text = ellipsize(&e.name, room as usize);
+            put_str(buf, rows.x + 2, y, &text, bound, Pen::new(fg, bg));
+            if e.is_dir {
+                put_str(buf, bound - 1, y, "▸", bound, Pen::new(theme.faint, bg));
             }
         }
-        // `/` for a directory and `●` for a change, both single-cell: the rail
-        // rules apply here too.
-        let marker = if e.changed { "●" } else { " " };
-        let name = if e.is_dir { format!("{}/", e.name) } else { e.name.clone() };
-        let fg = if e.is_dir { theme.accent } else { theme.ink };
-        let mark_fg = theme.attention;
-        put_str(buf, rows.x, y, marker, bound, Pen::new(mark_fg, bg));
-        let text = ellipsize(&name, rows.width.saturating_sub(2) as usize);
-        put_str(buf, rows.x + 2, y, &text, bound, Pen::new(fg, bg));
     }
 
     let title = match &files.open {
@@ -5481,14 +5868,36 @@ fn draw_files_page(
     );
     // One row at the bottom for the notice and the keys, as the diff page does.
     let body = LRect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
-    draw_editor_body(buf, body, open, theme);
+    // The minimap comes off the right of the file column, and takes all of its
+    // width or none — see `minimap::width`.
+    let map_w = minimap::width(body.width);
+    let text = LRect::new(body.x, body.y, body.width - map_w, body.height);
+    draw_editor_body(buf, text, open, theme);
+    if map_w > 0 {
+        // While editing, the widget owns the scrolling and this side cannot ask
+        // it where it is; the cursor is the one anchor both agree on.
+        let top = match open.mode {
+            EditMode::Edit => open.area.cursor().0.saturating_sub(text.height as usize / 2),
+            EditMode::View => open.scroll,
+        };
+        minimap::draw(
+            buf,
+            LRect::new(text.right(), body.y, map_w, body.height),
+            open,
+            text.height,
+            top,
+            theme,
+        );
+    }
 
     if inner.height > 0 {
         let bound = inner.x + inner.width;
         let y = inner.y + inner.height - 1;
-        // On this page `j`/`k` walk the tree until the cursor is moved onto the
-        // file, so the hint says which of the two it is about to do.
-        let scroll = if view.focus == Focus::Stage { "j/k scroll" } else { "tab to the file" };
+        // On this page `j`/`k` walk the trail until the cursor is moved onto the
+        // file, so the hint says which of the two it is about to do — and while
+        // it is the trail, it says what else the trail answers to.
+        let scroll =
+            if view.focus == Focus::Stage { "j/k scroll" } else { "←/→ walk   space peek" };
         let hints = match (open.mode, open.editable()) {
             (_, false) => format!("read-only   {scroll}   q close"),
             (EditMode::View, _) => format!("e edit   {scroll}   q close"),
@@ -8735,22 +9144,25 @@ mod tests {
     fn the_docs_page_is_the_files_widget_over_markdown() {
         let sys = SysDto::default();
         let docs = Files {
-            dir: String::new(),
-            entries: vec![
-                FileEntry {
-                    name: "README.md".into(),
-                    path: "README.md".into(),
-                    is_dir: false,
-                    changed: false,
-                },
-                FileEntry {
-                    name: "docs".into(),
-                    path: "docs".into(),
-                    is_dir: true,
-                    changed: false,
-                },
-            ],
-            sel: 0,
+            cols: vec![Column {
+                dir: String::new(),
+                entries: vec![
+                    FileEntry {
+                        name: "README.md".into(),
+                        path: "README.md".into(),
+                        is_dir: false,
+                        changed: false,
+                    },
+                    FileEntry {
+                        name: "docs".into(),
+                        path: "docs".into(),
+                        is_dir: true,
+                        changed: false,
+                    },
+                ],
+                sel: 0,
+            }],
+            col: 0,
             open: None,
         };
         let view = View { page: Page::Docs, ..Default::default() };
@@ -8758,7 +9170,10 @@ mod tests {
         let sc = Scene { docs: Some(&docs), ..scene(&[], None, &sys, &[]) };
         draw(&mut b, 120, 30, &sc, &view, &Theme::default());
         let screen: String = (0..30).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n");
-        assert!(screen.contains("docs · /"), "the tree box should name the space: {screen}");
+        assert!(
+            screen.contains(" docs "),
+            "the browser's root column should name the space: {screen}"
+        );
         assert!(screen.contains("README.md"), "{screen}");
         assert!(screen.contains(FILES_FIND_LABEL), "the [find] button is missing: {screen}");
     }
@@ -8900,7 +9315,10 @@ mod tests {
     #[test]
     fn the_dotdot_row_and_backspace_agree_about_up() {
         for dir in ["", "src", "src/pane", "a/b/c"] {
-            let files = Files { dir: dir.to_string(), ..Default::default() };
+            let files = Files {
+                cols: vec![Column { dir: dir.to_string(), ..Default::default() }],
+                ..Default::default()
+            };
             assert_eq!(files.parent(), parent_of(dir), "disagreed about up from {dir:?}");
         }
         assert_eq!(parent_of(""), None, "the root must not escape the workspace");
@@ -9151,24 +9569,44 @@ mod tests {
         );
     }
 
+    /// A trail two columns deep — the root, then `src` — with a file open.
+    ///
+    /// Two rather than one because the trail is the thing under test: a fixture
+    /// with a single column would pass every assertion the old single listing
+    /// passed and none of the ones that are new.
     fn files_fixture() -> Files {
         Files {
-            dir: "src".into(),
-            entries: vec![
-                FileEntry {
-                    name: "core".into(),
-                    path: "src/core".into(),
-                    is_dir: true,
-                    changed: false,
+            cols: vec![
+                Column {
+                    dir: String::new(),
+                    entries: vec![FileEntry {
+                        name: "src".into(),
+                        path: "src".into(),
+                        is_dir: true,
+                        changed: false,
+                    }],
+                    sel: 0,
                 },
-                FileEntry {
-                    name: "main.rs".into(),
-                    path: "src/main.rs".into(),
-                    is_dir: false,
-                    changed: true,
+                Column {
+                    dir: "src".into(),
+                    entries: vec![
+                        FileEntry {
+                            name: "core".into(),
+                            path: "src/core".into(),
+                            is_dir: true,
+                            changed: false,
+                        },
+                        FileEntry {
+                            name: "main.rs".into(),
+                            path: "src/main.rs".into(),
+                            is_dir: false,
+                            changed: true,
+                        },
+                    ],
+                    sel: 1,
                 },
             ],
-            sel: 1,
+            col: 1,
             open: Some(Editor::new(
                 "src/main.rs".into(),
                 "fn main() {\n    println!(\"hi\");\n}\n",
@@ -9186,7 +9624,12 @@ mod tests {
         let scene = Scene { files: Some(&files), diff: None, ..Scene::new(&[], &sys) };
         draw(&mut b, 120, 30, &scene, &view, &Theme::default());
         let joined: String = (0..30).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("core/"), "a directory should be marked:\n{joined}");
+        // A folder wears the `▸` the next column opens from, where the single
+        // listing wrote a trailing `/`.
+        assert!(joined.contains("core"), "the directory should be listed:\n{joined}");
+        assert!(joined.contains("▸"), "a directory should be marked as one:\n{joined}");
+        // The trail is on screen, not just the directory the cursor is in.
+        assert!(joined.contains(" src "), "the trail should name its columns:\n{joined}");
         assert!(joined.contains("main.rs"), "{joined}");
         assert!(joined.contains("fn main()"), "the open file should show:\n{joined}");
         assert!(joined.contains("src/main.rs"), "the viewer should be titled:\n{joined}");
@@ -9198,6 +9641,92 @@ mod tests {
         assert!(!joined.contains("AGENTS"), "the agents rail should be gone:\n{joined}");
         assert!(!joined.contains("CHANGES"), "the changes rail should be gone:\n{joined}");
         assert!(joined.contains("[+ new]"), "the tab bar must not move:\n{joined}");
+    }
+
+    /// The minimap is drawn beside the file, and it marks where you are.
+    ///
+    /// Three things at once, because each of them alone passes while the widget
+    /// is useless: that it is *there*, that its texture is the file rather than
+    /// a blank column, and that the rows on screen are marked on it. The last
+    /// one is the whole point — a picture of the file with no "you are here" is
+    /// a picture.
+    #[test]
+    fn the_minimap_draws_the_file_and_marks_the_window() {
+        const COLS: u16 = 160;
+        const ROWS: u16 = 30;
+        let text: String = (0..400)
+            .map(|i| if i % 5 == 0 { String::new() } else { format!("    let x{i} = {i};") })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut files = files_fixture();
+        let mut open = Editor::new("src/main.rs".into(), &text, false);
+        open.scroll = 200;
+        files.open = Some(open);
+
+        let mut b = buf(COLS, ROWS);
+        let view = View { page: Page::Files, ..Default::default() };
+        let sys = SysDto::default();
+        let scene = Scene { files: Some(&files), diff: None, ..Scene::new(&[], &sys) };
+        draw(&mut b, COLS, ROWS, &scene, &view, &Theme::default());
+
+        let geom = page_geom(COLS, ROWS, &view);
+        let inner = files_body_inner(&geom, files.depth());
+        let w = minimap::width(inner.width);
+        assert_eq!(w, minimap::MINIMAP_W, "the file column is wide enough for a minimap");
+
+        let strip = |y: u16| -> String {
+            (inner.right() - w..inner.right())
+                .filter_map(|x| b.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect()
+        };
+        let body_h = inner.height - 1;
+        let rows: Vec<String> = (inner.y..inner.y + body_h).map(strip).collect();
+        assert!(
+            rows.iter().any(|r| r.contains('█') || r.contains('▓') || r.contains('▒')),
+            "the minimap drew no texture at all: {rows:#?}"
+        );
+
+        // The window is marked with a background, so it is read off the cells'
+        // colour rather than their glyphs.
+        let lit: Vec<u16> = (inner.y..inner.y + body_h)
+            .filter(|&y| {
+                b.cell((inner.right() - w, y)).map(|c| c.bg) == Some(Theme::default().selection)
+            })
+            .collect();
+        assert!(!lit.is_empty(), "the window was not marked on the minimap");
+        // …and it is where the scroll actually is: two hundred lines into four
+        // hundred is the middle of the strip, not the top of it.
+        let want = minimap::row_of(200, body_h, 400);
+        assert_eq!(lit[0], inner.y + want, "the marker is not over the rows on screen");
+        assert!(
+            lit.iter().max().copied() < Some(inner.y + body_h),
+            "the marker ran off the bottom of the strip"
+        );
+    }
+
+    /// Below the floor the file keeps its width and the minimap is dropped —
+    /// never squeezed, because a scale you cannot read is cells of code spent
+    /// on nothing.
+    #[test]
+    fn a_narrow_file_column_keeps_the_file_and_drops_the_minimap() {
+        let mut files = files_fixture();
+        // Two more columns of trail on an 80-cell stage leaves the file too
+        // little for both.
+        for dir in ["src/a", "src/a/b"] {
+            files.land(
+                dir.into(),
+                vec![FileEntry {
+                    name: "x.rs".into(),
+                    path: format!("{dir}/x.rs"),
+                    is_dir: false,
+                    changed: false,
+                }],
+            );
+        }
+        let view = View { page: Page::Files, ..Default::default() };
+        let geom = page_geom(80, 24, &view);
+        let inner = files_body_inner(&geom, files.depth());
+        assert_eq!(minimap::width(inner.width), 0, "a narrow column still drew a minimap");
     }
 
     #[test]
@@ -9218,25 +9747,27 @@ mod tests {
     #[test]
     fn the_tree_cursor_stops_at_both_ends() {
         let mut files = files_fixture();
-        files.sel = 0;
-        files.move_sel(-1);
-        assert_eq!(files.sel, 0);
+        files.move_sel(-5);
+        assert_eq!(files.sel(), 0);
         for _ in 0..5 {
             files.move_sel(1);
         }
-        assert_eq!(files.sel, 1, "two entries, so the last index is 1");
+        assert_eq!(files.sel(), 1, "two entries, so the last index is 1");
     }
 
     #[test]
     fn walking_up_stops_at_the_workspace_root() {
-        let mut files = files_fixture();
-        files.dir = "src/core/deep".into();
-        assert_eq!(files.parent().as_deref(), Some("src/core"));
-        files.dir = "src".into();
+        let up = |dir: &str| {
+            Files {
+                cols: vec![Column { dir: dir.to_string(), ..Default::default() }],
+                ..Default::default()
+            }
+            .parent()
+        };
+        assert_eq!(up("src/core/deep").as_deref(), Some("src/core"));
         // One level above `src` is the root, spelled as the empty path.
-        assert_eq!(files.parent().as_deref(), Some(""));
-        files.dir = String::new();
-        assert_eq!(files.parent(), None, "the root must not escape the workspace");
+        assert_eq!(up("src").as_deref(), Some(""));
+        assert_eq!(up(""), None, "the root must not escape the workspace");
     }
 
     /// The buffer is client-side now, so the guarantee that replaced

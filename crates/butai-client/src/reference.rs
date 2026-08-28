@@ -367,17 +367,34 @@ still passes through the rows below it.
 # Files
 
     alt-o       the files space
-    j / k       move
-    enter       open a file, or descend into a directory
-    ..          the row back up
+    j / k       move within a column
+    left  h     up a level, or out of the file
+    right l     into a directory, or open a file
+    space       peek: read a file, keep the keyboard here
+    enter       open a file, and go to it
+    backspace   up a directory
     /           find, across the workspace
     e           edit the open file
     C-s         save
     esc         leave edit mode
     x           delete the file the cursor is on
 
-The tree is on the left and the file on the right. A yellow marker means
-git sees a change in that file, or somewhere under that directory.
+The browser is on the left and the file on the right. A yellow marker
+means git sees a change in that file, or somewhere under that directory.
+
+Every directory on the way to where you are is a column of its own, side
+by side, with the row you came through still marked — so where you are is
+a shape rather than a line of text. `left` and `right` walk it, and the
+columns to the right of the cursor are kept: walking back and forward
+again asks the daemon nothing.
+
+`space` and `enter` both read the file the cursor is on, and differ only
+in where they leave the keyboard. `enter` gives it to the file; `space`
+keeps it here, so the next `j` walks to the next name and shows you that
+one instead. That is what makes it a peek.
+
+Down the right of the file is a minimap: the whole of it as a column of
+texture, with the part you are reading marked on it. Click to jump.
 
 `x` asks first, and the box opens on `no`. It is the only key here that
 git cannot undo — the changes rail's `x` puts a file back to what the

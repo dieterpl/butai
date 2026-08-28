@@ -462,6 +462,14 @@ impl TerminalPane {
         cmd.env("BUTAI_SOCKET", spec.socket);
         cmd.env("BUTAI_PANE", spec.pane.to_string());
         cmd.env("BUTAI_WORKSPACE", spec.ws.to_string());
+        // `$BUTAI_HOME` is deliberately *not* re-set here, and that is not an
+        // omission. A pane starts from a snapshot of the daemon's own
+        // environment, and the daemon's environment is where `paths::butai_dir`
+        // read it from in the first place — so a daemon running out of
+        // `~/.butai-dev` hands every pane the same answer by inheritance, and a
+        // `butai` shelled out inside one reaches that butai rather than the
+        // real one. `$BUTAI_SOCKET` needs the line above precisely because it
+        // is the exception: `daemon::serve` binds a socket without one set.
         for (k, v) in spec.env {
             cmd.env(k, v);
         }

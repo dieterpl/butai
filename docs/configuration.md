@@ -390,17 +390,20 @@ draw. See [DSK](workbench.md#dsk).
 
 ### `[update]`
 
-Whether butai looks for a newer release of itself, which one you already turned
-down, and whether the daemon may be told to update itself.
+Whether butai looks for a newer release of itself, which releases count, which
+one you already turned down, and whether the daemon may be told to update
+itself.
 
 The one table both halves read — a key at a time. `check` and
-`declined_version` are the **client**'s; `allow_remote` is the **daemon**'s.
-Neither struct declares the other's keys and serde ignores what it does not
-know, so they share the table without either seeing the other's part.
+`declined_version` are the **client**'s; `allow_remote` is the **daemon**'s;
+`channel` is the one they both declare, because both of them check. Neither
+struct declares the other's keys and serde ignores what it does not know, so
+they share the table without either seeing the other's part.
 
 ```toml
 [update]
 check = true                 # default
+channel = "stable"           # default; "dev" takes the prereleases too
 declined_version = "1.1.0"   # written for you; see below
 allow_remote = false         # default
 ```
@@ -408,8 +411,31 @@ allow_remote = false         # default
 | key | type | default | read by | effect |
 |---|---|---|---|---|
 | `check` | bool | `true` | client | Ask GitHub for the latest release at start, and every six hours after. This is the only outbound request a butai client makes; everything else in it talks to a Unix socket. |
+| `channel` | `"stable"` \| `"dev"` | `"stable"` | both | Which releases count as newer. `dev` includes the prereleases cut from `develop`. |
 | `declined_version` | string | unset | client | A release you answered **no** to. Written by the prompt, not by you. |
 | `allow_remote` | bool | `false` | daemon | Let a client attached to this daemon make it update *itself* — `POST /v1/update`, and `butai update --daemon` on top of it. |
+
+**The two channels are two sets of tags, not two ways of asking.** A version
+with a prerelease identifier — the `-` in `1.3.0-dev.1` — is cut from `develop`
+and published as a GitHub prerelease; a bare one is cut from `main`. GitHub
+keeps a prerelease out of `releases/latest`, which is the single question
+`stable` asks, so a stable install cannot be offered a dev build even by
+accident. `dev` reads the release list instead and takes the highest version in
+it — prereleases compare properly there, so `1.3.0-dev.10` is ahead of
+`1.3.0-dev.9`, and the `1.3.0` they were leading to is ahead of both. A dev
+install therefore ends up on stable when stable catches up, which is the same
+build by then.
+
+It belongs to the install rather than the machine, and lands here because the
+config is the only per-install thing there is: a dev butai run with its own
+`BUTAI_HOME` carries this key in its own `config.toml`, and the stable one
+beside it never reads that file. Installing a dev build does not set it —
+`scripts/install.sh` prints the two lines to add. SETTINGS → ABOUT → **release
+channel** writes them for you.
+
+`butai update --daemon` and `POST /v1/update` follow the channel configured on
+the machine the *daemon* is on, not the client's. The daemon is the thing being
+replaced, and its track is a property of the install there.
 
 **`allow_remote` is off by default, and the default is the interesting half.**
 The socket's only access control is the `0700` on its directory, and over an
@@ -646,21 +672,23 @@ file fell back to defaults, and something said so".
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `BUTAI_SOCKET` | everything | The daemon socket. `--socket` beats it; it is exported into every pane, and passed to a daemon the client auto-spawns. |
+| `BUTAI_HOME` | everything | Moves `~/.butai` whole — socket, lock, config, themes, logs, `session.json`, `panes/`, `scratch/`. `$HOME` is untouched, so ssh config, shell profile and your repositories stay where they are. Panes inherit it. Empty is not an override. This is how a build off a branch runs beside the butai you use; see [development.md](development.md#running-a-second-daemon). |
+| `BUTAI_SOCKET` | everything | The daemon socket. It is exported into every pane, and passed to a daemon the client auto-spawns. Precedence: `--socket` beats `BUTAI_HOME` beats this — because this is the one that is routinely *inherited* rather than typed, so a `BUTAI_HOME=… butai` run inside a pane must not be answered with the enclosing daemon's socket. |
 | `BUTAI_WORKSPACE` | the CLI | Default for `--ws`. Exported into every pane, so a command run inside butai acts on its own workspace. |
 | `BUTAI_PANE` | the CLI | Which pane a command is running in. Its *absence* is the test for "not inside butai" — there is no separate marker variable. |
 | `BUTAI` | the client | Set in every pane to the daemon's socket; the nesting guard compares it against the socket being attached to, so attaching a *different* daemon from inside a pane is still allowed. |
 | `BUTAI_THEME_DIR` | client | Overrides `~/.butai/themes`. |
-| `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this. |
+| `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this, or `BUTAI_HOME`, which takes it along. |
 | `BUTAI_NO_UPDATE_CHECK` | client | Non-empty and not `0` stops the update check entirely, whatever `[update] check` says. For a butai a package manager owns. |
 | `BUTAI_NO_HANDOFF` | the CLI | Non-empty and not `0` stops bare `butai` over ssh from handing its machine to the workbench you are already looking at. |
 | `SSH_CONNECTION` | the CLI | Its presence (plus a tty) is what makes that handoff probe run at all, so a local `butai` never pays for it. |
 | `SHELL` | daemon | Fallback shell when `default_shell` is unset. |
 | `RUST_LOG` | daemon | `tracing` filter for `~/.butai/logs/`; defaults to `info`. |
-| `HOME` | both | Resolves `~/.butai`, and the login `bin` directories added to a pane's `PATH`. |
+| `HOME` | both | Resolves `~/.butai` when `BUTAI_HOME` is unset, and the login `bin` directories added to a pane's `PATH`. |
 | `XDG_RUNTIME_DIR` | client, CLI | Where ssh forward sockets and the `butai standalone` socket directory go; falls back to the system temp directory. |
 | `TERM`, `COLORTERM` | — | *Set* by the daemon for every pane's child: `xterm-256color` and `truecolor`. |
-| `BUTAI_VERSION`, `BUTAI_INSTALL_DIR` | `scripts/install.sh` | Install a specific tag, or install somewhere other than `/usr/local/bin` → `~/.local/bin`. |
+| `BUTAI_VERSION`, `BUTAI_INSTALL_DIR` | `scripts/install.sh` | Install a specific tag, or install somewhere other than `/usr/local/bin` → `~/.local/bin`. `BUTAI_VERSION` is the only way to reach a dev prerelease, which the installer never finds on its own. |
+| `BUTAI_DEV_HOME` | `scripts/vet.sh` | Where `--run` keeps its state; default `~/.butai-dev`. |
 
 ## Examples
 

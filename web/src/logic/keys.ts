@@ -591,15 +591,35 @@ export class Keys {
     const s = SURFACES[name];
     if (!s) return false;
     const table = s.table(this.app);
-    const arrows: Record<string, VerbId> = { arrowdown: VerbId.Down, arrowup: VerbId.Up };
+    // `←`/`→` join `↑`/`↓` here for the same reason and on the same terms: they
+    // are `h` and `l` under the names a keyboard gives them, and the horizontal
+    // pair only means anything on a surface whose table binds them — which is
+    // the Finder trail on FILES and nothing else.
+    const arrows: Record<string, VerbId> = {
+      arrowdown: VerbId.Down,
+      arrowup: VerbId.Up,
+      arrowleft: VerbId.TreeUp,
+      arrowright: VerbId.TreeInto,
+    };
     const arrow = arrows[keyName(e)];
     // `C-s` is spelled with the control flag rather than as a character.
     const spelled = e.ctrlKey ? "C-" + keyName(e) : keyName(e);
-    const v = arrow ? { id: arrow } : table.find((x) => x.key === spelled);
+    // An arrow still has to be *in the table* to do anything. Without that check
+    // `←` would walk a trail on the PROCESSES rail, which has no columns — the
+    // vertical pair gets away with skipping it because every list has rows.
+    const bound = arrow ? table.find((x) => x.id === arrow) : undefined;
+    const v = bound ?? table.find((x) => x.key === spelled);
     if (!v) return false;
     switch (v.id) {
       case VerbId.Down: this.move(name, 1); return true;
       case VerbId.Up: this.move(name, -1); return true;
+      // Walking the trail and peeking are the row's own verbs — the registry
+      // says `files.row` reaches all three — so they go through the same click
+      // path every other row verb does rather than growing a second mechanism.
+      case VerbId.TreeUp:
+      case VerbId.TreeInto:
+      case VerbId.Peek:
+        return this.clickVerb(name, v.id);
       case VerbId.FocusCycle: this.app.cycleFocus(e.shiftKey ? -1 : 1); return true;
       case VerbId.FocusStage: this.app.setFocus("stage"); return true;
       case VerbId.Help: this.app.showHelp(); return true;

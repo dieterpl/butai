@@ -186,8 +186,19 @@ more: the rest of the rails' table is about a project, and this page is not in
 one. The NEEDS YOU tray answers the pointer as the fleet does — a click puts the
 cursor on the agent the copy stands for.
 
-**FILES / DOCS** — `j` `k` move · `enter` open or descend · `backspace` up ·
-`/` find · `e` edit · `C-s` save · `esc` stop editing · `x` delete · `q` close.
+**FILES / DOCS** — `j` `k` move · `←` `h` up a level · `→` `l` into · `space`
+peek · `enter` open · `backspace` up · `/` find · `e` edit · `C-s` save · `esc`
+stop editing · `x` delete · `q` close.
+
+The browser is a trail of columns — every directory on the way to where you are,
+side by side — so `←` and `→` walk it and the columns to the right of the cursor
+are kept: `←` then `→` asks the daemon nothing. From inside the file, `←` hands
+the keyboard back to the browser.
+
+`space` and `enter` both read the file the cursor is on, and differ only in where
+they leave the keyboard: `enter` gives it to the file, `space` keeps it in the
+browser so the next `j` walks to the next name and shows you that one. That is
+what makes `space` a peek rather than a second `enter`.
 
 `x` deletes the file the cursor is on, and it asks first — the box names the
 path and opens on "no", as discarding does. It is the one key here that git

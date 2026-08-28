@@ -423,12 +423,27 @@ pub async fn run(
     // Whether to look at all: the config key, the environment opt-out, and
     // whether this client is one that could carry an update out.
     let mut updates_enabled = updates && crate::update::enabled(config.update.check);
+    // Which releases to ask about. Held rather than read from `config` at each
+    // check, because the SETTINGS row changes it and the next check has to be
+    // the one that was just asked for.
+    let mut update_channel = config.update.channel;
     // The newest release, once a check has found one. Held so `:update` and the
     // SETTINGS row can reopen the question without asking GitHub again.
     let mut update_offer: Option<crate::update::Offer> = None;
     // The version already turned down — from the file, then from this session's
     // own answer, so declining does not have to survive a reload to take effect.
     let mut declined_update = config.update.declined_version.clone();
+    // The daemon this client asked to restart, until it is back. A daemon going
+    // down is ordinarily news — the link died, the machine went away — and the
+    // notice for it says so. One *we* stopped a moment ago is not news, and
+    // reporting it as "event stream closed" would leave the footer explaining
+    // the restart as a fault right after somebody agreed to it.
+    let mut restarting: Option<usize> = None;
+    // Whether the daemon has already been asked about. A mismatch is reported
+    // by every handshake, and the stage makes one a second while a daemon is
+    // restarting, so this is what keeps one answer from being one question per
+    // reconnect.
+    let mut skew_prompted = false;
     // Whether the box has been put up yet. The launch check raises it; a later
     // one leaves a footer notice instead, because a modal takes the keyboard
     // (see [`handle_input`]) and doing that to somebody mid-sentence in an agent
@@ -481,6 +496,7 @@ pub async fn run(
         remotes: config.remote.iter().map(remote_label).collect(),
         bindings: (keymap.len(), config.keys.len()),
         update_check: config.update.check,
+        update_channel: config.update.channel,
         ..Default::default()
     };
     // The HELP page's topic and reading position. Nothing to seed and nothing to
@@ -601,7 +617,7 @@ pub async fn run(
                 match fetch_dir(&daemons, &hosts, &view, view.page, "").await {
                     Ok(entries) => {
                         let entries = tree_rows(view.page, entries, "");
-                        page_tree(view.page, &mut files, &mut docs).entries = entries;
+                        page_tree(view.page, &mut files, &mut docs).land(String::new(), entries);
                     }
                     Err(e) => view.flash = Some(format!("tree: {e:#}")),
                 }
@@ -684,7 +700,14 @@ pub async fn run(
                 // that socket was ssh's, it went with it, and nothing else
                 // re-runs `ssh -L`. So a link of ours gets rebuilt here.
                 Some((d, DaemonEvent::Lost(why))) => {
-                    view.flash = Some(format!("daemon: {why}"));
+                    // The stream drops while a restart we asked for is in
+                    // flight, and it arrives *after* the answer, since the
+                    // restart is awaited on this loop. Saying what is happening
+                    // beats reporting the symptom of it.
+                    view.flash = Some(match restarting {
+                        Some(r) if r == d => restarting_notice(),
+                        _ => format!("daemon: {why}"),
+                    });
                     redial_lost(
                         d,
                         &hosts,
@@ -705,6 +728,14 @@ pub async fn run(
                 Some((d, DaemonEvent::Connected)) => {
                     if let Some(host) = hosts.get(d).and_then(Option::as_ref) {
                         downed.remove(host);
+                    }
+                    // The other end of a restart this client asked for: the
+                    // question was "is this daemon the right build", so the
+                    // answer is the version it came back on.
+                    if restarting == Some(d) {
+                        restarting = None;
+                        view.flash =
+                            Some(format!("daemon is on {}", crate::update::CURRENT));
                     }
                     dirty = true;
                 }
@@ -804,8 +835,25 @@ pub async fn run(
                 // works — but it is the whole difference between "butai is
                 // broken" and "restart the daemon", and the client is the only
                 // one holding both numbers.
+                //
+                // So it asks. The notice this used to be was a footer line
+                // naming a command to run *outside* butai, which on a track
+                // that cuts builds every few days is a sentence you read and
+                // step over; the client is holding a socket to the daemon that
+                // is wrong, and the answer is one keystroke. The line stays as
+                // the fallback for when the box cannot go up.
                 Some(ServerMsg::Hello { server_version, .. }) => {
                     if let Some(notice) = skew_notice(server_version.as_deref()) {
+                        // Never over another modal, and once per session: the
+                        // stage re-dials every second while a daemon is down,
+                        // and a question that reopens on each attempt is not a
+                        // question. Same two rules the update prompt keeps.
+                        if view.overlay.is_none() && !skew_prompted {
+                            let host = active_host(&daemons, &hosts, &view);
+                            view.overlay =
+                                Some(skew_overlay(server_version.as_deref(), host));
+                            skew_prompted = true;
+                        }
                         view.flash = Some(notice);
                         dirty = true;
                     }
@@ -982,6 +1030,16 @@ pub async fn run(
                         }
                         dirty = true;
                     }
+                    Flow::RestartDaemon => {
+                        match restart_daemon_here(&daemons, &hosts, &view).await {
+                            Ok(()) => {
+                                restarting = Some(active_daemon(&daemons, &hosts, &view));
+                                view.flash = Some(restarting_notice());
+                            }
+                            Err(e) => view.flash = Some(format!("restart: {e:#}")),
+                        }
+                        dirty = true;
+                    }
                     // `:update` means "update the butai this tab is looking at".
                     // On a tab from another machine that is the daemon over
                     // there, and updating this binary instead would leave it
@@ -1007,7 +1065,7 @@ pub async fn run(
                             None if updates => {
                                 view.flash = Some("checking for updates…".to_string());
                                 update_forced = true;
-                                spawn_update_check(&update_tx);
+                                spawn_update_check(&update_tx, update_channel);
                             }
                             None => {
                                 view.flash =
@@ -1104,6 +1162,24 @@ pub async fn run(
                                 updates_enabled = updates && crate::update::enabled(on);
                                 if let Err(e) = crate::config::Config::save_update_check(on) {
                                     view.flash = Some(format!("config.toml: {e}"));
+                                }
+                            }
+                            Edit::UpdateChannel(channel) => {
+                                settings.update_channel = channel;
+                                update_channel = channel;
+                                // The offer on the table came from the other
+                                // track, so it is not an answer to the question
+                                // now being asked. The next check replaces it.
+                                update_offer = None;
+                                settings.update_available = None;
+                                if let Err(e) =
+                                    crate::config::Config::save_update_channel(channel)
+                                {
+                                    view.flash = Some(format!("config.toml: {e}"));
+                                } else if updates_enabled {
+                                    view.flash =
+                                        Some(format!("checking the {} channel…", channel.as_str()));
+                                    spawn_update_check(&update_tx, update_channel);
                                 }
                             }
                             Edit::Geom => {
@@ -1394,10 +1470,12 @@ pub async fn run(
                         load_tree(&daemons, &hosts, &mut view, &mut files, &mut docs, dir).await;
                         dirty = true;
                     }
-                    Flow::OpenFile(path) => {
+                    Flow::OpenFile { path, focus } => {
                         // Opening over a changed buffer would lose it silently,
                         // so it refuses once and arms the discard, exactly as
-                        // closing does.
+                        // closing does. A peek is held to the same rule: it
+                        // replaces the buffer, so it can lose work just as an
+                        // open can.
                         let page = view.page;
                         let blocked = page_tree(page, &mut files, &mut docs)
                             .open
@@ -1406,7 +1484,14 @@ pub async fn run(
                         if !blocked {
                             match fetch_file(&daemons, &hosts, &view, &path).await {
                                 Ok(open) => {
-                                    page_tree(page, &mut files, &mut docs).open = Some(open)
+                                    page_tree(page, &mut files, &mut docs).open = Some(open);
+                                    // Enter opens *into* the file; Space leaves
+                                    // the keyboard in the browser so the next
+                                    // `j` walks to the next name rather than
+                                    // scrolling what it just showed you.
+                                    if focus {
+                                        view.focus = Focus::Stage;
+                                    }
                                 }
                                 Err(e) => view.flash = Some(format!("file: {e:#}")),
                             }
@@ -1461,7 +1546,7 @@ pub async fn run(
                                 // Re-list rather than drop the row locally: the
                                 // listing also carries the `changed` markers,
                                 // and deleting a tracked file changes them.
-                                let dir = tree.dir.clone();
+                                let dir = tree.dir().to_string();
                                 load_tree(&daemons, &hosts, &mut view, &mut files, &mut docs, dir)
                                     .await;
                             }
@@ -2060,7 +2145,7 @@ pub async fn run(
                 }
             }
             _ = update_tick.tick(), if updates_enabled => {
-                spawn_update_check(&update_tx);
+                spawn_update_check(&update_tx, update_channel);
             }
             _ = slow.tick() => {
                 view.tick = view.tick.wrapping_add(1);
@@ -2099,6 +2184,22 @@ fn update_overlay(version: &str) -> Overlay {
     })
 }
 
+/// A chosen option from the release-channel row, as an [`Edit`].
+///
+/// A word the enum does not know cannot come from the list — the options *are*
+/// [`Channel::ALL`] — so an unknown one is a row that has drifted from its
+/// options rather than a choice to act on, and changing nothing is the honest
+/// answer to it.
+///
+/// [`Channel::ALL`]: crate::update::Channel::ALL
+fn channel_edit(chosen: &str) -> chrome::settings::Edit {
+    use chrome::settings::Edit;
+    match crate::update::Channel::from_name(chosen) {
+        Some(channel) => Edit::UpdateChannel(channel),
+        None => Edit::Moved,
+    }
+}
+
 /// Ask the active tab's daemon to update itself.
 ///
 /// The whole job goes over in one request — check, download, verify, swap,
@@ -2134,16 +2235,93 @@ fn update_daemon_overlay(host: &str) -> Overlay {
     })
 }
 
+/// Which box a version mismatch raises, by where the daemon is.
+///
+/// The two are different questions rather than one question with a parameter.
+/// A daemon on this machine is replaced by *this build*, which is running and
+/// needs no download; one on another machine has to fetch its own, and this
+/// client's version says nothing about what it would get.
+fn skew_overlay(theirs: Option<&str>, host: Option<&str>) -> Overlay {
+    match host {
+        Some(host) => update_daemon_overlay(host),
+        None => restart_daemon_overlay(theirs),
+    }
+}
+
+/// The same question for the daemon on this machine, where the build being
+/// asked for is the one already running.
+///
+/// Deliberately not the update box: nothing is downloaded and nothing on disk
+/// is replaced. The client's binary is what a local daemon is spawned from, so
+/// stopping the old one *is* the upgrade — which is why this can be offered
+/// even when the update check is off, or when there is no release for this
+/// build at all.
+fn restart_daemon_overlay(theirs: Option<&str>) -> Overlay {
+    let mine = crate::update::CURRENT;
+    // The absent case is the older daemon by definition — see `skew_notice`.
+    let header = match theirs {
+        Some(theirs) => format!("the daemon is {theirs}, this client is {mine} — restart it?"),
+        None => format!("the daemon predates this client ({mine}) — restart it?"),
+    };
+    Overlay::Confirm(chrome::ConfirmOverlay {
+        title: "RESTART".into(),
+        header,
+        yes: false,
+        kind: chrome::ConfirmKind::RestartDaemon,
+    })
+}
+
+/// What the footer says while a daemon this client stopped is coming back.
+///
+/// One function because two places say it: the answer to the box, and the
+/// stream loss that follows a moment later and would otherwise overwrite it.
+fn restarting_notice() -> String {
+    format!("daemon restarting on {} — your workspaces come back", crate::update::CURRENT)
+}
+
+/// Stop the daemon behind the active tab so it comes back on this build.
+///
+/// The wait is the part that matters, and it is the same one `butai update`
+/// does: `kill-server` is acknowledged before the session snapshot is written
+/// and the socket closed, and a connect in that window reaches the old build on
+/// its way out. Once it is gone, [`crate::conn::connect_or_spawn`] starts the
+/// replacement from this client's own binary — the stage then reconnects on its
+/// own retry, the way it does for any restart.
+///
+/// Refuses on a tab from another machine. The box is only ever raised for a
+/// local one, but tabs move under an open overlay, and `kill-server` down a
+/// forwarded socket would stop a daemon on a machine this build is not even
+/// installed on.
+async fn restart_daemon_here(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &View,
+) -> Result<()> {
+    if let Some(host) = active_host(daemons, hosts, view) {
+        anyhow::bail!(
+            "this tab is on {host} now — `:update` asks that daemon to update itself instead"
+        );
+    }
+    let d = active_daemon(daemons, hosts, view);
+    let socket = daemons.get(d).context("no daemon behind the active tab")?.socket().to_path_buf();
+    crate::update::stop_daemon(&socket).await?;
+    drop(crate::conn::connect_or_spawn(&socket).await?);
+    Ok(())
+}
+
 /// Ask GitHub whether there is a newer release, off the event loop.
 ///
 /// Same shape as [`spawn_git_refresh`], and for the same reason its doc comment
 /// gives: awaited here, a network call stops the client dead for as long as it
 /// takes. `ureq` is blocking on top of that, so the work goes to a blocking
 /// thread rather than parking a runtime worker on a socket.
-fn spawn_update_check(tx: &UnboundedSender<Result<Option<crate::update::Offer>>>) {
+fn spawn_update_check(
+    tx: &UnboundedSender<Result<Option<crate::update::Offer>>>,
+    channel: crate::update::Channel,
+) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let found = tokio::task::spawn_blocking(crate::update::check)
+        let found = tokio::task::spawn_blocking(move || crate::update::check(channel))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("the update check did not finish: {e}")));
         tx.send(found).ok();
@@ -2170,21 +2348,14 @@ fn spawn_update_check(tx: &UnboundedSender<Result<Option<crate::update::Offer>>>
 /// file screen. What is left here is a project's own files, on every page that
 /// shows files.
 ///
-/// `..` is an ordinary directory row rather than a special case, so Enter and
-/// the mouse take the path they already take for a directory. `Backspace`
-/// already walked up, but nothing on screen said so, so descending into a folder
-/// read as a one-way trip.
-fn tree_rows(
-    _page: Page,
-    mut entries: Vec<chrome::FileEntry>,
-    dir: &str,
-) -> Vec<chrome::FileEntry> {
-    if let Some(up) = chrome::parent_of(dir) {
-        entries.insert(
-            0,
-            chrome::FileEntry { name: "..".into(), path: up, is_dir: true, changed: false },
-        );
-    }
+/// **There is no `..` row any more, and the trail is why.** It was added because
+/// descending into a folder read as a one-way trip: `Backspace` walked up, but
+/// nothing on screen said so. The Finder columns say it — the directory you came
+/// from is the column to the left, still listed, with the row you came through
+/// still marked — and `←` walks back to it. Keeping `..` on top of that would
+/// put a row in every column whose only meaning is "the column immediately left
+/// of this one", which is the sort of thing you have to *learn* not to click.
+fn tree_rows(_page: Page, entries: Vec<chrome::FileEntry>, _dir: &str) -> Vec<chrome::FileEntry> {
     entries
 }
 
@@ -2269,10 +2440,7 @@ async fn load_tree(
     match fetch_dir(daemons, hosts, view, page, &dir).await {
         Ok(entries) => {
             let entries = tree_rows(page, entries, &dir);
-            let tree = page_tree(page, files, docs);
-            tree.dir = dir;
-            tree.entries = entries;
-            tree.sel = 0;
+            page_tree(page, files, docs).land(dir, entries);
         }
         Err(e) => view.flash = Some(format!("tree: {e:#}")),
     }
@@ -3042,6 +3210,7 @@ fn settings_click(
                 Edit::DefaultAgent(None)
             }
             RowId::DefaultAgent => Edit::DefaultAgent(Some(chosen)),
+            RowId::UpdateChannel => channel_edit(&chosen),
             _ => Edit::Moved,
         }));
     }
@@ -4477,6 +4646,7 @@ enum Flow {
     /// daemon there. Stays in the loop, unlike [`Flow::Update`] — nothing local
     /// is being replaced, so the terminal never has to be given back.
     UpdateDaemon,
+    RestartDaemon,
     /// Open the agent picker; the list comes from the daemon, so the loop
     /// fetches it rather than the key handler.
     PickAgent,
@@ -4554,7 +4724,13 @@ enum Flow {
     /// (Re)list a directory on the Files page.
     ListDir(String),
     /// Open the file the cursor is on.
-    OpenFile(String),
+    /// Read a file into the viewer. `focus` hands it the keyboard, which is
+    /// what Enter does and what Space deliberately does not — see
+    /// [`handle_files_key`].
+    OpenFile {
+        path: String,
+        focus: bool,
+    },
     /// Open a file and scroll to a line — what a search hit resolves to.
     OpenFileAt {
         path: String,
@@ -4689,6 +4865,21 @@ enum Spawned {
 /// Navigation is local — moving the cursor down a directory listing is not the
 /// daemon's business — but opening a row needs a fetch, so those return a flow
 /// for the loop to act on.
+///
+/// ## The four Finder keys
+///
+/// `←` and `→` walk the trail, `Space` peeks and `Enter` opens. The pair that
+/// matters is the last one: both put a file in the viewer, and they differ in
+/// where they leave the keyboard. `Enter` moves it onto the file, because you
+/// asked for the file; `Space` leaves it in the browser, so the next `j` walks
+/// to the next name and shows you that one instead. That is what makes it a
+/// *peek* — a way to read down a directory a file at a time without committing
+/// to any of them.
+///
+/// `→` deliberately does not fetch when it does not have to. The trail keeps the
+/// columns to the right of the cursor, so walking `←` and back `→` is two local
+/// moves and no round trip — which over ssh is the difference between browsing
+/// and waiting.
 fn handle_files_key(k: event::KeyEvent, view: &mut View, files: &mut Files) -> Option<Flow> {
     // While editing, the buffer has the keyboard: every printable character is
     // text, so nothing below may claim one. Only Esc and C-s get out.
@@ -4697,6 +4888,26 @@ fn handle_files_key(k: event::KeyEvent, view: &mut View, files: &mut Files) -> O
             return Some(handle_editor_key(k, open));
         }
     }
+    // What Enter and `→` both do to the row under the cursor. One function so
+    // the two keys cannot come to mean different things, which is the same rule
+    // a click follows by going through this handler at all.
+    let descend = |files: &mut Files| -> Option<Flow> {
+        let e = files.selected()?;
+        if !e.is_dir {
+            return Some(Flow::OpenFile { path: e.path.clone(), focus: true });
+        }
+        let path = e.path.clone();
+        Some(if files.go_right() { Flow::Continue } else { Flow::ListDir(path) })
+    };
+    // What `←` and Backspace both do. Stepping between held columns first, and
+    // only asking the daemon when the trail does not reach that far — which it
+    // does not when you have arrived somewhere deep without walking to it.
+    let ascend = |files: &mut Files| -> Option<Flow> {
+        if files.go_left() {
+            return Some(Flow::Continue);
+        }
+        files.parent().map(Flow::ListDir)
+    };
     match k.code {
         event::KeyCode::Down | event::KeyCode::Char('j') if view.focus != Focus::Stage => {
             files.move_sel(1);
@@ -4706,17 +4917,31 @@ fn handle_files_key(k: event::KeyEvent, view: &mut View, files: &mut Files) -> O
             files.move_sel(-1);
             Some(Flow::Continue)
         }
-        event::KeyCode::Enter => {
-            let e = files.selected()?;
-            Some(if e.is_dir {
-                Flow::ListDir(e.path.clone())
-            } else {
-                Flow::OpenFile(e.path.clone())
-            })
+        // From inside the file, `←` is still "back": it hands the keyboard to
+        // the browser rather than walking the trail, because that is the level
+        // you are coming up to.
+        event::KeyCode::Left | event::KeyCode::Char('h') if view.focus == Focus::Stage => {
+            view.focus = Focus::Agents;
+            Some(Flow::Continue)
         }
+        event::KeyCode::Left | event::KeyCode::Char('h') => ascend(files),
+        event::KeyCode::Right | event::KeyCode::Char('l') if view.focus != Focus::Stage => {
+            descend(files)
+        }
+        // Quick Look. A directory has nothing to peek at — its contents are what
+        // `→` shows — so it is left alone rather than made to mean a second
+        // descend key.
+        event::KeyCode::Char(' ') if view.focus != Focus::Stage => {
+            let e = files.selected()?;
+            if e.is_dir {
+                return Some(Flow::Continue);
+            }
+            Some(Flow::OpenFile { path: e.path.clone(), focus: false })
+        }
+        event::KeyCode::Enter => descend(files),
         // Backspace walks up; at the root it does nothing rather than escaping
         // the workspace.
-        event::KeyCode::Backspace => files.parent().map(Flow::ListDir),
+        event::KeyCode::Backspace => ascend(files),
         // `x` is the destructive key everywhere else in this client — discard,
         // kill, drop, remove — so it is the one here too.
         //
@@ -5429,6 +5654,7 @@ fn handle_settings_key(
                         Edit::DefaultAgent(None)
                     }
                     RowId::DefaultAgent => Edit::DefaultAgent(Some(chosen)),
+                    RowId::UpdateChannel => channel_edit(&chosen),
                     _ => Edit::Moved,
                 }))
             }
@@ -5996,6 +6222,7 @@ fn confirm(view: &mut View) -> Flow {
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
         chrome::ConfirmKind::Update { .. } => Flow::Update,
         chrome::ConfirmKind::UpdateDaemon { .. } => Flow::UpdateDaemon,
+        chrome::ConfirmKind::RestartDaemon => Flow::RestartDaemon,
         chrome::ConfirmKind::MenuAction => match view.pending_menu_action.take() {
             Some(action) => {
                 view.confirmed_menu_action = Some(action);
@@ -6435,6 +6662,7 @@ fn page_click(
     docker: &mut Docker,
     sys: &butai_protocol::api::SysDto,
     ws: Option<&WorkspaceDetail>,
+    col: usize,
     row: usize,
 ) -> Flow {
     // A repeat opens; the enter goes through the page's own key handler so a
@@ -6442,17 +6670,18 @@ fn page_click(
     let enter = event::KeyEvent::new(event::KeyCode::Enter, event::KeyModifiers::NONE);
     match view.page {
         Page::Files | Page::Docs => {
-            if row >= files.entries.len() {
-                return Flow::Continue;
-            }
-            let again = files.sel == row;
-            files.sel = row;
             // Off the stage, or `j`/`k` would go on scrolling the open file
             // rather than walking the list just clicked in. `Agents` is what
             // "not the stage" is called here — it is the focus the page opens
             // with, so a click on the tree puts it back where it started.
             view.focus = Focus::Agents;
-            if !again {
+            // Clicking a column of the trail *is* walking back to it, so the
+            // click lands the cursor there before the second one opens anything
+            // — which is how a directory two levels up is reachable by pointer.
+            if files.point_at(col, row) {
+                return Flow::Continue;
+            }
+            if files.cols.get(col).is_none_or(|c| row >= c.entries.len()) {
                 return Flow::Continue;
             }
             handle_files_key(enter, view, files).unwrap_or(Flow::Continue)
@@ -6577,25 +6806,43 @@ fn page_wheel(
         return Some(Flow::Continue);
     }
     let tree = page_tree(view.page, files, docs);
-    let sel = if view.page.is_tree() { tree.sel } else { docker.sel };
-    match hit::on_page(cols, rows, view, sel, x, y) {
-        hit::PageTarget::Row(_) if view.page.is_tree() => {
+    let (sels, col) = page_cursors(view.page, tree, docker);
+    match hit::on_page(cols, rows, view, &sels, col, x, y) {
+        // The wheel moves the cursor in whichever column the pointer is over,
+        // not whichever has the keyboard — the rule the GIT page's three columns
+        // already follow.
+        hit::PageTarget::Row { col, .. } if view.page.is_tree() => {
+            tree.col = col.min(tree.depth().saturating_sub(1));
             tree.move_sel(delta);
             Some(Flow::Continue)
         }
-        hit::PageTarget::Row(_) => {
+        hit::PageTarget::Row { .. } => {
             docker.sel = (docker.sel as isize + delta).max(0) as usize;
             Some(Flow::Continue)
         }
-        // Right of the list: the open file scrolls here; the docker logs are a
-        // pane, so that one is still the daemon's scrollback.
-        hit::PageTarget::Body if view.page.is_tree() => {
+        // Right of the trail: the open file scrolls here; the docker logs are a
+        // pane, so that one is still the daemon's scrollback. Over the minimap
+        // it is the same file, so the wheel is the same scroll.
+        hit::PageTarget::Body | hit::PageTarget::Minimap(_) if view.page.is_tree() => {
             if let Some(open) = tree.open.as_mut() {
                 open.scroll_by(delta);
             }
             Some(Flow::Continue)
         }
         _ => None,
+    }
+}
+
+/// The cursors [`hit::on_page`] needs, and which of them has the keyboard.
+///
+/// One per column of the Finder trail, since each column scrolls under its own
+/// cursor; one for Docker, which has a single list. Built here rather than in
+/// `hit` so that module stays a function of the screen and a slice.
+fn page_cursors(page: Page, tree: &Files, docker: &Docker) -> (Vec<usize>, usize) {
+    if page.is_tree() {
+        (tree.cols.iter().map(|c| c.sel).collect(), tree.col)
+    } else {
+        (vec![docker.sel], 0)
     }
 }
 
@@ -6776,18 +7023,22 @@ fn paste_text(
     Flow::Continue
 }
 
-/// How many cells of chrome are drawn down the left of the text on this page.
+/// What this page's own state adds to the rectangles the screen already fixes.
 ///
-/// Line numbers over the open file on Files and Docs; the marker column and the
-/// two number columns over a diff. Zero everywhere else, and zero on a buffer
-/// being edited — the widget draws its own body with no gutter. A selection is
-/// clipped to start after it, so a copied function comes back as code rather
-/// than as code with a column of numbers welded to the front of every line.
+/// **The gutter** is how many cells of chrome are drawn down the left of the
+/// text: line numbers over the open file on Files and Docs; the marker column
+/// and the two number columns over a diff. Zero everywhere else, and zero on a
+/// buffer being edited — the widget draws its own body with no gutter. A
+/// selection is clipped to start after it, so a copied function comes back as
+/// code rather than as code with a column of numbers welded to the front of
+/// every line. The diff's answer depends on the patch *and* on the box, since
+/// the numbers are the first thing a narrow body gives up — which is why this is
+/// asked of the view rather than read off a constant.
 ///
-/// The diff's answer depends on the patch *and* on the box, since the numbers
-/// are the first thing a narrow body gives up — which is why this is asked of
-/// the view rather than read off a constant.
-fn text_gutter(
+/// **The depth** is how many columns the Files trail is holding, which is what
+/// decides how wide the browser is and therefore where the file column starts.
+/// Every rectangle on that page moves with it.
+fn page_metrics(
     view: &View,
     files: &Files,
     docs: &Files,
@@ -6795,8 +7046,9 @@ fn text_gutter(
     git: &chrome::Git,
     cols: u16,
     rows: u16,
-) -> u16 {
-    match view.page {
+) -> crate::selection::PageMetrics {
+    let depth = if view.page == Page::Docs { docs.depth() } else { files.depth() };
+    let gutter = match view.page {
         Page::Diff => diff.gutter_w(chrome::stage_rect(cols, rows, view).width),
         Page::Git => {
             let body = chrome::git_columns(chrome::page_geom(cols, rows, view).stage_box).body_box;
@@ -6810,7 +7062,8 @@ fn text_gutter(
             tree.open.as_ref().map(chrome::editor_gutter_w).unwrap_or(0)
         }
         _ => 0,
-    }
+    };
+    crate::selection::PageMetrics { gutter, depth }
 }
 
 /// A pasted run flattened onto one line, for the places that hold one.
@@ -7007,7 +7260,7 @@ fn run_bound(bound: keys::Bound, view: &mut View) -> Flow {
             if path.is_empty() {
                 Flow::ListDir(String::new())
             } else {
-                Flow::OpenFile(path)
+                Flow::OpenFile { path, focus: true }
             }
         }
         Bound::Local(Local::Theme(name)) => {
@@ -7169,7 +7422,7 @@ fn handle_input(
             // How wide the open file's line numbers are, so a selection can
             // start after them. Only the buffer knows, and only here is it in
             // scope — hence a value passed down rather than a lookup.
-            let gutter = text_gutter(view, files, docs, diff, git, *cols, *rows);
+            let metrics = page_metrics(view, files, docs, diff, git, *cols, *rows);
             match m.kind {
                 // The right button only ever opens the context menu, and only
                 // over something that has one — never over blank chrome.
@@ -7207,7 +7460,7 @@ fn handle_input(
                         // can be dragged over and copied out of, and a column of
                         // agent titles and the machines they are on is one of
                         // the more useful ones to be able to quote.
-                        drag.press(view, *cols, *rows, m.column, m.row, gutter);
+                        drag.press(view, *cols, *rows, m.column, m.row, metrics);
                         return fleet_click(fleet_hit, view);
                     }
                     // SETTINGS resolves its own clicks, because doing it in
@@ -7320,7 +7573,7 @@ fn handle_input(
                             m.column,
                             m.row,
                         );
-                        drag.press(view, *cols, *rows, m.column, m.row, gutter);
+                        drag.press(view, *cols, *rows, m.column, m.row, metrics);
                         if let Some(flow) = git_click(target, view, git, ch.as_ref(), here) {
                             return flow;
                         }
@@ -7333,15 +7586,30 @@ fn handle_input(
                         return Flow::Continue;
                     }
                     let tree = page_tree(view.page, files, docs);
-                    let sel = if view.page.is_tree() { tree.sel } else { docker.sel };
-                    match hit::on_page(*cols, *rows, view, sel, m.column, m.row) {
-                        hit::PageTarget::Row(row) => {
-                            drag.press(view, *cols, *rows, m.column, m.row, gutter);
+                    let (sels, col) = page_cursors(view.page, tree, docker);
+                    match hit::on_page(*cols, *rows, view, &sels, col, m.column, m.row) {
+                        hit::PageTarget::Row { col, row } => {
+                            drag.press(view, *cols, *rows, m.column, m.row, metrics);
                             let sys = &daemons[active_daemon(daemons, hosts, view)].state.system;
-                            return page_click(view, tree, docker, sys, ws, row);
+                            return page_click(view, tree, docker, sys, ws, col, row);
+                        }
+                        // The minimap is a place to *aim*, so a click on it is a
+                        // jump rather than a selection: the file lands with what
+                        // was clicked in the middle of the window.
+                        hit::PageTarget::Minimap(r) => {
+                            drag.clear();
+                            view.focus = Focus::Stage;
+                            let geom = chrome::page_geom(*cols, *rows, view);
+                            let inner = chrome::files_body_inner(&geom, metrics.depth);
+                            let h = inner.height.saturating_sub(1);
+                            if let Some(open) = tree.open.as_mut() {
+                                open.scroll =
+                                    chrome::minimap::scroll_to(r, h, open.lines().len(), h);
+                            }
+                            return Flow::Continue;
                         }
                         hit::PageTarget::Body => {
-                            drag.press(view, *cols, *rows, m.column, m.row, gutter);
+                            drag.press(view, *cols, *rows, m.column, m.row, metrics);
                             view.focus = Focus::Stage;
                             return Flow::Continue;
                         }
@@ -7358,7 +7626,7 @@ fn handle_input(
                     // A press arms a possible drag and drops any previous one.
                     // Before the click is carried out, since acting on it can
                     // change the page under the pointer.
-                    drag.press(view, *cols, *rows, m.column, m.row, gutter);
+                    drag.press(view, *cols, *rows, m.column, m.row, metrics);
                     // A click into the pane goes to the pane as well as moving
                     // focus: a program that asked for the mouse gets it, and
                     // one that did not is unaffected.
@@ -8595,6 +8863,23 @@ fn spawn_raw_input() -> UnboundedReceiver<event::Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Files browser sitting in `dir` with the cursor on row `sel` and no
+    /// entries — enough for the tests that only care where the cursor is.
+    fn at(dir: &str, sel: usize) -> Files {
+        Files {
+            cols: vec![chrome::Column { dir: dir.into(), entries: Vec::new(), sel }],
+            ..Default::default()
+        }
+    }
+
+    /// A one-column browser over `entries`, cursor on `sel`.
+    fn listing(entries: Vec<chrome::FileEntry>, sel: usize) -> Files {
+        Files {
+            cols: vec![chrome::Column { dir: String::new(), entries, sel }],
+            ..Default::default()
+        }
+    }
     use butai_protocol::{Cell as PCell, CellRun, Mods};
 
     fn entry(name: &str, is_dir: bool) -> chrome::FileEntry {
@@ -8603,20 +8888,97 @@ mod tests {
 
     /// Descending into a folder has to be reversible on screen, not only via a
     /// key nothing advertises.
+    ///
+    /// The `..` row used to be that promise. The trail is now: the parent stays
+    /// listed in the column to the left with the row you came through still
+    /// marked, and `←` walks back to it — **without asking the daemon again**,
+    /// which is the part `..` never gave you. Pinned end to end, because every
+    /// clause of that is a thing the trail could quietly stop doing.
     #[test]
-    fn a_subdirectory_listing_offers_a_way_back_up() {
-        let rows = tree_rows(Page::Files, vec![entry("a.rs", false)], "src");
-        assert_eq!(rows[0].name, "..", "the first row must be the way back");
-        assert!(rows[0].is_dir, "`..` has to be a directory or Enter would try to open it");
-        assert_eq!(rows[0].path, "", "one level above `src` is the root");
+    fn descending_is_reversible_without_a_second_fetch() {
+        let mut files = Files::default();
+        files.land(String::new(), vec![entry("src", true), entry("README.md", false)]);
+        // Down into `src`.
+        let mut view = View { page: Page::Files, focus: Focus::Agents, ..Default::default() };
+        assert!(matches!(
+            handle_files_key(key(event::KeyCode::Right), &mut view, &mut files),
+            Some(Flow::ListDir(ref d)) if d == "src"
+        ));
+        files.land("src".into(), vec![entry("a.rs", false)]);
+        assert_eq!(files.depth(), 2, "the root should still be a column");
+        assert_eq!(files.cols[0].sel, 0, "the row we came through stays marked");
+
+        // Back up: a local move, not a fetch.
+        let flow = handle_files_key(key(event::KeyCode::Left), &mut view, &mut files);
+        assert!(matches!(flow, Some(Flow::Continue)), "walking up asked the daemon: {flow:?}");
+        assert_eq!(files.dir(), "", "`←` did not land in the parent");
+        assert_eq!(files.depth(), 2, "the column walked out of was thrown away");
+
+        // And back down again, still without a fetch.
+        let flow = handle_files_key(key(event::KeyCode::Right), &mut view, &mut files);
+        assert!(matches!(flow, Some(Flow::Continue)), "walking back down re-fetched: {flow:?}");
+        assert_eq!(files.dir(), "src");
+    }
+
+    /// Moving the cursor drops the trail to its right, because those columns
+    /// were what the *old* selection contained.
+    ///
+    /// Without this the browser would draw a path that does not exist: `src`
+    /// selected in the root column, with `docs/`'s listing still beside it.
+    #[test]
+    fn moving_the_cursor_drops_the_columns_it_invalidates() {
+        let mut files = Files::default();
+        files.land(String::new(), vec![entry("src", true), entry("docs", true)]);
+        files.land("src".into(), vec![entry("a.rs", false)]);
+        files.go_left();
+        files.move_sel(1);
+        assert_eq!(files.depth(), 1, "the stale child column survived");
+        assert_eq!(files.selected().map(|e| e.name.as_str()), Some("docs"));
     }
 
     /// At the root there is nowhere above to go, and offering one would walk out
     /// of the workspace.
     #[test]
-    fn the_root_listing_has_no_way_out_of_the_workspace() {
-        let rows = tree_rows(Page::Files, vec![entry("a.rs", false)], "");
-        assert!(rows.iter().all(|e| e.name != ".."), "the root must not offer `..`");
+    fn the_root_has_no_way_out_of_the_workspace() {
+        let mut files = Files::default();
+        files.land(String::new(), vec![entry("a.rs", false)]);
+        let mut view = View { page: Page::Files, focus: Focus::Agents, ..Default::default() };
+        assert!(
+            handle_files_key(key(event::KeyCode::Left), &mut view, &mut files).is_none(),
+            "`←` at the root offered somewhere above the workspace"
+        );
+        assert!(
+            handle_files_key(key(event::KeyCode::Backspace), &mut view, &mut files).is_none(),
+            "Backspace at the root offered somewhere above the workspace"
+        );
+    }
+
+    /// Space reads a file without taking the keyboard; Enter takes it.
+    ///
+    /// The whole of what separates a peek from an open, and it is the reason
+    /// both exist: after a peek the next `j` walks to the next name, so you can
+    /// read down a directory a file at a time.
+    #[test]
+    fn space_peeks_and_enter_opens() {
+        let mut files = Files::default();
+        files.land(String::new(), vec![entry("a.rs", false)]);
+        let mut view = View { page: Page::Files, focus: Focus::Agents, ..Default::default() };
+
+        let flow = handle_files_key(key(event::KeyCode::Char(' ')), &mut view, &mut files);
+        assert!(
+            matches!(flow, Some(Flow::OpenFile { ref path, focus: false }) if path == "a.rs"),
+            "space did not peek: {flow:?}"
+        );
+        let flow = handle_files_key(key(event::KeyCode::Enter), &mut view, &mut files);
+        assert!(
+            matches!(flow, Some(Flow::OpenFile { ref path, focus: true }) if path == "a.rs"),
+            "enter did not open into the file: {flow:?}"
+        );
+        // A directory has nothing to peek at, and space must not become a second
+        // descend key.
+        files.land(String::new(), vec![entry("src", true)]);
+        let flow = handle_files_key(key(event::KeyCode::Char(' ')), &mut view, &mut files);
+        assert!(matches!(flow, Some(Flow::Continue)), "space on a directory did something");
     }
 
     /// **The Docs filter is not here any more, and must not come back.**
@@ -8635,8 +8997,7 @@ mod tests {
         let entries = vec![entry("code.rs", false), entry("NOTES.md", false)];
         let rows = tree_rows(Page::Docs, entries, "sub");
         let names: Vec<&str> = rows.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["..", "code.rs", "NOTES.md"], "the daemon already filtered");
-        assert_eq!(rows[0].name, "..", "and the way back is still on top");
+        assert_eq!(names, vec!["code.rs", "NOTES.md"], "the daemon already filtered");
     }
 
     /// A tree page lists a project's own files, and only those.
@@ -9539,6 +9900,61 @@ mod tests {
         view.overlay = Some(update_daemon_overlay("workhorse"));
         let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
         assert!(matches!(flow, Flow::UpdateDaemon), "{flow:?}");
+    }
+
+    /// A daemon that is not this build gets asked about, and which question it
+    /// is depends on where it is running.
+    ///
+    /// This is the whole reason the handshake stopped only flashing a line: the
+    /// notice named `butai kill-server`, a command you have to leave butai to
+    /// run, about a daemon the client is holding a socket to.
+    #[test]
+    fn a_daemon_on_another_build_is_offered_the_restart_it_needs() {
+        // Local: this build is already running, so nothing is fetched — and
+        // the box names both versions, since the client knows both.
+        let Overlay::Confirm(c) = skew_overlay(Some("1.3.0-dev.1"), None) else {
+            panic!("not a confirm box")
+        };
+        assert_eq!(c.kind, chrome::ConfirmKind::RestartDaemon);
+        assert!(!c.yes, "it opens on no, like every other confirm box");
+        assert!(c.header.contains("1.3.0-dev.1"), "{}", c.header);
+        assert!(c.header.contains(crate::update::CURRENT), "{}", c.header);
+
+        // Remote: the far daemon does its own check, so this is the update
+        // question and it names the machine rather than a version.
+        let Overlay::Confirm(c) = skew_overlay(Some("1.3.0-dev.1"), Some("workhorse")) else {
+            panic!("not a confirm box")
+        };
+        assert_eq!(c.kind, chrome::ConfirmKind::UpdateDaemon { host: "workhorse".into() });
+        assert!(c.header.contains("workhorse"), "{}", c.header);
+    }
+
+    /// A daemon too old to send `server_version` is the case the notice was
+    /// written for, and it is still a mismatch to act on rather than read.
+    #[test]
+    fn a_daemon_that_names_no_version_is_asked_about_too() {
+        let Overlay::Confirm(c) = skew_overlay(None, None) else { panic!("not a confirm box") };
+        assert_eq!(c.kind, chrome::ConfirmKind::RestartDaemon);
+        assert!(c.header.contains("predates"), "{}", c.header);
+        assert!(c.header.contains(crate::update::CURRENT), "{}", c.header);
+    }
+
+    /// Restarting a daemon records nothing, the way the remote update does not.
+    ///
+    /// `declined_version` is about a *release* this client was offered. Saying
+    /// no to a restart is "leave it running", which is the ordinary meaning of
+    /// no and the ordinary `Continue`.
+    #[test]
+    fn declining_a_restart_records_nothing() {
+        let mut view =
+            View { overlay: Some(skew_overlay(Some("1.2.0"), None)), ..Default::default() };
+        let flow = handle_overlay_key(key(event::KeyCode::Char('n')), &mut view);
+        assert!(matches!(flow, Flow::Continue), "a restart no must record nothing: {flow:?}");
+        assert!(view.overlay.is_none());
+
+        view.overlay = Some(skew_overlay(Some("1.2.0"), None));
+        let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
+        assert!(matches!(flow, Flow::RestartDaemon), "{flow:?}");
     }
 
     /// The update prompt's two answers mean different things from every other
@@ -11746,8 +12162,8 @@ mod tests {
     fn help_is_its_own_page_and_does_not_touch_the_files() {
         for (what, target) in [("?", None), ("[help]", Some(hit::Target::Footer("[help]")))] {
             let mut view = View { page: Page::Files, ..Default::default() };
-            let mut files = Files { dir: "src".into(), sel: 3, ..Default::default() };
-            let mut docs = Files { dir: "docs".into(), sel: 2, ..Default::default() };
+            let mut files = at("src", 3);
+            let mut docs = at("docs", 2);
             let flow = match target {
                 Some(t) => run_click(t, &mut view, 1, None),
                 None => handle_input(
@@ -11775,8 +12191,8 @@ mod tests {
             assert!(matches!(flow, Flow::OpenHelp), "{what} did not open HELP: {flow:?}");
             // Neither tree moved, and neither opened anything. The old route
             // failed every one of these.
-            assert_eq!((docs.dir.as_str(), docs.sel), ("docs", 2), "{what} rebuilt the DOCS tree");
-            assert_eq!((files.dir.as_str(), files.sel), ("src", 3), "{what} moved the file tree");
+            assert_eq!((docs.dir(), docs.sel()), ("docs", 2), "{what} rebuilt the DOCS tree");
+            assert_eq!((files.dir(), files.sel()), ("src", 3), "{what} moved the file tree");
             assert!(docs.open.is_none() && files.open.is_none(), "{what} opened a buffer");
         }
     }
@@ -12522,13 +12938,13 @@ mod tests {
 
         // The directory row: no box, and nothing to answer.
         let mut view = View { page: Page::Files, ..Default::default() };
-        let mut files = Files { entries: entries.clone(), sel: 0, ..Default::default() };
+        let mut files = listing(entries.clone(), 0);
         let flow = handle_files_key(key(event::KeyCode::Char('x')), &mut view, &mut files);
         assert!(matches!(flow, Some(Flow::Continue)), "the key should be claimed either way");
         assert!(view.overlay.is_none(), "a directory opened a delete box");
 
         // The file row: a box, opened on the safe answer.
-        let mut files = Files { entries, sel: 1, ..Default::default() };
+        let mut files = listing(entries, 1);
         handle_files_key(key(event::KeyCode::Char('x')), &mut view, &mut files);
         let Some(Overlay::Confirm(c)) = &view.overlay else {
             panic!("x on a file did not ask: {:?}", view.overlay)
