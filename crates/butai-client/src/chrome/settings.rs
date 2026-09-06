@@ -63,8 +63,15 @@ pub struct Settings {
     pub saved_theme: String,
     /// Whether a `butai` over ssh may pull its machine into the tab bar.
     pub auto_attach: bool,
-    /// `[[remote]]` blocks, as they read.
-    pub remotes: Vec<String>,
+    /// Every machine this client knows of: the ones in the tab bar and the
+    /// `[[remote]]` blocks that are not.
+    ///
+    /// Assembled by the loop from `daemons`, `hosts`, the live forwards and the
+    /// config file — see [`Machine`]. Handed to the page rather than gathered by
+    /// it for the reason the theme list is: none of those things is the page's,
+    /// and a page holding its own copy of a daemon list would be drawing a tab
+    /// bar the rest of the client had moved on from.
+    pub machines: Vec<Machine>,
     /// How many keys are bound, and how many of those came from `[keys]`.
     pub bindings: (usize, usize),
     /// Whether butai looks for a newer release: `[update] check`.
@@ -91,7 +98,7 @@ impl Default for Settings {
             themes: Vec::new(),
             saved_theme: crate::config::DEFAULT_THEME.into(),
             auto_attach: true,
-            remotes: Vec::new(),
+            machines: Vec::new(),
             bindings: (0, 0),
             update_check: true,
             update_channel: crate::update::Channel::default(),
@@ -125,6 +132,22 @@ pub enum Kind {
     /// Read-only: either it is the daemon's, or it is a fact about this client
     /// rather than a choice it offers.
     Info,
+    /// Enter *does* something, and the something does not come back as a value
+    /// on this row. The word is the verb the footer offers — "update",
+    /// "connect", "forget".
+    ///
+    /// **Why this is not a toggle.** Every other row on this page answers a
+    /// question the file also answers, and its value is the answer; pressing it
+    /// changes what the row reads. Connecting a machine, or asking a daemon to
+    /// replace its own binary, has no such value: the row would have to read
+    /// `off` for "not connected" and flip to `on` several seconds later when an
+    /// ssh landed, or not flip at all when it did not. A toggle that lies about
+    /// whether it took is worse than a row that plainly says what it will do.
+    ///
+    /// It is deliberately still [`Row::editable`], because that predicate
+    /// drives both the dim ink and which verbs the footer offers, and an action
+    /// row is exactly a row the cursor can do something on.
+    Action(&'static str),
 }
 
 /// Which setting a row is.
@@ -144,6 +167,16 @@ pub enum RowId {
     Links,
     UpdateCheck,
     UpdateChannel,
+    /// Ask the daemon on this row's machine to replace its own binary.
+    MachineUpdate,
+    /// Dial a `[[remote]]` that is not in the tab bar.
+    MachineConnect,
+    /// Drop the link to a machine that is, and forget its block.
+    MachineDisconnect,
+    /// Remove a `[[remote]]` block without there being a link to drop.
+    MachineForget,
+    /// Bring another machine in — the machines picker, from here.
+    MachineAdd,
     /// Read-only. Several rows share it because none of them acts.
     Fact,
 }
@@ -151,7 +184,10 @@ pub enum RowId {
 /// One setting.
 pub struct Row {
     pub id: RowId,
-    pub label: &'static str,
+    /// Owned rather than `&'static str` because the MACHINES group names
+    /// machines, and a hostname is not known at compile time. Ellipsized to
+    /// [`LABEL_W`] when it is drawn, like every other label.
+    pub label: String,
     /// The TOML key this writes, drawn faint so the page and the file are never
     /// two vocabularies for one setting. Empty where there is no key — a fact,
     /// not a setting.
@@ -162,17 +198,160 @@ pub struct Row {
     pub desc: &'static str,
     pub value: String,
     pub kind: Kind,
+    /// Which machine this row is about, by the badge its tabs carry — empty for
+    /// the local daemon, which has none, and `None` on every row that is not
+    /// one of a machine's.
+    ///
+    /// The badge rather than an index into [`Settings::machines`], for the
+    /// reason [`RowId`] exists at all: an index is a position in a list that is
+    /// rebuilt every frame, and a machine leaving the tab bar between the frame
+    /// you pressed Enter on and the press arriving would silently move the
+    /// action onto its neighbour.
+    pub machine: Option<String>,
+    /// Drawn two columns in, so a machine's rows read as a block under its
+    /// name rather than as five more settings.
+    pub indent: bool,
 }
 
 impl Row {
-    fn info(label: &'static str, key: &'static str, value: String, desc: &'static str) -> Self {
-        Self { id: RowId::Fact, label, key, desc, value, kind: Kind::Info }
+    fn info(
+        label: impl Into<String>,
+        key: &'static str,
+        value: String,
+        desc: &'static str,
+    ) -> Self {
+        Self {
+            id: RowId::Fact,
+            label: label.into(),
+            key,
+            desc,
+            value,
+            kind: Kind::Info,
+            machine: None,
+            indent: false,
+        }
     }
 
     /// Whether the cursor can do anything here. Drives both the dim ink and
     /// which verbs the footer offers, so the two cannot disagree.
     pub fn editable(&self) -> bool {
         self.kind != Kind::Info
+    }
+
+    /// Columns the label is indented by, which the key column has to give back
+    /// so it stays in the same place on every row of the group.
+    fn pad(&self) -> u16 {
+        if self.indent {
+            INDENT
+        } else {
+            0
+        }
+    }
+}
+
+/// Columns a machine's own rows are set in from its name.
+const INDENT: u16 = 2;
+
+/// Whether this client is talking to a machine, and why not when it is not.
+///
+/// Four states rather than a bool because they want four different things done
+/// about them, and the section exists to make that obvious: a machine that is
+/// away is one the loop is already re-dialling and you need do nothing about; a
+/// machine that is offline has a `[[remote]]` block and no link, and the row
+/// under it offers to dial it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    /// In the tab bar with its event stream up.
+    Here,
+    /// In the tab bar, stream down. Its rails are a photograph, and the loop is
+    /// rebuilding the forward on its own clock.
+    Away,
+    /// An ssh of ours is mid key exchange.
+    Dialling,
+    /// Configured and not connected. `why` is the last dial failure, which is
+    /// the whole answer to "why is that machine not here" — see
+    /// [`Machine::note`].
+    Offline,
+}
+
+/// What build a daemon is running, as far as this client can tell.
+///
+/// **Where the version comes from.** A daemon names its build in the framed
+/// handshake (`ServerMsg::Hello.server_version`) and nowhere else — there is no
+/// REST route that reports it, and `POST /v1/update` reports one only by
+/// *performing* an update. So this is read by opening a control connection and
+/// reading the Hello, exactly as `kill-server` and `reload-config` already do,
+/// and it is read on arriving at the page rather than on a timer: a daemon's
+/// version changes when it restarts, which is an event this client is told
+/// about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Build {
+    /// Not asked yet, or the machine did not answer.
+    #[default]
+    Unknown,
+    On(String),
+    /// It accepted an update and is going down to come back on `to`. Kept
+    /// distinct from [`Build::On`] so the page cannot go on claiming a version
+    /// that the machine has already been told to stop running.
+    Updating {
+        from: String,
+        to: Option<String>,
+    },
+}
+
+/// One machine, as the MACHINES section shows it.
+///
+/// Every field is somebody else's: the link and the counts are the loop's view
+/// of its `Daemon`, the destination is its `[[remote]]` block, and the build
+/// came off a handshake. Gathered into one record so the page can draw a
+/// machine without knowing about any of the three.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Machine {
+    /// The badge its tabs carry, and what a disconnect names it by. Empty for
+    /// the daemon on this machine, which has no badge — see [`Machine::name`].
+    pub badge: String,
+    pub link: Link,
+    pub build: Build,
+    /// How it is reached: `ssh gpu-box`, `socket /tmp/fwd.sock`, or the local
+    /// daemon's own socket path.
+    pub how: String,
+    /// Agents running across all of its workspaces, and workspaces open on it.
+    pub agents: usize,
+    pub spaces: usize,
+    /// Whether a `[[remote]]` block names it, so it comes back tomorrow.
+    pub configured: bool,
+    /// Whether *this* client opened the ssh underneath it. False for a
+    /// `[[remote]] socket` block — somebody else's forward, with no child of
+    /// ours to kill — which is what decides whether a disconnect row is offered
+    /// at all, the same question `disconnect_daemon` asks before it removes
+    /// anything.
+    pub ours: bool,
+    /// The daemon on this machine. It is never dialled, never dropped, and
+    /// updates by being replaced rather than by being asked.
+    pub local: bool,
+    /// The ssh destination a connect row would dial. `None` for a block that
+    /// names a `socket` instead, which this client cannot bring up itself.
+    pub target: Option<String>,
+    /// What went wrong last time, when something did.
+    pub note: Option<String>,
+}
+
+impl Machine {
+    /// What to call it in a row. The local daemon has no badge and an unnamed
+    /// row reads as a bug, so it gets the same word the BOOTH compute column
+    /// gives it.
+    pub fn name(&self) -> &str {
+        if self.badge.is_empty() {
+            "local"
+        } else {
+            &self.badge
+        }
+    }
+
+    /// Whether the daemon is answering right now — the one question every
+    /// action row's availability turns on.
+    fn reachable(&self) -> bool {
+        self.link == Link::Here
     }
 }
 
@@ -222,6 +401,173 @@ pub enum Edit {
 /// in two files is how that comes to mean an agent actually called this.
 pub const ASK_EVERY_TIME: &str = "ask every time";
 
+/// One machine's block: what it is doing, what it is running, where it is, and
+/// the two or three things you can do about it.
+///
+/// **The rows an unreachable machine does not get.** Update and disconnect are
+/// requests to a daemon that has to answer them, and a row that can only ever
+/// report a refusal is a row that reads as broken — the same rule the machines
+/// picker follows when it declines to offer a disconnect for a forward it does
+/// not own. So an offline machine gets `connect` and `forget` instead, which
+/// are the two things that *are* possible without it answering.
+///
+/// `latest` is the newest release this client's own update check found, which
+/// is what a daemon's version is compared against. It is this client's answer
+/// rather than that machine's — a daemon follows the channel configured where
+/// it runs — so the version row's sentence says so.
+fn machine_rows(m: &Machine, latest: Option<&str>) -> Vec<Row> {
+    let action =
+        |id: RowId, label: &'static str, verb: &'static str, key, value: String, desc| Row {
+            id,
+            label: label.into(),
+            key,
+            desc,
+            value,
+            kind: Kind::Action(verb),
+            machine: Some(m.badge.clone()),
+            indent: true,
+        };
+    let fact = |label: &'static str, value: String, desc| Row {
+        machine: Some(m.badge.clone()),
+        indent: true,
+        ..Row::info(label, "", value, desc)
+    };
+
+    let mut rows = vec![Row {
+        machine: Some(m.badge.clone()),
+        // The block's own head, so the name is not repeated down five rows.
+        // It writes nothing itself; the key names the block underneath it,
+        // which is the line you would delete by hand to undo the whole thing.
+        ..Row::info(
+            m.name(),
+            if m.configured { "[[remote]]" } else { "" },
+            status_line(m),
+            "Whether this client is talking to it, and what it is carrying.",
+        )
+    }];
+
+    rows.push(fact(
+        "version",
+        version_line(m, latest),
+        "Read at its handshake. Newer means newer than this client last saw.",
+    ));
+    rows.push(fact(
+        "where",
+        m.how.clone(),
+        "The ssh destination, or the socket already forwarded here.",
+    ));
+
+    if m.reachable() {
+        rows.push(action(
+            RowId::MachineUpdate,
+            "update",
+            "update",
+            "",
+            if m.local {
+                "download and restart this butai".into()
+            } else {
+                "downloads there, then restarts that daemon".into()
+            },
+            // Says what happens to the machine rather than to the row, because
+            // that is the part you cannot take back: panes are killed and
+            // restored, and every client on it is detached in the meantime.
+            "It restarts the daemon; workspaces are saved and come back.",
+        ));
+    }
+
+    match (m.local, m.reachable(), m.ours, m.configured, &m.target) {
+        // Nothing to drop and nothing to dial: this client *is* this machine.
+        (true, ..) => {}
+        (_, true, true, ..) => rows.push(action(
+            RowId::MachineDisconnect,
+            "disconnect",
+            "disconnect",
+            "[[remote]]",
+            "drops the ssh and forgets it".into(),
+            "The far daemon keeps running; only this client's link to it goes.",
+        )),
+        // Here on a forward this client did not open. There is no ssh of ours
+        // to kill, so the row says why instead of offering.
+        (_, true, false, ..) => rows.push(fact(
+            "link",
+            "on a forward of its own".into(),
+            "Somebody else's `ssh -L`. Close that to disconnect it.",
+        )),
+        (_, false, _, true, Some(target)) => {
+            rows.push(action(
+                RowId::MachineConnect,
+                "connect",
+                "connect",
+                "[[remote]]",
+                format!("dial {target} now"),
+                "One ssh, then its projects join the tab bar. `alt-h` does this too.",
+            ));
+            rows.push(action(
+                RowId::MachineForget,
+                "forget",
+                "forget",
+                "[[remote]]",
+                "removes its block".into(),
+                "Stops it being dialled every morning. Nothing on it is touched.",
+            ));
+        }
+        // A `[[remote]] socket` that is not answering: the forward is somebody
+        // else's to bring up, but the block is still ours to remove.
+        (_, false, _, true, None) => rows.push(action(
+            RowId::MachineForget,
+            "forget",
+            "forget",
+            "[[remote]]",
+            "removes its block".into(),
+            "Stops it being dialled every morning. Nothing on it is touched.",
+        )),
+        (_, false, _, false, _) => {}
+    }
+    rows
+}
+
+/// A machine's head row: what it is doing, and what it is carrying while it
+/// does it.
+fn status_line(m: &Machine) -> String {
+    let load = format!(
+        "{} agent{}, {} workspace{}",
+        m.agents,
+        if m.agents == 1 { "" } else { "s" },
+        m.spaces,
+        if m.spaces == 1 { "" } else { "s" }
+    );
+    match &m.link {
+        Link::Here => format!("connected — {load}"),
+        // The counts stay, and say what they are: a machine that went away is
+        // still running everything it was running, and the numbers are the last
+        // ones it sent rather than nothing at all.
+        Link::Away => match &m.note {
+            Some(why) => format!("away — {why}"),
+            None => format!("away — last seen with {load}"),
+        },
+        Link::Dialling => "connecting…".into(),
+        Link::Offline => match &m.note {
+            Some(why) => format!("not connected — {why}"),
+            None => "not connected".into(),
+        },
+    }
+}
+
+/// The version row's value: the build, and whether a newer one is known.
+fn version_line(m: &Machine, latest: Option<&str>) -> String {
+    match &m.build {
+        Build::On(v) => match latest {
+            Some(l) if l != v => format!("{v} — {l} available"),
+            _ => v.clone(),
+        },
+        Build::Updating { from, to: Some(to) } => format!("{from} → {to}, restarting"),
+        Build::Updating { from, to: None } => format!("{from} — updating"),
+        // Not a failure worth dressing up: a machine that is not answering has
+        // no handshake to read a version off, and saying so is the honest row.
+        Build::Unknown => "unknown".into(),
+    }
+}
+
 /// Every group and row, built fresh from the live state.
 ///
 /// Built rather than cached so a value can never be stale: the geometry also
@@ -239,11 +585,13 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
             rows: vec![
                 Row {
                     id: RowId::Theme,
-                    label: "theme",
+                    label: "theme".into(),
                     key: "[theme] name",
                     desc: "The palette every part of the chrome draws from.",
                     value: s.saved_theme.clone(),
                     kind: Kind::Choice(s.themes.clone()),
+                    machine: None,
+                    indent: false,
                 },
                 Row::info(
                     "themes directory",
@@ -259,7 +607,7 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
             rows: vec![
                 Row {
                     id: RowId::DefaultAgent,
-                    label: "default agent",
+                    label: "default agent".into(),
                     key: "[general] default_agent",
                     desc: "What `a` and [+] spawn with nothing in between. `A` still picks.",
                     value: view.pinned_agent.clone().unwrap_or_else(|| ASK_EVERY_TIME.into()),
@@ -268,6 +616,8 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                             .chain(s.agents.iter().cloned())
                             .collect(),
                     ),
+                    machine: None,
+                    indent: false,
                 },
                 Row::info(
                     "available agents",
@@ -287,43 +637,53 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
             rows: vec![
                 Row {
                     id: RowId::LeftRail,
-                    label: "left rail",
+                    label: "left rail".into(),
                     key: "[ui] left_rail",
                     desc: "Agents, processes and the gauges. alt-l drags the same number.",
                     value: format!("{} cells", g.left_w),
                     kind: Kind::Size(Dim::LeftRail),
+                    machine: None,
+                    indent: false,
                 },
                 Row {
                     id: RowId::RightRail,
-                    label: "right rail",
+                    label: "right rail".into(),
                     key: "[ui] right_rail",
                     desc: "The CHANGES rail.",
                     value: format!("{} cells", g.right_w),
                     kind: Kind::Size(Dim::RightRail),
+                    machine: None,
+                    indent: false,
                 },
                 Row {
                     id: RowId::ProcsRows,
-                    label: "processes rows",
+                    label: "processes rows".into(),
                     key: "[ui] procs_height",
                     desc: "Rows for PROCESSES; AGENTS takes whatever is left over.",
                     value: band(g.procs_h),
                     kind: Kind::Size(Dim::Band(super::Band::Procs)),
+                    machine: None,
+                    indent: false,
                 },
                 Row {
                     id: RowId::SystemRows,
-                    label: "system rows",
+                    label: "system rows".into(),
                     key: "[ui] system_height",
                     desc: "Rows for the gauges under that rail — cpu, ram, gpu, net, disks.",
                     value: band(g.system_h),
                     kind: Kind::Size(Dim::Band(super::Band::System)),
+                    machine: None,
+                    indent: false,
                 },
                 Row {
                     id: RowId::Links,
-                    label: "clickable links",
+                    label: "clickable links".into(),
                     key: "[ui] links",
                     desc: "Mark URLs up for your terminal, so the pointer can follow one.",
                     value: on_off(view.links).into(),
                     kind: Kind::Toggle(view.links),
+                    machine: None,
+                    indent: false,
                 },
             ],
         },
@@ -332,19 +692,28 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
             label: "MACHINES",
             rows: std::iter::once(Row {
                 id: RowId::AutoAttach,
-                label: "auto-attach",
+                label: "auto-attach".into(),
                 key: "[general] remote_auto_attach",
                 desc: "Let `butai` over ssh in a pane pull its machine into this bar.",
                 value: on_off(s.auto_attach).into(),
                 kind: Kind::Toggle(s.auto_attach),
+                machine: None,
+                indent: false,
             })
-            .chain(s.remotes.iter().map(|r| {
-                Row::info(
-                    "remote",
-                    "[[remote]]",
-                    r.clone(),
-                    "Dialled at start, so the machine is in the bar every morning.",
-                )
+            .chain(s.machines.iter().flat_map(|m| machine_rows(m, s.update_available.as_deref())))
+            .chain(std::iter::once(Row {
+                id: RowId::MachineAdd,
+                label: "add a machine".into(),
+                key: "[[remote]]",
+                // Named as the thing it opens rather than as a second way to
+                // do it: the picker is `alt-h` everywhere else in the client,
+                // and a settings page that grew its own destination prompt
+                // would be a second implementation of connecting.
+                desc: "The machines picker — an ssh alias, or a destination typed in.",
+                value: "alt-h".into(),
+                kind: Kind::Action("add"),
+                machine: None,
+                indent: false,
             }))
             .collect(),
         },
@@ -381,7 +750,7 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                 ),
                 Row {
                     id: RowId::UpdateCheck,
-                    label: "check for updates",
+                    label: "check for updates".into(),
                     key: "[update] check",
                     // Where the *acting* lives, since this row only decides
                     // whether to look. A page that both looked and installed
@@ -389,10 +758,12 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                     desc: "Ask GitHub about new releases at start. `:update` asks now.",
                     value: on_off(s.update_check).into(),
                     kind: Kind::Toggle(s.update_check),
+                    machine: None,
+                    indent: false,
                 },
                 Row {
                     id: RowId::UpdateChannel,
-                    label: "release channel",
+                    label: "release channel".into(),
                     key: "[update] channel",
                     // Says what changes rather than what a track is: the two
                     // words are only meaningful next to the sentence that
@@ -405,6 +776,8 @@ pub fn groups(s: &Settings, view: &View) -> Vec<Group> {
                             .map(|c| c.as_str().to_string())
                             .collect(),
                     ),
+                    machine: None,
+                    indent: false,
                 },
                 Row::info(
                     "config",
@@ -536,7 +909,18 @@ pub fn verbs(grp: &Group, state: &Settings) -> Vec<(&'static str, &'static str)>
             v.push(("-/+", "adjust"));
             v.push(("0", "auto"));
         }
+        // The row's own word, not "act": Enter on a machine's `forget` row and
+        // Enter on its `update` row do very different things, and the footer is
+        // the last thing read before one of them happens.
+        Some(Kind::Action(verb)) => v.push(("enter", verb)),
         _ => {}
+    }
+    // Only where there is something to re-ask. Every other group is a view of a
+    // file this page just wrote, so a refresh key on one would be a key that
+    // does nothing — the version and the link state are the only things here
+    // that another machine can change under you.
+    if grp.id == GroupId::Machines {
+        v.push(("r", "re-read"));
     }
     v.push(("tab", "group"));
     v.push(("esc", "close"));
@@ -665,11 +1049,13 @@ fn draw_body(buf: &mut Buffer, area: LRect, grp: &Group, state: &Settings, theme
         } else {
             theme.ink
         };
+        // The label moves in for a machine's own rows; the key column does not,
+        // so it stays in the same place down the whole group.
         put_str(
             buf,
-            area.x + 3,
+            area.x + 3 + row.pad(),
             y,
-            &ellipsize(row.label, LABEL_W as usize),
+            &ellipsize(&row.label, (LABEL_W - row.pad()) as usize),
             bound,
             Pen { fg, bg, bold: on },
         );
@@ -696,6 +1082,9 @@ fn draw_body(buf: &mut Buffer, area: LRect, grp: &Group, state: &Settings, theme
         let vfg = match &row.kind {
             Kind::Toggle(true) => theme.ok,
             Kind::Info => theme.muted,
+            // Not a value at all — a sentence about what pressing it will do —
+            // so it is inked as the offer it is rather than as a reading.
+            Kind::Action(_) => theme.accent,
             _ => theme.ink,
         };
         put_str(buf, vx, y, &value, bound, Pen::new(vfg, bg));
@@ -704,9 +1093,9 @@ fn draw_body(buf: &mut Buffer, area: LRect, grp: &Group, state: &Settings, theme
 
         put_str(
             buf,
-            area.x + 3,
+            area.x + 3 + row.pad(),
             y,
-            &ellipsize(row.desc, bound.saturating_sub(area.x + 5) as usize),
+            &ellipsize(row.desc, bound.saturating_sub(area.x + 5 + row.pad()) as usize),
             bound,
             Pen::new(theme.faint, theme.ground),
         );
@@ -862,8 +1251,65 @@ mod tests {
         Settings {
             themes: vec!["blueprint-dark".into(), "blueprint-light".into(), "terminal".into()],
             agents: vec!["claude".into(), "codex".into()],
+            machines: vec![local(), gpu_box(), asleep()],
             ..Default::default()
         }
+    }
+
+    /// This machine: connected, never dialled, nothing to forget.
+    fn local() -> Machine {
+        Machine {
+            badge: String::new(),
+            link: Link::Here,
+            build: Build::On("1.3.0".into()),
+            how: "/run/user/1000/butai/butai.sock".into(),
+            agents: 2,
+            spaces: 1,
+            configured: false,
+            ours: false,
+            local: true,
+            target: None,
+            note: None,
+        }
+    }
+
+    /// A machine in the bar on an ssh of ours, with a block remembering it.
+    fn gpu_box() -> Machine {
+        Machine {
+            badge: "gpu-box".into(),
+            link: Link::Here,
+            build: Build::On("1.2.0".into()),
+            how: "ssh gpu-box".into(),
+            agents: 3,
+            spaces: 2,
+            configured: true,
+            ours: true,
+            local: false,
+            target: Some("gpu-box".into()),
+            note: None,
+        }
+    }
+
+    /// Configured, not here, and the reason it is not here.
+    fn asleep() -> Machine {
+        Machine {
+            badge: "pi-farm".into(),
+            link: Link::Offline,
+            build: Build::Unknown,
+            how: "ssh pi@farm".into(),
+            agents: 0,
+            spaces: 0,
+            configured: true,
+            ours: false,
+            local: false,
+            target: Some("pi@farm".into()),
+            note: Some("ssh: connect to host farm port 22: No route to host".into()),
+        }
+    }
+
+    /// The MACHINES rows for one machine, by id.
+    fn ids(m: &Machine, latest: Option<&str>) -> Vec<RowId> {
+        machine_rows(m, latest).iter().map(|r| r.id).collect()
     }
 
     /// Every group has rows, and every sentence fits the body at the narrowest
@@ -1074,6 +1520,155 @@ mod tests {
         let v = verbs(appearance, &open);
         assert_eq!(v.iter().filter(|(k, _)| *k == "esc").count(), 1, "{v:?}");
         assert!(v.contains(&("esc", "keep the old one")), "{v:?}");
+    }
+
+    /// A machine's block answers the four questions a machine raises, and the
+    /// rows that *act* are only offered where they could work.
+    ///
+    /// The section was one read-only line per `[[remote]]` carrying the host
+    /// string and nothing else, so none of "is it connected", "what is it
+    /// running", "why did it not come up" and "can I have it back" had an
+    /// answer anywhere on the page.
+    #[test]
+    fn a_machine_block_says_what_it_is_doing_and_offers_what_it_can() {
+        let here = machine_rows(&gpu_box(), None);
+        assert_eq!(here[0].label, "gpu-box");
+        assert_eq!(here[0].key, "[[remote]]", "a remembered machine names its block");
+        assert!(here[0].value.starts_with("connected"), "{}", here[0].value);
+        assert!(here[0].value.contains("3 agents"), "{}", here[0].value);
+        assert!(here[0].value.contains("2 workspaces"), "{}", here[0].value);
+        assert_eq!(
+            ids(&gpu_box(), None),
+            vec![
+                RowId::Fact,
+                RowId::Fact,
+                RowId::Fact,
+                RowId::MachineUpdate,
+                RowId::MachineDisconnect
+            ]
+        );
+
+        // Asleep: nothing can be asked of a daemon that is not answering, so
+        // the two rows that ask are not drawn — and the two that do not need it
+        // are. A row that could only ever report a refusal reads as broken.
+        let gone = machine_rows(&asleep(), None);
+        assert_eq!(
+            ids(&asleep(), None),
+            vec![
+                RowId::Fact,
+                RowId::Fact,
+                RowId::Fact,
+                RowId::MachineConnect,
+                RowId::MachineForget
+            ]
+        );
+        assert!(
+            gone[0].value.contains("No route to host"),
+            "the dial failure is the whole answer to why it is not here: {}",
+            gone[0].value
+        );
+        assert!(
+            gone[3].value.contains("pi@farm"),
+            "the row names what it will dial: {}",
+            gone[3].value
+        );
+
+        // This machine is neither dialled nor dropped, and has no block.
+        assert_eq!(local().name(), "local");
+        assert_eq!(
+            ids(&local(), None),
+            vec![RowId::Fact, RowId::Fact, RowId::Fact, RowId::MachineUpdate]
+        );
+        assert_eq!(machine_rows(&local(), None)[0].key, "", "nothing in the file names it");
+
+        // Somebody else's forward: connected, and not ours to drop — the same
+        // distinction the machines picker draws before it offers a disconnect.
+        let borrowed = Machine { ours: false, ..gpu_box() };
+        assert_eq!(
+            ids(&borrowed, None),
+            vec![RowId::Fact, RowId::Fact, RowId::Fact, RowId::MachineUpdate, RowId::Fact],
+            "the link row explains itself rather than offering"
+        );
+    }
+
+    /// The version row says which build, and whether a newer one is known.
+    #[test]
+    fn the_version_row_reads_the_handshake_and_the_release_it_knows_of() {
+        let m = gpu_box();
+        assert_eq!(version_line(&m, None), "1.2.0", "nothing to compare it against");
+        assert_eq!(version_line(&m, Some("1.2.0")), "1.2.0", "it is the newest there is");
+        assert_eq!(version_line(&m, Some("1.3.0")), "1.2.0 — 1.3.0 available");
+
+        // A machine that has never answered a handshake has no version, and
+        // saying so beats inventing one.
+        assert_eq!(version_line(&asleep(), Some("1.3.0")), "unknown");
+
+        // And one that has just been told to update must not go on advertising
+        // the build it is on its way off.
+        let updating = Machine {
+            build: Build::Updating { from: "1.2.0".into(), to: Some("1.3.0".into()) },
+            ..gpu_box()
+        };
+        assert_eq!(version_line(&updating, Some("1.3.0")), "1.2.0 → 1.3.0, restarting");
+    }
+
+    /// An action row offers its own verb, and a fact still offers none.
+    ///
+    /// The footer is the last thing read before Enter happens, so "act" would
+    /// be the wrong word on every one of these: forgetting a machine and asking
+    /// its daemon to replace itself are not the same press.
+    #[test]
+    fn an_action_row_advertises_what_enter_will_do() {
+        let grps = groups(&state(), &View::default());
+        let machines = grps.iter().find(|g| g.id == GroupId::Machines).expect("MACHINES");
+        let at = |label: &str| {
+            machines.rows.iter().position(|r| r.label == label).unwrap_or_else(|| panic!("{label}"))
+        };
+
+        let on_update = Settings { group: 3, row: at("update"), ..state() };
+        let v = verbs(machines, &on_update);
+        assert!(v.contains(&("enter", "update")), "{v:?}");
+
+        let on_forget = Settings { group: 3, row: at("forget"), ..state() };
+        assert!(verbs(machines, &on_forget).contains(&("enter", "forget")));
+
+        // The head row is a fact and stays one.
+        let on_head = Settings { group: 3, row: at("gpu-box"), ..state() };
+        let v = verbs(machines, &on_head);
+        assert!(!v.iter().any(|(k, _)| *k == "enter"), "a fact must not offer enter: {v:?}");
+
+        // Only this group can be re-read, because only this group has facts
+        // another machine can change while you are looking at them.
+        assert!(v.contains(&("r", "re-read")), "{v:?}");
+        let appearance = &grps[0];
+        assert!(
+            !verbs(appearance, &state()).iter().any(|(k, _)| *k == "r"),
+            "a key that does nothing here would read as broken"
+        );
+    }
+
+    /// Every machine is one block, and the way to add another is the last row.
+    #[test]
+    fn the_section_lists_every_machine_and_ends_with_the_way_to_add_one() {
+        let grps = groups(&state(), &View::default());
+        let machines = grps.iter().find(|g| g.id == GroupId::Machines).expect("MACHINES");
+
+        assert_eq!(machines.rows[0].id, RowId::AutoAttach, "the setting comes first");
+        let heads: Vec<&str> = machines
+            .rows
+            .iter()
+            .filter(|r| !r.indent && r.id == RowId::Fact)
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(heads, vec!["local", "gpu-box", "pi-farm"]);
+        assert_eq!(machines.rows.last().map(|r| r.id), Some(RowId::MachineAdd));
+
+        // Every row of a machine's block knows which machine it is about, by
+        // the badge rather than by where it sits.
+        for row in machines.rows.iter().filter(|r| r.indent) {
+            assert!(row.machine.is_some(), "{} is in a block and names no machine", row.label);
+        }
+        assert!(machines.rows[0].machine.is_none(), "auto-attach is not about one machine");
     }
 
     /// The default-agent row always offers a way back to being asked, and it is

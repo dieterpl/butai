@@ -163,6 +163,7 @@ particular is global: `alt-l` resizes every workspace at once and saves to
 [keys]
 [theme]
 [ui]
+[views]
 [[remote]]
 ```
 
@@ -509,6 +510,61 @@ asks the far machine where its daemon listens (`butai ls` to make one exist, the
 A block with neither `host` nor `socket` is skipped by both paths and does
 nothing.
 
+### `[views]`
+
+Which space each workspace was last looking at, so going to a workspace goes to
+the view it was left on. Written by the workbench, not by hand.
+
+| Key | Type | Default | Read by | What it changes |
+|---|---|---|---|---|
+| `"<machine>:<path>"` | string | unset | client | The space that workspace opens on: one of `agents`, `files`, `git`, `docker`, `docs`, `usage` — the words the space buttons carry. A workspace with no line here opens on whatever space you arrived with. |
+
+```toml
+[views]
+"local:/media/nvme/Projects/butai" = "git"
+"gpu-box:/srv/diffusion" = "files"
+```
+
+The key is a machine and a directory. `local` is this machine's own daemon, the
+name BOOTH's compute column gives it; anything else is a machine's tab badge, so
+the same path checked out on a laptop and on `gpu-box` is two workspaces with
+two answers. It is not a workspace id: a daemon hands those out fresh every time
+it starts, and a remembered page would come back attached to whichever project
+was numbered `1` that morning. Trailing and doubled slashes are trimmed; `~` and
+symlinks are not resolved, because the path may be on a machine whose `$HOME`
+and whose links are not this one's — in practice the daemon has already
+canonicalised the directory before the client ever sees it.
+
+Six properties are worth knowing:
+
+- **BOOTH, SETTINGS and HELP are never stored**, and neither is DIFF. None of
+  them is a view of a workspace, so none is an answer to "where was this project
+  left" — landing in the settings page because that is where you were when you
+  last left a project would be exactly wrong. A line that says one anyway is
+  ignored, as is a space name from a newer butai: an unknown word costs that one
+  line, never the file.
+- **The table is capped at 64 entries**, oldest first, and a visit moves a
+  project to the back of the queue. So it is the projects you have not looked at
+  in longest that fall off, and opening something once does not leave a line in
+  the file forever.
+- **A page change is written about two seconds later**, not on the keypress —
+  `alt-o` and the cycle keys would otherwise be a file rewrite each. Leaving a
+  workspace and leaving the workbench both write immediately, so nothing waits
+  on a clock that a detach would beat. A `SIGTERM` inside those two seconds
+  loses that one change: a signal handler can put a terminal back, but it cannot
+  write a config file.
+- **A write that fails stays owed.** A config file is unwritable for ordinary
+  and temporary reasons — a full disk, an editor holding it — and the line is
+  still true when it comes back, so it is kept and tried again on a backoff that
+  doubles from five seconds to five minutes rather than being dropped. Nothing
+  is said about it on screen either way: nobody asked for this write, and a
+  read-only home directory must not put a sentence over the footer every time
+  you change page.
+- **Two clients do not erase each other.** Each writes the one line it is about,
+  like every other key here.
+- **Nothing here changes what the daemon does.** A space is chrome, and the
+  daemon draws none.
+
 ### Keys that are no longer read
 
 An old config keeps loading — unknown keys are ignored, never rejected — but
@@ -605,10 +661,12 @@ exactly as it was.
 | SETTINGS → ABOUT → check for updates, `space` | `[update] check` |
 | Answering **no** to the update prompt | `[update] declined_version` (that release only; `esc` writes nothing and asks again next launch) |
 | SETTINGS → WORKBENCH size rows (`-`/`+`/`0`), or leaving `alt-l` LAYOUT mode | all four `[ui]` keys; a height cleared to automatic is removed rather than written |
-| the machines button (`alt-h`), once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
-| Disconnecting a machine (`alt-h`, or the tab's row menu) | removes that `[[remote]]` block |
+| the machines button (`alt-h`), or SETTINGS → MACHINES → **add a machine**, once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
+| Disconnecting a machine (`alt-h`, the tab's row menu, or SETTINGS → MACHINES → **disconnect**) | removes that `[[remote]]` block |
+| SETTINGS → MACHINES → **forget**, on a configured machine that is not connected | removes that `[[remote]]` block — the half of a disconnect that is left over when there is no link to drop |
+| Changing space (`alt-o`, `alt-,`/`alt-.`, the spaces menu, a space button), about two seconds later — and at once when you leave the workspace or the workbench | one line of `[views]`, for the workspace you are in |
 
-Four properties of those writes are load-bearing:
+Six properties of those writes are load-bearing:
 
 - **There is no Save button.** A change applies and is written when you make it,
   which is what the client already does everywhere else.
@@ -624,7 +682,19 @@ Four properties of those writes are load-bearing:
 - **A `[[remote]] socket` block is never forgotten.** It is somebody else's
   forward — the client has no ssh under it to kill — so a disconnect leaves it
   alone however its badge reads. Forgetting a machine that was never remembered
-  is a silent no-op that does not even create a config file.
+  is a silent no-op that does not even create a config file. SETTINGS → MACHINES
+  still offers **forget** on one, because the block is ours to remove even when
+  the forward under it is not.
+- **SETTINGS → MACHINES → connect writes nothing**, which is not an omission.
+  The row is offered only on a machine that already *has* a `[[remote]]` block —
+  that block is why the client knows the machine exists to be dialled — and the
+  dial goes through the same remember the machines button uses, which is
+  idempotent by `host`. So connecting a machine you already configured re-dials
+  it and leaves the file exactly as it was, `name` and `ssh_args` included.
+- **The MACHINES row that writes no config at all is `update`.** It is a request
+  to the daemon on that machine — `POST /v1/update` — and whether that machine
+  will take it is decided by [`[update] allow_remote`](#update) in *its* own
+  `config.toml`, not by anything the client can write from here.
 
 The one thing the SETTINGS page does *not* write is the role overrides sitting
 beside `name` in `[theme]`: a page that also rewrote `accent = "#ff8800"` would
@@ -638,6 +708,8 @@ be silently discarding something the file's owner typed on purpose.
 | `[general] prefix`, `[keys]`, `[theme]`, `[ui]`, `[[remote]]` | the next client start — with the exceptions below |
 | `[theme] name` | live from the SETTINGS page, which applies each palette as the cursor passes it and puts the old one back if you leave without choosing |
 | `[general] default_agent`, `remote_auto_attach`, `[ui]`, `[update] check` | live when *you* change them in the client; a hand edit needs a restart |
+| `[[remote]]` | dialled at the next client start, as above — but SETTINGS → MACHINES re-reads the blocks off disk when you first open the page, on `r`, and after each of its own `disconnect` and `forget` writes, so the section is never listing a machine the file has stopped naming |
+| `[views]` | read once at client start and kept in memory from then on, so a hand edit — or another client's write — needs a restart to be seen |
 
 `:reload-config` is a command to the daemon and reloads the daemon's half only —
 re-reading the file and replacing the config the daemon holds, with any parse

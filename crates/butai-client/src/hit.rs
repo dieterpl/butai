@@ -326,11 +326,16 @@ pub fn on_fleet(
             Some(FleetHit::Row(row))
         }
         chrome::BoothRow::Space { space, folded, .. } => {
-            // Laid out as the cursor's row only when it *is* the cursor's row:
-            // `[x]` is drawn there and nowhere else, so resolving against a
-            // layout that always had one would make a press on the row below it
-            // close a workspace nobody aimed at.
-            let l = chrome::space_layout(c.fleet_rows, space, *folded, row == view.booth_sel);
+            // Through the drawing's own question, not a second spelling of it:
+            // `[x]` is reserved on the cursor's row and nowhere else, and the
+            // four cells it costs move every control left of it. See
+            // [`chrome::fleet_cursor_row`] for the drift that cost.
+            let l = chrome::space_layout(
+                c.fleet_rows,
+                space,
+                *folded,
+                chrome::fleet_cursor_row(view, row),
+            );
             if let Some((start, end)) = l.close {
                 if x >= start && x < end {
                     return Some(FleetHit::Close(row));
@@ -341,14 +346,25 @@ pub fn on_fleet(
                     return Some(FleetHit::New(row));
                 }
             }
-            // The name, and only the name. A project row has nothing to preview
-            // and going there is its one meaning, so the name is a link — but
-            // the rest of the row is the fold's target, and the two must not be
-            // one press with two outcomes depending on where in a word it lands.
+            // The name puts the cursor on the project, exactly as a press on an
+            // agent row puts it on the agent. It used to travel there, on the
+            // grounds that a project row has nothing to preview and so going
+            // there was the only thing pressing its name could mean. That
+            // premise was simply wrong: a project row previews the agent in it
+            // that most needs you — see [`chrome::booth_preview`] — so pressing
+            // its name is the ordinary "let me look at this", and answering it
+            // by throwing the tab bar onto another machine is the very bug that
+            // made agent rows stop travelling. One rule for the whole list now:
+            // text looks, buttons act. `enter` still travels, and so does
+            // `[open]` on an agent row.
+            //
+            // The name is still resolved apart from the rest of the row, since
+            // the rest of it folds and the two must not be one press with two
+            // outcomes depending on where in a word it lands.
             let (nx, ne) = l.name;
             let drawn = (space.name.chars().count() as u16).min(ne.saturating_sub(nx));
             if x >= nx && x < nx + drawn {
-                return Some(FleetHit::Go(row));
+                return Some(FleetHit::Row(row));
             }
             Some(FleetHit::Fold(row))
         }
@@ -360,6 +376,11 @@ pub fn on_fleet(
 ///
 /// Beside [`on_fleet`] and for its reason: the column lists every connected
 /// daemon, which only the loop can assemble.
+///
+/// A press means one thing here — swap that machine's compact block for the
+/// SYSTEM rail's full stack — so this answers with the machine and not with a
+/// field of it. The whole block is the target, not just the `>` on the name:
+/// see `chrome::booth_compute_machine_at`, which is where that argument lives.
 pub fn on_compute(
     cols: u16,
     rows: u16,
@@ -387,20 +408,20 @@ pub fn on_compute(
 /// at this", and looking at it threw the whole workbench onto somebody else's
 /// project.
 ///
-/// So an *agent* row only ever moves the cursor — BOOTH's middle column follows
-/// it, which is the entire point of the page — and `[open]` is the one thing on
-/// it that travels. That rule is about agent rows and it has not moved: what
-/// [`Go`](FleetHit::Go) adds is a project's *name*, on a row with nothing to
-/// preview, where going there is the only thing pressing it could mean. Nothing
-/// here takes you somewhere by accident; every route out is a field you aimed at.
+/// So no row of this list travels, project rows included — every one of them
+/// only moves the cursor, and BOOTH's middle column follows it, which is the
+/// entire point of the page. A project's name briefly did travel, on the
+/// grounds that a project row had nothing to preview; it has one, the agent in
+/// it that most needs you, so that was a route out of the page nobody aimed at
+/// wearing the same clothes as the bug above. **Text looks, buttons act**, and
+/// the only things here that travel are `[open]` and `enter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FleetHit {
-    /// An agent row: put the cursor on it, and the preview with it. Never more.
+    /// Any row's text — an agent, a project's name: put the cursor on it, and
+    /// the preview with it. Never more.
     Row(usize),
     /// The `[open]` button: go to that agent now, wherever it lives.
     Open(usize),
-    /// A project's name: go to that workspace, on its machine.
-    Go(usize),
     /// A project's `[+]`: start its preferred agent, without moving the page.
     New(usize),
     /// A project's `[x]`: close that workspace, once the confirm says so.
@@ -828,6 +849,131 @@ mod tests {
                 Some(FleetHit::Row(*i)),
                 "the column left of the button is still the row"
             );
+        }
+    }
+
+    /// Every field of a project row answers at the cells it is *drawn* on,
+    /// whichever column of the page has the keyboard.
+    ///
+    /// The bug this exists for: `[x]` is reserved on the cursor's row and only
+    /// while the fleet has the keyboard, and the four cells it costs carry
+    /// `[+ claude]` with them. The drawing knew that and the hit-test did not,
+    /// so as soon as you clicked the preview — or pressed tab — the cursor's
+    /// project row drew `[+ claude]` flush right with no `[x]`, while a press on
+    /// it resolved four cells left of where it looked and came back as `Close`,
+    /// opening the close-workspace confirm. Both now ask
+    /// [`chrome::fleet_cursor_row`], and this asserts against the layout the
+    /// painter would draw rather than against columns written out here, so a row
+    /// that changes shape moves the test's expectations with it.
+    #[test]
+    fn a_project_row_resolves_where_it_is_drawn_whoever_has_the_keyboard() {
+        use butai_protocol::api::{AgentDto, AgentState};
+
+        let agent = |title: &str, pane: u64| AgentDto {
+            pane: butai_protocol::PaneId(pane),
+            title: title.into(),
+            state: AgentState::Idle,
+            exited: None,
+            question: false,
+            started_ms: 0,
+            working_since_ms: None,
+            unread: false,
+        };
+        let (a, b) = (agent("claude", 1), agent("codex", 2));
+        let row = |ws, id, a| chrome::AllAgentRow {
+            workspace: ws,
+            workspace_id: SessionId(id),
+            agent: a,
+            host: None,
+            daemon: 0,
+        };
+        let fleet = vec![row("one", 1, &a), row("two", 2, &b)];
+        let sys = butai_protocol::api::SysDto::default();
+        let (machines, spaces) = booth_scaffold(&sys, &fleet, &[("one", 1, 1), ("two", 2, 1)]);
+
+        // Machine, project `one`, its agent, project `two`, its agent. The
+        // cursor is on `one`, which is the row `[+ claude]` and `[x]` belong to.
+        const PROJECT: usize = 1;
+        const AGENT: usize = 2;
+        let geom = chrome::page_geom(WIDE, ROWS, &View { page: Page::Booth, ..Default::default() });
+        let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
+        assert!(c.fleet_rows.height >= 5, "this terminal shows the whole list unscrolled");
+        let y = c.fleet_rows.y + PROJECT as u16;
+
+        // Both states the page is routinely in: the fleet steering, and the
+        // middle column steering with the cursor left where it was.
+        for focus in [Focus::Stage, Focus::AllAgents] {
+            let view = View { page: Page::Booth, focus, booth_sel: PROJECT, ..Default::default() };
+            let hit = |x| on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, y);
+            let drawn = chrome::space_layout(
+                c.fleet_rows,
+                &spaces[0],
+                false,
+                chrome::fleet_cursor_row(&view, PROJECT),
+            );
+            let ((ax, ae), label) = drawn.add.clone().expect("wide enough to name the button");
+            assert_eq!(label, "[+ claude]", "{focus:?}: the wide column spells the button out");
+            for x in ax..ae {
+                assert_eq!(
+                    hit(x),
+                    Some(FleetHit::New(PROJECT)),
+                    "{focus:?}: column {x} draws `{label}` and must start an agent"
+                );
+            }
+
+            // `[x]` is the cursor's row's and the fleet's alone. Where it is not
+            // drawn, nothing on the row may close a workspace — which is the
+            // press this test is about.
+            match drawn.close {
+                Some((cx, ce)) => {
+                    assert_eq!(focus, Focus::AllAgents, "`[x]` is drawn only for the fleet");
+                    for x in cx..ce {
+                        assert_eq!(
+                            hit(x),
+                            Some(FleetHit::Close(PROJECT)),
+                            "column {x} draws `[x]` and must be the close button"
+                        );
+                    }
+                }
+                None => {
+                    for x in c.fleet_rows.x..c.fleet_rows.x + c.fleet_rows.width {
+                        assert_ne!(
+                            hit(x),
+                            Some(FleetHit::Close(PROJECT)),
+                            "{focus:?}: column {x} closes a workspace with no `[x]` drawn"
+                        );
+                    }
+                }
+            }
+
+            // The name is the row's other field whose span the button's width
+            // decides — `space_layout` places right to left, so a reserved `[x]`
+            // shortens it too. It selects across exactly the cells it draws,
+            // and selecting is the *most* it may do: pressing a project's name
+            // must never travel, or the pointer has a route off the page that
+            // nobody aimed at.
+            let (nx, ne) = drawn.name;
+            let drawn_name = (spaces[0].name.chars().count() as u16).min(ne - nx);
+            for x in nx..nx + drawn_name {
+                assert_eq!(
+                    hit(x),
+                    Some(FleetHit::Row(PROJECT)),
+                    "{focus:?}: column {x} draws the project's name and must only select it"
+                );
+            }
+
+            // And `[open]` on an agent row, which is right-aligned on the
+            // column and so has never depended on the cursor. Asserted here
+            // anyway: it is the same class of mismatch, one row down.
+            let (ox, oe) = chrome::fleet_open_span(c.fleet_rows).expect("wide enough for [open]");
+            let ay = c.fleet_rows.y + AGENT as u16;
+            for x in ox..oe {
+                assert_eq!(
+                    on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, ay),
+                    Some(FleetHit::Open(AGENT)),
+                    "{focus:?}: column {x} of the agent row is the jump button"
+                );
+            }
         }
     }
 

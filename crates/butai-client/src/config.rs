@@ -26,6 +26,21 @@ use serde::Deserialize;
 /// The palette a config with no `[theme] name` gets.
 pub const DEFAULT_THEME: &str = "blueprint-dark";
 
+/// How many workspaces `[views]` remembers a page for.
+///
+/// A bound rather than a housekeeping pass, because there is nothing to base a
+/// pass on: a workspace closed on a machine that is not connected today is
+/// indistinguishable from one that will be back on Monday, and a client that
+/// pruned every key it could not currently see would forget every other machine
+/// in the fleet the moment it started alone.
+///
+/// So the table is a fixed-size recency list instead. Sixty-four is well past
+/// what anyone keeps open and small enough that the whole thing is a screenful
+/// — and the eviction is what makes it true that opening a project once does
+/// not leave a line in the file forever. [`Config::save_view_at`] has the
+/// ordering it evicts by.
+pub const VIEWS_CAP: usize = 64;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -40,6 +55,27 @@ pub struct Config {
     /// `[update]`: whether to look for a newer release, and which one was
     /// turned down.
     pub update: UpdateConfig,
+    /// `[views]`: the space each workspace was last looking at, keyed by the
+    /// machine it is on and the directory it is open in.
+    ///
+    /// ```toml
+    /// [views]
+    /// "local:/media/nvme/Projects/butai" = "git"
+    /// "gpu-box:/srv/diffusion" = "files"
+    /// ```
+    ///
+    /// **Held as words rather than as [`Page`](crate::chrome::Page)s**, and
+    /// that is the version-skew policy this module states at the top, applied
+    /// to a value instead of a key: a page name a newer butai writes is one
+    /// this build has never heard of, and deserialising straight into an enum
+    /// would fail the whole file's parse over one line about one project.
+    /// [`Page::space_named`](crate::chrome::Page::space_named) is what reads
+    /// them back, and a word it does not know is a line that is ignored.
+    ///
+    /// Written by the workbench, not by hand — see [`crate::views`], which owns
+    /// the key's shape and the cap that keeps this table from growing a line
+    /// per project you ever opened.
+    pub views: HashMap<String, String>,
 }
 
 /// One `[[remote]]` block.
@@ -536,6 +572,46 @@ impl Config {
     ) -> std::io::Result<()> {
         edit_config(path, |doc| {
             table(doc, "update")["channel"] = toml_edit::value(channel.as_str());
+        })
+    }
+
+    /// Remember which space a workspace was last looking at: one line of
+    /// `[views]`.
+    pub fn save_view(key: &str, page: crate::chrome::Page) -> std::io::Result<()> {
+        Self::save_view_at(&Self::path(), key, page)
+    }
+
+    /// [`save_view`](Self::save_view) against an explicit path (tests).
+    ///
+    /// **One key, like every other writer here, and for one more reason than
+    /// the rest.** Two workbenches are routinely open at once — that is what
+    /// the whole client is for — and each holds its own idea of where every
+    /// project was left. Writing the table back whole would mean the second one
+    /// to quit erased what the first one learned; setting the line it is
+    /// actually about leaves every other project's alone.
+    ///
+    /// **The table's order is its recency, and the eviction runs on that.** A
+    /// key being written is removed and re-appended rather than updated where
+    /// it sits, so the file reads oldest-first and the entries that fall off the
+    /// front are the projects nobody has looked at in the longest time. It costs
+    /// a rewritten line and buys an LRU with nothing extra in the file to
+    /// explain — no timestamps, no counters, nothing for a person reading their
+    /// own config to have to decode. The cost is that a comment written beside
+    /// one of these lines does not survive the next visit to that project; the
+    /// rest of the file keeps every comment it had, as always.
+    pub fn save_view_at(path: &Path, key: &str, page: crate::chrome::Page) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            let Some(views) = table(doc, "views").as_table_like_mut() else { return };
+            views.remove(key);
+            views.insert(key, toml_edit::value(page.label()));
+            while views.len() > VIEWS_CAP {
+                // The front is the least recently written, by the rule above.
+                // `break` rather than a bare unwrap: an empty table cannot be
+                // over the cap, so this cannot happen — and if it ever does, a
+                // config write is not the place to panic.
+                let Some(oldest) = views.iter().next().map(|(k, _)| k.to_string()) else { break };
+                views.remove(&oldest);
+            }
         })
     }
 

@@ -46,6 +46,79 @@ use crate::selection::{self, Drag};
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 /// Sprite clock, gated on something actually animating.
 const FAST_TICK: std::time::Duration = std::time::Duration::from_millis(120);
+/// The one repaint nothing on screen asked for.
+///
+/// Both clocks above only repaint when the last frame said it had drawn
+/// something that moves, which is right for everything that moves and wrong for
+/// one thing that does not. An agent's sprite wears its age on its head — `o`
+/// under five minutes, then `0`, `O`, `@` — and that glyph is a reading of the
+/// wall clock with nothing animating and no event behind it. It changes three
+/// times in an agent's life and the screen would otherwise not hear about it.
+///
+/// So this is that glyph's clock, and nothing else's. Five seconds against a
+/// five-*minute* threshold: the exact answer is for the renderer to hand back
+/// the deadline of the next change it knows is coming and for the loop to sleep
+/// until then, which is a considerable machine to be a few seconds early with a
+/// lowercase `o`.
+///
+/// **Do not speed this up to cover something new.** Anything that changes
+/// faster than this belongs in [`chrome::Painted`], which is how the marquee,
+/// the sprites, the working spinner and the USAGE page's countdowns all say so
+/// — and how they say it only while they are on screen.
+const HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// Which of the three clocks that repaint for the screen's own sake woke the
+/// loop. The stage's is not one of them — it repaints to make a reconnect
+/// happen, and answers to [`repaint_for_lost_stage`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clock {
+    Slow,
+    Fast,
+    Heartbeat,
+}
+
+/// Whether a clock tick has to repaint, given what the frame before it drew.
+///
+/// The renderer has always computed this — [`chrome::draw`] returns a
+/// [`chrome::Painted`] saying whether a title was mid-scroll or a sprite
+/// mid-stride — and the loop has always thrown it away, so an idle workbench
+/// rebuilt every row, rendered every cell and scanned the screen for URLs four
+/// times a second forever, to write a diff that was empty every time.
+///
+/// It is a function rather than three conditions inside the `select!` because
+/// arms of a `select!` are unreachable from a test, which is exactly how the
+/// answer went missing the first time.
+///
+/// **It reads the last frame, not this one.** That is what draws the frame that
+/// *stops* the motion: when a title finishes scrolling or an agent stops
+/// working, the frame removing it is itself a change, and it gets drawn on the
+/// strength of the previous frame's request. The tick after that one asks the
+/// new answer and stops.
+fn repaint_on_tick(last: chrome::Painted, clock: Clock) -> bool {
+    match clock {
+        Clock::Slow => last.wants_anim,
+        Clock::Fast => last.wants_fast_anim,
+        // See [`HEARTBEAT`]: it exists precisely because nothing reports the
+        // thing it is for.
+        Clock::Heartbeat => true,
+    }
+}
+
+/// Whether the stage's own clock has to repaint.
+///
+/// The odd one out, and the only repaint here that is not about what the screen
+/// looks like: [`Stage::reopen_due`] is consulted inside the block the repaint
+/// gates, so this is what keeps a dropped connection being re-dialled. The
+/// notice it also redraws is a side effect of that, not the reason.
+///
+/// **`None` is false, and that is the case worth having a function for.** A
+/// client with nothing staged has no connection to re-open, so a daemon that
+/// went away while you were on SETTINGS costs nothing at all — where a
+/// condition written as "is the daemon reachable" would have repainted forever.
+fn repaint_for_lost_stage(stage: Option<&Stage>) -> bool {
+    stage.is_some_and(|s| s.lost.is_some())
+}
+
 /// How often a running client asks whether a newer release exists.
 ///
 /// The first tick is immediate, so this is both the launch check and the
@@ -488,13 +561,48 @@ pub async fn run(
     let mut diff = DiffView::default();
     let mut docker = Docker::default();
     let mut git = chrome::Git::default();
+    // Why a machine is not in the tab bar, kept past the footer line that said
+    // so. Keyed by tab badge, like `downed` and `dial_specs`: a dial failure is
+    // about a machine, and the index of one moves every time another leaves.
+    //
+    // The SETTINGS page's MACHINES section is the reason it is kept at all. A
+    // dial error used to live for exactly one flash, which is long enough to
+    // read and not long enough to act on — and the page whose whole job is to
+    // answer "why is that machine not here" had nothing to say but "not
+    // connected".
+    let mut dial_errors: HashMap<String, String> = HashMap::new();
+    // What build each daemon is running, keyed by the socket it answers on —
+    // which is a `Daemon`'s own identity, and the one thing about a machine
+    // that survives it being re-dialled into a different slot.
+    //
+    // Beside the daemon list rather than on the page, because the page is
+    // rebuilt from scratch every frame on purpose: a version is the one thing
+    // the MACHINES section shows that costs a round trip, so it is fetched
+    // where daemons are held and handed to the page like everything else it
+    // draws. See [`probe_builds`].
+    let mut builds: HashMap<PathBuf, chrome::settings::Build> = HashMap::new();
+    // The `[[remote]]` blocks as the file has them *now*. Re-read rather than
+    // taken from `config` once, because the SETTINGS page writes this part of
+    // the file: connecting a machine remembers it and forgetting one removes
+    // its block, and a section still listing what the file said at launch would
+    // be a section contradicting the row you just pressed.
+    let mut remote_blocks: Vec<crate::config::RemoteDef> = config.remote.clone();
     // The SETTINGS page's cursor and the lists it loads on arrival. Seeded with
     // what the file said, so the page opens showing the configuration that is
     // actually in force rather than the defaults.
     let mut settings = chrome::Settings {
         saved_theme: config.theme.name.clone(),
         auto_attach,
-        remotes: config.remote.iter().map(remote_label).collect(),
+        machines: machine_list(
+            &daemons,
+            &hosts,
+            &sockets,
+            &forwards,
+            &dialling,
+            &remote_blocks,
+            &builds,
+            &dial_errors,
+        ),
         bindings: (keymap.len(), config.keys.len()),
         update_check: config.update.check,
         update_channel: config.update.channel,
@@ -516,11 +624,27 @@ pub async fn run(
     // scans of two different buffers would be two answers.
     let mut screen_links = links::ScreenLinks::default();
     let mut dirty = true;
+    // What the last frame drew that keeps drawing itself — a title mid-scroll,
+    // a sprite mid-stride — which is what [`repaint_on_tick`] asks before it
+    // spends a clock tick on another one. Carried across iterations rather than
+    // recomputed, because the question is about the frame on the screen and
+    // there is no way to answer it without having drawn one.
+    //
+    // The default is "nothing is moving", and it is never the answer to
+    // anything: `dirty` starts true, so the first pass through the loop paints
+    // before any clock can fire and this holds a real frame's report from then
+    // on.
+    let mut last_frame = chrome::Painted::default();
     // The first tick fires immediately, so this is the launch check too —
     // one clock rather than a spawn before the loop and a timer inside it.
     let mut update_tick = tokio::time::interval(UPDATE_CHECK_EVERY);
     let mut slow = tokio::time::interval(TICK);
     let mut fast = tokio::time::interval(FAST_TICK);
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    // Paces the re-open of a dropped stage, which rides the repaint — see the
+    // arm this drives. Runs whether or not anything is lost; the arm is what
+    // costs nothing while everything is connected.
+    let mut stage_retry = tokio::time::interval(STAGE_RETRY);
     // Which workspace the page state on screen belongs to.
     //
     // The trees, the diff and the docker cursor are all *about* one workspace,
@@ -534,15 +658,62 @@ pub async fn run(
     // Keyed on the workspace's identity rather than the tab index, because
     // closing a tab shifts every index after it: the same number is then a
     // different project, which is exactly when stale contents would be worst.
-    let mut showing = active_ws_key(&daemons, &hosts, &view);
+    //
+    // Starts empty rather than at the workspace we opened on, so the first pass
+    // through the loop treats launching as an arrival like any other — the view
+    // it restores is a page that may need listing, and this is what runs the
+    // block that lists it.
+    let mut showing = None;
+    // The same workspace, spelled the way the config file remembers it: its
+    // machine and its directory. Recomputed only where `showing` is, because it
+    // is a function of the same thing and a workspace does not change directory
+    // under you.
+    let mut showing_key: Option<String> = None;
+    // Which space each workspace was last looking at, and the debounce that
+    // keeps a page change from being a file rewrite per keystroke. See
+    // [`crate::views`].
+    let mut views = crate::views::Views::new(&config);
     // Which page the loop last saw, so *arriving* on one can do work. Noticed
     // here for the same reason `showing` is: there are ten ways to reach a page
     // — the spaces menu, `alt-g`, `alt-,`/`alt-.`, a click, a jump from another
     // page — and putting the fetch on each of them means the eleventh forgets.
     let mut showed_page = view.page;
+    // An agent started from BOOTH's fleet that the cursor is still waiting to
+    // land on. Held by the loop rather than by the [`View`] because it is not a
+    // property of the view at all — it is a request in flight, and the thing it
+    // is waiting for is the *daemon state* this loop owns and folds events into.
+    // See [`NewAgentFollow`].
+    let mut following: Option<NewAgentFollow> = None;
+    // See [`MachinesStale`]. Held here for the same reason: it is a request in
+    // flight, not a property of the view, and the thing it is waiting on is the
+    // daemon list this loop owns.
+    let mut machines_stale = MachinesStale::default();
 
     let reason = loop {
         let now_showing = active_ws_key(&daemons, &hosts, &view);
+        // Before anything is drawn, so the frame that first shows the new
+        // agent's row is already the frame with the cursor on it — a cursor
+        // that arrived a paint late would read as the click having missed.
+        if let Some(follow) = following {
+            if !follow.live(&view, Instant::now()) {
+                following = None;
+            } else if follow_new_agent(&daemons, &hosts, &mut view, follow.daemon, follow.pane) {
+                following = None;
+                dirty = true;
+            }
+        }
+        // Arriving at a workspace puts back the page that workspace was left
+        // on, and it happens here — ahead of both blocks below and off the same
+        // comparison the second one makes — so that a restored page is an
+        // *arrival* to everything that follows. The block below is what loads
+        // GIT and USAGE on arrival and the one below that is what re-lists the
+        // trees, and a restore made after either of them would put up a page
+        // and leave it empty. `showing` is deliberately not taken here: the
+        // second block still has its own work to do on the same change.
+        if now_showing != showing {
+            showing_key = active_view_key(&daemons, &hosts, &view);
+            restore_view(&views, showing_key.as_deref(), &mut view);
+        }
         if view.page != showed_page {
             // Leaving SETTINGS with a theme list open would strand the preview:
             // the palette on screen is whichever row the cursor was on, and
@@ -595,6 +766,19 @@ pub async fn run(
                         Vec::new()
                     }
                 };
+                // And the machines, which is the third read: the blocks off
+                // disk (they change under the page, because the page writes
+                // them), then one handshake per connected daemon for the build
+                // it is running. Both on arrival for the same reason the two
+                // above are — neither answer changes without something the
+                // client is told about — and `r` re-asks.
+                remote_blocks = crate::config::Config::load().0.remote;
+                probe_builds(&daemons, &sockets, &mut builds).await;
+                // The list itself is built by the block below, on this same
+                // pass and before the paint. One builder rather than two: this
+                // arrival runs once for the life of the client, and everything
+                // that happens to the fleet afterwards goes through the mark.
+                machines_stale.mark();
                 settings.loaded = true;
                 dirty = true;
             }
@@ -625,6 +809,38 @@ pub async fn run(
             }
             dirty = true;
         }
+        // The MACHINES section, when the fleet has moved under it — see
+        // [`MachinesStale`] for why the arms that move it only leave a mark.
+        //
+        // Not in the paint: this is a pass over every daemon, every forward and
+        // every `[[remote]]` block, for an answer that changes a handful of
+        // times an hour. Not in the arms either: none of them has the eight
+        // things it is built from in scope, and two of the three are on the
+        // wrong side of a `select!` from most of them.
+        if machines_stale.due(view.page) {
+            settings.machines = machine_list(
+                &daemons,
+                &hosts,
+                &sockets,
+                &forwards,
+                &dialling,
+                &remote_blocks,
+                &builds,
+                &dial_errors,
+            );
+            dirty = true;
+        }
+        // Where this project is being looked at, taken from the screen rather
+        // than from the dozen gestures that change it — the same argument
+        // `showing` and `showed_page` above are made on, and the reason none of
+        // `alt-o`, the cycle keys, the spaces menu or a click had to learn
+        // anything about the config file. After the block above, so the frame a
+        // workspace is arrived on notes the page it was restored to rather than
+        // the one it was left behind on.
+        //
+        // Cheap on every pass: the write is debounced and the common case is a
+        // map lookup that finds the page already there.
+        views.note(showing_key.as_deref(), view.page, Instant::now());
         if dirty {
             let rect = chrome::stage_rect(cols, rows, &view);
             // Follow the stage. `watch` is what makes this cost no reconnect —
@@ -671,7 +887,7 @@ pub async fn run(
             // this same list between frames, is testing the rail that is
             // actually on screen.
             sync_gauges(&mut view, &daemons, &hosts);
-            screen_links = paint(
+            (screen_links, last_frame) = paint(
                 &mut painted,
                 cols,
                 rows,
@@ -721,6 +937,7 @@ pub async fn run(
                         &mut view,
                         &adopt_tx,
                     );
+                    machines_stale.mark();
                     dirty = true;
                 }
                 // Back — by our re-dial, or by the far daemon returning on a
@@ -738,6 +955,7 @@ pub async fn run(
                         view.flash =
                             Some(format!("daemon is on {}", crate::update::CURRENT));
                     }
+                    machines_stale.mark();
                     dirty = true;
                 }
                 // A `butai` typed after `ssh` announced where it is. The daemon
@@ -777,6 +995,7 @@ pub async fn run(
                                     &mut dial_meta,
                                     &adopt_tx,
                                 );
+                                machines_stale.mark();
                             }
                             // Already here, or already on its way. A pane can
                             // announce more than once and each one must not add
@@ -961,13 +1180,16 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                Err(e) => view.flash = Some(format!("{}: {e:#}", meta.label)),
+                                Err(e) => {
+                                    dial_failed(&meta.label, &e, &mut dial_errors, &mut view)
+                                }
                             },
-                            Err(e) => view.flash = Some(format!("{}: {e:#}", meta.label)),
+                            Err(e) => dial_failed(&meta.label, &e, &mut dial_errors, &mut view),
                         }
                     }
-                    Err(e) => view.flash = Some(format!("{e:#}")),
+                    Err(e) => dial_failed(&meta.label, &e, &mut dial_errors, &mut view),
                 }
+                machines_stale.mark();
                 dirty = true;
             }
             Some(ev) = input.recv() => {
@@ -1017,18 +1239,49 @@ pub async fn run(
                         update_offer = None;
                         dirty = true;
                     }
-                    Flow::UpdateDaemon => {
-                        match ask_daemon_to_update(&daemons, &hosts, &view).await {
+                    Flow::UpdateMachine(host) => {
+                        let name = if host.is_empty() { "the daemon" } else { &host };
+                        match ask_daemon_to_update(&daemons, &hosts, &host).await {
                             Ok(dto) => {
                                 view.flash = Some(match (&dto.latest, dto.updating) {
                                     (Some(v), true) => {
-                                        format!("daemon updating {} -> {v}", dto.current)
+                                        format!("{name} updating {} -> {v}", dto.current)
                                     }
-                                    _ => format!("daemon is on {}, the latest", dto.current),
+                                    _ => format!("{name} is on {}, the latest", dto.current),
                                 });
+                                // What it *was* on is now what it is coming
+                                // back off. Recorded before the detach so the
+                                // MACHINES section cannot go on advertising a
+                                // version the machine has been told to stop
+                                // running — the answer arrives before the
+                                // shutdown, which is the only window there is.
+                                if let Some(socket) = daemon_socket(&daemons, &hosts, &host) {
+                                    let build = match dto.updating {
+                                        true => chrome::settings::Build::Updating {
+                                            from: dto.current.clone(),
+                                            to: dto.latest.clone(),
+                                        },
+                                        false => chrome::settings::Build::On(dto.current.clone()),
+                                    };
+                                    builds.insert(socket, build);
+                                }
                             }
-                            Err(e) => view.flash = Some(format!("update: {e:#}")),
+                            // Not a bare 400. The refusal is the ordinary
+                            // answer from a daemon nobody has opted in, and it
+                            // is only useful if it says which machine and which
+                            // key — see [`update_refusal`].
+                            Err(e) => view.flash = Some(update_refusal(name, &e)),
                         }
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
                         dirty = true;
                     }
                     Flow::RestartDaemon => {
@@ -1041,34 +1294,44 @@ pub async fn run(
                         }
                         dirty = true;
                     }
-                    // `:update` means "update the butai this tab is looking at".
-                    // On a tab from another machine that is the daemon over
-                    // there, and updating this binary instead would leave it
-                    // exactly as it was — the version skew the updater exists to
-                    // end. `active_host` borrows from `hosts`, not `view`, so
-                    // the overlay can go up in the same breath.
-                    Flow::CheckUpdate if active_host(&daemons, &hosts, &view).is_some() => {
-                        let host = active_host(&daemons, &hosts, &view);
-                        view.overlay = host.map(update_daemon_overlay);
-                        dirty = true;
-                    }
-                    Flow::CheckUpdate => {
-                        match &update_offer {
+                    // Updating "the butai this names" splits in two, and the
+                    // split is not where the daemon is but what the update
+                    // costs. Another machine's daemon fetches its own build and
+                    // this client carries on drawing, so that is a request and
+                    // a confirm box; this machine's replaces the binary the
+                    // client is running out of, so that is the question
+                    // `Flow::Update` leaves the loop to answer.
+                    //
+                    // `:update` resolves against the active tab, which is what
+                    // it has always meant. A SETTINGS row names its own machine
+                    // and does not care which tab is showing.
+                    Flow::CheckUpdate(target) => {
+                        let host = match &target {
+                            UpdateTarget::ActiveTab => {
+                                active_host(&daemons, &hosts, &view).map(str::to_string)
+                            }
+                            UpdateTarget::Here => None,
+                            UpdateTarget::Machine(h) => Some(h.clone()),
+                        };
+                        match (host, &update_offer) {
+                            (Some(host), _) => {
+                                view.overlay = Some(update_daemon_overlay(&host));
+                            }
                             // Already know about one: reopen the question
                             // rather than asking GitHub the same thing twice.
-                            Some(offer) => {
+                            (None, Some(offer)) => {
                                 view.overlay = Some(update_overlay(&offer.version));
                                 view.flash = Some(format!(
                                     "no won't ask again for {} — esc asks next launch",
                                     offer.version
                                 ));
                             }
-                            None if updates => {
+                            (None, None) if updates => {
                                 view.flash = Some("checking for updates…".to_string());
                                 update_forced = true;
                                 spawn_update_check(&update_tx, update_channel);
                             }
-                            None => {
+                            (None, None) => {
                                 view.flash =
                                     Some("standalone does not update itself".to_string());
                             }
@@ -1203,6 +1466,107 @@ pub async fn run(
                             theme = Theme::from_palette(&p);
                             showing_theme = want;
                         }
+                        // And the machines, which every key on the page walks
+                        // past: `groups()` is rebuilt from `settings.machines`
+                        // every frame, and that list is a reading of the daemon
+                        // list, the live forwards and the dials in flight —
+                        // none of which is the page's to hold. Re-read here
+                        // rather than in the paint, because it costs a pass
+                        // over a handful of machines and the page is the only
+                        // thing that looks at it. The versions are *not*
+                        // re-probed: those are round trips, and `r` is what
+                        // asks for them again.
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
+                        dirty = true;
+                    }
+                    // `r` on the MACHINES section. The one page whose facts
+                    // another machine can change under you, so the one page
+                    // with a way to ask again — the same key the USAGE and GIT
+                    // pages spend on the same job.
+                    Flow::SettingsRefresh => {
+                        remote_blocks = crate::config::Config::load().0.remote;
+                        probe_builds(&daemons, &sockets, &mut builds).await;
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
+                        view.flash = Some(format!(
+                            "{} machine{}",
+                            settings.machines.len(),
+                            if settings.machines.len() == 1 { "" } else { "s" }
+                        ));
+                        dirty = true;
+                    }
+                    // Both halves, in the order the machines picker does them:
+                    // drop the link, then take out the block that would dial it
+                    // again tomorrow. A disconnect that left the block behind
+                    // came back on the next attach, which read as the
+                    // disconnect having quietly undone itself.
+                    Flow::DisconnectMachine(host) => {
+                        match disconnect_host(
+                            &host,
+                            &mut daemons,
+                            &mut hosts,
+                            &mut sockets,
+                            &mut forwards,
+                            &mut view,
+                        ) {
+                            Ok(host) => forget_machine(&host, &mut view),
+                            Err(e) => view.flash = Some(format!("{e:#}")),
+                        }
+                        remote_blocks = crate::config::Config::load().0.remote;
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
+                        dirty = true;
+                    }
+                    // The other half on its own, for a machine that is not
+                    // here to disconnect: the block is all there is of it, and
+                    // removing one is how it stops being dialled every morning.
+                    Flow::ForgetMachine(host) => {
+                        match crate::config::Config::forget_remote(&host) {
+                            Ok(true) => view.flash = Some(format!("{host} forgotten")),
+                            // Nothing was written down, so nothing went. Said
+                            // out loud because the row offered to do something
+                            // and a silent no-op reads as a broken key.
+                            Ok(false) => {
+                                view.flash = Some(format!("{host} had no [[remote]] block"))
+                            }
+                            Err(e) => view.flash = Some(format!("config.toml: {e}")),
+                        }
+                        remote_blocks = crate::config::Config::load().0.remote;
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
                         dirty = true;
                     }
                     // The reference, as a page of its own. It remembers where it
@@ -1296,6 +1660,21 @@ pub async fn run(
                             &mut dial_meta,
                             &adopt_tx,
                         );
+                        // The dial is in flight, not landed, and that is
+                        // exactly what the SETTINGS row that started it has to
+                        // show: an ssh is seconds of key exchange, and a row
+                        // that went on reading "not connected" for all of them
+                        // is a row whose Enter looks like it missed.
+                        settings.machines = machine_list(
+                            &daemons,
+                            &hosts,
+                            &sockets,
+                            &forwards,
+                            &dialling,
+                            &remote_blocks,
+                            &builds,
+                            &dial_errors,
+                        );
                         dirty = true;
                     }
                     // The three that need the tab bar the loop holds: which
@@ -1348,10 +1727,13 @@ pub async fn run(
                         dirty = true;
                     }
                     // Starting an agent leaves you on BOOTH. The new row
-                    // appears in the fleet and the preview points at it, which
-                    // is the whole of what you wanted to see — a button that
+                    // appears in the fleet, the cursor goes to it and the
+                    // keyboard follows the cursor into the pane — a button that
                     // started something *and* threw the tab bar onto another
-                    // machine is the bug that made agent rows two-step.
+                    // machine is the bug that made agent rows two-step, and one
+                    // that started something and left you looking at a sibling
+                    // agent you cannot type into is the same button failing the
+                    // other way. `NewAgentFollow` is why that is two steps.
                     Flow::NewFleetAgent { pick } => {
                         match booth_cursor(&daemons, &hosts, &view) {
                             BoothCursor::Space { daemon, id, preferred, name, .. } => {
@@ -1359,7 +1741,16 @@ pub async fn run(
                                     Some(name) => {
                                         match spawn_agent_in(&daemons, daemon, id, &name).await {
                                             Ok(pane) => {
+                                                // Still set, though BOOTH's own
+                                                // stage does not read it: the
+                                                // moment `[open]` or `enter`
+                                                // takes you into that
+                                                // workspace, this is the pane
+                                                // that should be up.
                                                 view.staged = Some(pane);
+                                                following = Some(NewAgentFollow::new(
+                                                    &view, daemon, pane,
+                                                ));
                                                 view.flash = Some(format!("started {name}"));
                                             }
                                             Err(e) => view.flash = Some(format!("{e:#}")),
@@ -2178,7 +2569,30 @@ pub async fn run(
                                         // The agent picker is the one list that
                                         // makes a pane; it goes on the stage,
                                         // exactly as `a` and `[+ agent]` do.
-                                        Ok(Some(pane)) => stage_new_pane(&mut view, pane),
+                                        //
+                                        // Except BOOTH's, which is the same
+                                        // question asked about a project that
+                                        // is routinely not the tab you are on
+                                        // or even on its machine — so the pane
+                                        // it makes is followed in the fleet
+                                        // rather than staged. `stage_new_pane`
+                                        // ends on `Page::Agents`, which from
+                                        // here is the page moving under a
+                                        // press whose whole rule is that it
+                                        // does not: `A` on a `gpu-box` row
+                                        // dropped you on the AGENTS page of
+                                        // whatever tab happened to be active.
+                                        Ok(Some(pane)) => {
+                                            if let ListKind::SpawnAgentIn { daemon, .. } =
+                                                &list.kind
+                                            {
+                                                view.staged = Some(pane);
+                                                following =
+                                                    Some(NewAgentFollow::new(&view, *daemon, pane));
+                                            } else {
+                                                stage_new_pane(&mut view, pane);
+                                            }
+                                        }
                                         Ok(None) => {}
                                         Err(e) => view.flash = Some(format!("{e:#}")),
                                     }
@@ -2241,12 +2655,63 @@ pub async fn run(
             _ = update_tick.tick(), if updates_enabled => {
                 spawn_update_check(&update_tx, update_channel);
             }
+            // The two animation phases advance on the wall clock whether or not
+            // the frame they are for gets drawn, so a marquee resumed by a
+            // keystroke is where the clock says it should be rather than where
+            // it was when the screen last stopped. Only the *paint* is gated —
+            // and gated on the frame that is actually on the screen, which is
+            // the last one drawn and not the one about to be.
             _ = slow.tick() => {
                 view.tick = view.tick.wrapping_add(1);
-                dirty = true;
+                dirty |= repaint_on_tick(last_frame, Clock::Slow);
             }
+            // Sprites were never repainted by this arm at all: it advanced the
+            // phase and set nothing, so the fleet's typing hands were only ever
+            // *drawn* by the 250ms clock and every second frame of the cycle
+            // went past unseen. Animating them at the 120ms they were written
+            // for is the one thing here that paints more often than before, and
+            // the only thing in this change that costs rather than saves.
+            //
+            // It was measured before it was kept, because "correct animation"
+            // is not on its own an argument for doubling a paint rate. One
+            // whole frame — compose, blit, scan the screen for URLs, diff — at
+            // twelve agents over four projects, release build: 152us at 80x24,
+            // 295us at 120x35, 661us at 200x50. At 8.3Hz the widest of those is
+            // 0.55% of one core, against 0.27% at the 4Hz it used to alias down
+            // to, and only while BOOTH is open with an agent actually working.
+            // Half a percent of one core, in an attended state, is not the load
+            // anyone reported; 240 unconditional repaints a minute on every
+            // page, idle, forever, is what was.
             _ = fast.tick() => {
                 view.fast_tick = view.fast_tick.wrapping_add(1);
+                dirty |= repaint_on_tick(last_frame, Clock::Fast);
+            }
+            _ = heartbeat.tick() => {
+                dirty |= repaint_on_tick(last_frame, Clock::Heartbeat);
+            }
+            // A stage whose link dropped is the one thing on screen that has to
+            // be repainted to make *progress* rather than merely to look right:
+            // the re-open attempt lives inside the `if dirty` block above, so a
+            // stage nobody repaints is a stage nobody re-opens, and a laptop
+            // shut on the GIT page would never find its daemon again.
+            //
+            // On its own clock rather than through [`chrome::Painted`], which
+            // is where this started. Claiming `wants_anim` for the notice got
+            // the reconnect running again and reintroduced the bug the rest of
+            // this change removes, one page over: a machine that is simply off
+            // held the whole workbench at 4Hz for as long as it stayed off,
+            // which is exactly the overnight repainting nobody asked for.
+            //
+            // [`STAGE_RETRY`] rather than [`HEARTBEAT`] because this paces the
+            // reconnect, and the five seconds that are generous for an age
+            // glyph are five seconds of black stage after a daemon restart —
+            // the case `STAGE_RETRY` was sized for. The cost of the choice is
+            // that the notice's spinner advances several phases per draw
+            // instead of turning smoothly; a glyph that changes once a second
+            // still reads as "trying", and it is the honest picture of a retry
+            // that also happens once a second.
+            _ = stage_retry.tick() => {
+                dirty |= repaint_for_lost_stage(stage.as_ref());
             }
         }
     };
@@ -2258,6 +2723,11 @@ pub async fn run(
     if let Some(pane) = docker.logs.take() {
         kill_process(&daemons, &hosts, &view, pane).await.ok();
     }
+    // The page you detached on is the page you should come back to, and the
+    // debounce that keeps `alt-o` from rewriting a file has a two-second tail
+    // that a detach would otherwise fall inside. Nothing to do when the write
+    // already landed, which is the ordinary case.
+    views.flush();
     drop(_guard);
     Ok(reason)
 }
@@ -2294,7 +2764,7 @@ fn channel_edit(chosen: &str) -> chrome::settings::Edit {
     }
 }
 
-/// Ask the active tab's daemon to update itself.
+/// Ask a named machine's daemon to update itself.
 ///
 /// The whole job goes over in one request — check, download, verify, swap,
 /// restart — because the daemon is the only thing that can do any of it for a
@@ -2302,16 +2772,62 @@ fn channel_edit(chosen: &str) -> chrome::settings::Edit {
 /// back says what it is about to do; the detach that follows is an ordinary
 /// server shutdown, and the stage keeps its cells and reconnects the way it
 /// does for any restart.
+///
+/// By badge rather than by the active tab, because a confirm box is answered
+/// some seconds after it is raised and the tab bar moves in between — see
+/// [`Flow::UpdateMachine`]. An empty badge is the daemon on this machine, which
+/// is what `hosts` spells `None`.
 async fn ask_daemon_to_update(
     daemons: &[Daemon],
     hosts: &[Option<String>],
-    view: &View,
+    host: &str,
 ) -> Result<butai_protocol::api::UpdateDto> {
-    let d = active_daemon(daemons, hosts, view);
-    let daemon = daemons.get(d).context("no daemon behind the active tab")?;
+    let d = daemon_by_badge(hosts, host).with_context(|| format!("{host} is not connected"))?;
+    let daemon = daemons.get(d).context("no daemon for that machine")?;
     let body = daemon.api.post("/v1/update", &serde_json::Value::Null).await?;
     serde_json::from_slice(&body)
         .with_context(|| format!("parse the daemon's answer: {}", String::from_utf8_lossy(&body)))
+}
+
+/// Which daemon carries this badge. Empty names the local one, which has none.
+///
+/// The inverse of how `hosts` is filled, and the one place a badge becomes an
+/// index: two machines are allowed to have the same *label* only if one of them
+/// is not connected, and this only ever looks at the ones that are.
+fn daemon_by_badge(hosts: &[Option<String>], host: &str) -> Option<usize> {
+    hosts.iter().position(|h| h.as_deref().unwrap_or_default() == host)
+}
+
+/// That machine's socket, so what it answered can be filed against the daemon
+/// it came from rather than against a tab that is about to move.
+fn daemon_socket(daemons: &[Daemon], hosts: &[Option<String>], host: &str) -> Option<PathBuf> {
+    Some(daemons.get(daemon_by_badge(hosts, host)?)?.socket().to_path_buf())
+}
+
+/// What to say when an update request comes back refused.
+///
+/// **The refusal is the ordinary answer, not an error.** `[update]
+/// allow_remote` is off by default and deliberately so — the socket's only
+/// access control is the `0700` on its directory, and "can reach the daemon" is
+/// a much weaker claim than "may replace the program this machine runs" — so a
+/// client that flashed `400 Bad Request` at somebody would be reporting the
+/// documented behaviour as a fault.
+///
+/// The daemon's own 400 already names the key. What it cannot name is *which
+/// machine's* `~/.butai/config.toml` that is, because it does not know what
+/// this client calls it — and on a page listing four machines that is the only
+/// part you need. So the sentence is rewritten here with the name in it, and
+/// every other failure is passed through untouched.
+fn update_refusal(machine: &str, err: &anyhow::Error) -> String {
+    let refused =
+        err.downcast_ref::<crate::api::ApiError>().is_some_and(|e| e.status.as_u16() == 400);
+    if !refused {
+        return format!("update {machine}: {err:#}");
+    }
+    format!(
+        "{machine} does not take update requests — set `[update] allow_remote = true` in its \
+         own ~/.butai/config.toml and `:reload-config`, or run `butai update` there"
+    )
 }
 
 /// The same box for a daemon on another machine.
@@ -2520,6 +3036,41 @@ fn open_page(view: &mut View) -> Flow {
     }
 }
 
+/// Land on a workspace's own view: the space it was last looking at.
+///
+/// The page is a property of the *project*, not of this client — see
+/// [`crate::views`] — so arriving somewhere puts back what that project was
+/// left on, and the page you carried in with you is only the answer for a
+/// workspace butai has never seen. That fallback is deliberate and is the old
+/// behaviour intact: switching to a project for the first time keeps the view
+/// you were using, which is both the least surprising thing to do and the right
+/// thing to then remember about it.
+///
+/// **Nothing moves while BOOTH, SETTINGS or HELP is up.** None of the three is
+/// a view of a workspace, so which workspace is active is not a question they
+/// are answering, and pulling the screen off one because a tab closed under you
+/// would be the screen moving on its own. Choosing a tab is the case that
+/// *does* move, and it already has: [`select_tab`] leaves BOOTH on the three
+/// paths where a workspace was asked for, so by the time this runs the page is
+/// a space again and the restore applies. DIFF is left alone on the same terms
+/// — it is what is on the stage rather than somewhere you navigated to.
+///
+/// Through [`open_page`], because arriving here is arriving: the focus rules
+/// for landing on GIT with a history to walk, and for landing anywhere with a
+/// cursor that only existed on the page you left, are the same rules however
+/// you got there. Its `Flow::ListDir` is dropped rather than dispatched only
+/// because the one caller is the one place that already answers it — the block
+/// this sits in re-lists the tree for whatever page ends up showing, and
+/// listing it twice would be two requests for one arrival.
+fn restore_view(views: &crate::views::Views, key: Option<&str>, view: &mut View) {
+    if !view.page.is_space() {
+        return;
+    }
+    let Some(page) = key.and_then(|k| views.page_for(k)) else { return };
+    view.page = page;
+    let _ = open_page(view);
+}
+
 /// Fill the FILES or DOCS tree from `dir`, whichever page is up.
 ///
 /// A function rather than only the loop's `Flow::ListDir` arm because arriving
@@ -2619,6 +3170,24 @@ fn active_ws_key(
 ) -> Option<(usize, butai_protocol::SessionId)> {
     let (d, t) = *tab_index(daemons, hosts).get(view.tab)?;
     Some((d, daemons[d].state.tabs.get(t)?.id))
+}
+
+/// The same workspace as [`active_ws_key`], spelled the way the config file
+/// remembers a view for it.
+///
+/// A second key rather than a wider first one, because the two answer different
+/// questions and cannot be the same value. That one asks "is this still the
+/// project on screen", which only has to hold between two repaints, so a daemon
+/// index and an id are enough and are cheap to compare. This one asks "which
+/// project is this, across restarts of both halves" — and an id is exactly what
+/// cannot answer it: the daemon hands them out fresh every time it starts, so a
+/// remembered page would come back attached to whichever project was numbered
+/// `1` that morning. [`crate::views::key`] has the shape and what it does about
+/// two machines with the same path.
+fn active_view_key(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Option<String> {
+    let (d, t) = *tab_index(daemons, hosts).get(view.tab)?;
+    let ws = daemons[d].state.tabs.get(t)?;
+    Some(crate::views::key(hosts.get(d).and_then(|h| h.as_deref()), &ws.cwd))
 }
 
 /// Which daemon the active tab belongs to.
@@ -3340,9 +3909,11 @@ fn settings_click(
     let i = chrome::settings::row_at(area.body, grp, st, y)?;
     let row = grp.rows.get(i)?;
     let (id, kind, value) = (row.id, row.kind.clone(), row.value.clone());
+    let machine = row.machine.clone();
+    let target = machine_target(st, machine.as_deref());
     st.row = i;
     // A click on a row does what Enter would: it opens a list, flips a toggle,
-    // and leaves a fact alone.
+    // carries out an action, and leaves a fact alone.
     Some(match (&kind, id) {
         (Kind::Choice(options), _) => {
             st.open = Some(options.iter().position(|o| *o == value).unwrap_or(0));
@@ -3351,6 +3922,13 @@ fn settings_click(
         (Kind::Toggle(on), RowId::AutoAttach) => Flow::SettingsEdit(Edit::AutoAttach(!on)),
         (Kind::Toggle(on), RowId::Links) => Flow::SettingsEdit(Edit::Links(!on)),
         (Kind::Toggle(on), RowId::UpdateCheck) => Flow::SettingsEdit(Edit::UpdateCheck(!on)),
+        // Through the same function the key goes through, so a clicked
+        // `disconnect` and the Enter it stands for cannot come to mean two
+        // different things.
+        (Kind::Action(_), _) => {
+            st.open = None;
+            machine_action(id, machine, target)?
+        }
         _ => {
             st.open = None;
             Flow::SettingsEdit(Edit::Moved)
@@ -3431,17 +4009,288 @@ fn settings_palette(st: &chrome::Settings, view: &View) -> String {
 /// it, and which of the two a machine is explains most of the ways it fails to
 /// connect.
 fn remote_label(r: &crate::config::RemoteDef) -> String {
-    let how = match (&r.host, &r.socket) {
+    match (&r.host, &r.socket) {
         (Some(host), _) => format!("ssh {host}"),
         (None, Some(sock)) => format!("socket {sock}"),
         // Neither key is a block that cannot be dialled at all. Saying so beats
         // drawing a blank row for it.
         (None, None) => "no host or socket".to_string(),
-    };
-    match &r.name {
-        Some(name) => format!("{name} — {how}"),
-        None => how,
     }
+}
+
+/// Say why a machine did not arrive, and remember it.
+///
+/// The footer line is the old behaviour and is still right for anyone watching:
+/// a dial that failed is news. What is new is that the reason is *kept*, keyed
+/// by the badge its tabs would have carried, so the SETTINGS page can answer
+/// "why is that machine not here" ten minutes later instead of "not connected".
+///
+/// The name is stripped back off for the stored copy. [`spawn_dial`] contexts
+/// its error with the destination, and the note is drawn on a machine's own
+/// block under a row that is already its name.
+fn dial_failed(
+    label: &str,
+    err: &anyhow::Error,
+    errors: &mut HashMap<String, String>,
+    view: &mut View,
+) {
+    let full = format!("{err:#}");
+    let reason = full.strip_prefix(&format!("{label}: ")).unwrap_or(&full).to_string();
+    view.flash = Some(format!("{label}: {reason}"));
+    errors.insert(label.to_string(), reason);
+}
+
+/// The badge a `[[remote]]` block's tabs will carry.
+///
+/// The exact rule the two readers of the file already use — [`crate::remotes`]
+/// for an ssh block and [`crate::endpoints`] for a socket one — written once
+/// here because the SETTINGS page has to line a block up against the machine it
+/// dialled, and a badge derived a third way would list every configured machine
+/// twice.
+fn remote_badge(r: &crate::config::RemoteDef) -> Option<String> {
+    r.name
+        .clone()
+        .or_else(|| r.host.clone())
+        .or_else(|| r.socket.as_deref().map(|s| s.rsplit('/').next().unwrap_or(s).to_string()))
+}
+
+/// Whether the MACHINES section's snapshot still describes the fleet.
+///
+/// `settings.machines` is a *reading* — of the daemon list, the live forwards,
+/// the dials in flight and the config file — taken when something asked for it,
+/// and held by the page until something asks again. Every key that reaches the
+/// page asks. The news the section is actually about arrives from nowhere near
+/// the keyboard: a link coming up, a link going down, an ssh landing on its own
+/// task. Those arms repaint, and a repaint of a reading nobody retook is how a
+/// `connect` row went on saying `connecting…` for three seconds after the ssh
+/// had landed — on the one interaction the section exists for, and looking
+/// exactly like an Enter that missed.
+///
+/// So the arms mark and the loop rebuilds. A bool is what makes marking cheap
+/// enough to do from an arm that has none of the eight things the list is built
+/// from in scope.
+#[derive(Debug, Default, Clone, Copy)]
+struct MachinesStale(bool);
+
+impl MachinesStale {
+    /// Who is connected has changed — or the page has just arrived and has no
+    /// list at all.
+    fn mark(&mut self) {
+        self.0 = true;
+    }
+
+    /// Whether this pass owes the section a rebuild, taking the mark if so.
+    ///
+    /// **Off SETTINGS the mark is kept, not spent.** `settings.loaded` is a
+    /// one-way latch, so leaving the page and coming back reloads nothing; a
+    /// machine that arrived while you were on BOOTH would otherwise be missing
+    /// from the section for as long as the client ran.
+    fn due(&mut self, page: Page) -> bool {
+        if !self.0 || page != Page::Settings {
+            return false;
+        }
+        self.0 = false;
+        true
+    }
+}
+
+/// Every machine this client knows of, for the SETTINGS page's MACHINES
+/// section: the ones in the tab bar, then the `[[remote]]` blocks that are not.
+///
+/// **Built on [`machine_rows`] rather than beside it.** The label and the agent
+/// count are the same two numbers BOOTH's compute column draws, and a second
+/// derivation of them is a second answer to "how many agents is that machine
+/// running" — so the live half comes from that list and this adds only what the
+/// compute column has no use for: how the machine is reached, whether a block
+/// remembers it, what it is running, and why it is not here.
+///
+/// `remotes` is passed in rather than read from the config here because the
+/// page's add and forget rows change the file underneath it: the caller re-reads
+/// after a write, and gets a section that agrees with what it just did.
+#[allow(clippy::too_many_arguments)]
+fn machine_list(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    sockets: &[PathBuf],
+    forwards: &[crate::ssh::Forward],
+    dialling: &HashSet<String>,
+    remotes: &[crate::config::RemoteDef],
+    builds: &HashMap<PathBuf, chrome::settings::Build>,
+    dial_errors: &HashMap<String, String>,
+) -> Vec<chrome::settings::Machine> {
+    use chrome::settings::{Link, Machine};
+
+    let all = all_agent_rows(daemons, hosts);
+    let live = machine_rows(daemons, hosts, &all);
+    // Which block, if any, remembers each machine — matched on the badge,
+    // because that is what a block is *for*: it is how the machine gets its
+    // name in the tab bar, and how a disconnect finds the block to remove.
+    let block = |badge: &str| {
+        remotes
+            .iter()
+            .find(|r| remote_badge(r).as_deref() == Some(badge))
+            .filter(|_| !badge.is_empty())
+    };
+
+    let mut out: Vec<Machine> = Vec::new();
+    for (d, daemon) in daemons.iter().enumerate() {
+        let badge = hosts.get(d).cloned().flatten().unwrap_or_default();
+        let local = badge.is_empty();
+        let socket = sockets.get(d).cloned().unwrap_or_default();
+        let cfg = block(&badge);
+        // The same test [`disconnect_daemon`] makes before it drops anything:
+        // the socket has to be one of our own forwards. Asked here so the row
+        // and the action cannot disagree about whether there is an ssh to kill.
+        let ours = forwards.iter().any(|f| f.socket() == socket);
+        let connected = live.get(d).is_some_and(|m| m.live);
+        out.push(Machine {
+            link: if connected { Link::Here } else { Link::Away },
+            build: builds.get(&socket).cloned().unwrap_or_default(),
+            how: match (local, cfg) {
+                // Its own socket path, which is the honest answer to "where is
+                // it" for the one machine that was never dialled anywhere.
+                (true, _) => socket.display().to_string(),
+                (false, Some(r)) => remote_label(r),
+                // In the bar without a block: announced from a pane, or dialled
+                // and not remembered. The badge *is* the destination in both.
+                (false, None) => format!("ssh {badge}"),
+            },
+            agents: live.get(d).map(|m| m.agents).unwrap_or(0),
+            spaces: daemon.state.tabs.len(),
+            configured: cfg.is_some(),
+            ours,
+            local,
+            target: cfg.and_then(|r| r.host.clone()).or_else(|| (!local).then(|| badge.clone())),
+            // Only while it is not answering. A machine that came back carries
+            // no explanation for a failure it has already recovered from.
+            note: (!connected).then(|| dial_errors.get(&badge).cloned()).flatten(),
+            badge,
+        });
+    }
+
+    for r in remotes {
+        let Some(badge) = remote_badge(r) else { continue };
+        if hosts.iter().flatten().any(|h| *h == badge) {
+            continue;
+        }
+        let target = r.host.clone();
+        out.push(Machine {
+            link: match &target {
+                Some(t) if dialling.contains(t) => Link::Dialling,
+                _ => Link::Offline,
+            },
+            build: chrome::settings::Build::Unknown,
+            how: remote_label(r),
+            agents: 0,
+            spaces: 0,
+            configured: true,
+            ours: false,
+            local: false,
+            note: dial_errors.get(&badge).cloned(),
+            target,
+            badge,
+        });
+    }
+    out
+}
+
+/// Ask every connected daemon which build it is running, and remember it.
+///
+/// **There is no REST route that answers this.** A daemon names its version in
+/// the framed handshake and nowhere else — `ServerMsg::Hello.server_version` —
+/// and the one HTTP call that reports a version, `POST /v1/update`, reports it
+/// by *doing* an update. So this opens the same control connection
+/// `kill-server` and `reload-config` use and reads the greeting it was already
+/// going to be sent. Nothing is asked of the daemon beyond the handshake, and
+/// the connection is dropped as soon as it has answered.
+///
+/// Run on arriving at the page and on `r`, not on a clock: a daemon's version
+/// changes when it restarts, and half a dozen socket round trips per frame to
+/// watch for something that happens twice a week is not a trade worth making.
+///
+/// **The sweep costs one [`VERSION_PROBE_TIMEOUT`], not one per machine.** The
+/// handshakes are in flight together, so a machine that has stopped answering
+/// holds up nothing but itself. That is worth more than it sounds: the caller
+/// awaits this in the loop *body* rather than in the `select!`, so every second
+/// spent in here is a second with no input, no repaint and no stage frame — and
+/// `state.connected` is no protection, because an `ssh -L` whose process is
+/// alive and whose network has gone accepts the local socket and then says
+/// nothing. Four of those, probed one after another, were eight seconds of a
+/// client that answered no key at all.
+///
+/// A failure leaves the entry alone — a version already learned survives a link
+/// going down, which is what makes the row keep saying what that machine was
+/// running when it went away.
+async fn probe_builds(
+    daemons: &[Daemon],
+    sockets: &[PathBuf],
+    builds: &mut HashMap<PathBuf, chrome::settings::Build>,
+) {
+    let live: Vec<PathBuf> = daemons
+        .iter()
+        .enumerate()
+        .filter(|(_, daemon)| daemon.state.connected)
+        .filter_map(|(d, _)| sockets.get(d).cloned())
+        .collect();
+    for (socket, answer) in probe_versions(&live, VERSION_PROBE_TIMEOUT).await {
+        match answer {
+            Ok(v) => {
+                builds.insert(socket, chrome::settings::Build::On(v));
+            }
+            Err(e) => tracing::debug!("version of {}: {e:#}", socket.display()),
+        }
+    }
+}
+
+/// Every handshake at once, the lot bounded by `within`.
+///
+/// Split from [`probe_builds`] on the line between what needs live daemons and
+/// what needs only sockets: a test can point this at a listener that accepts
+/// and never answers and watch the clock, which is the only way to tell a sweep
+/// that waits once from one that waits in turn.
+async fn probe_versions(sockets: &[PathBuf], within: Duration) -> Vec<(PathBuf, Result<String>)> {
+    let probes = sockets
+        .iter()
+        .map(|socket| async move { (socket.clone(), daemon_version(socket, within).await) });
+    futures::future::join_all(probes).await
+}
+
+/// How long a daemon has to answer a handshake before the page gives up on its
+/// version. Generous for a socket on this machine, short enough that a stalled
+/// `ssh -L` costs the page a moment rather than a hang.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One daemon's build, from the greeting it opens every connection with.
+///
+/// [`crate::conn::connect_existing`] rather than `connect_or_spawn`: this runs
+/// against forwarded sockets, and answering a silent tunnel by starting a
+/// *local* daemon on the far end's socket path is the wrong answer to every
+/// version of that — the argument [`crate::api::Api::remote`] makes at length.
+async fn daemon_version(socket: &std::path::Path, within: Duration) -> Result<String> {
+    use butai_protocol::framing::{decode, encode, length_codec};
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::Framed;
+
+    tokio::time::timeout(within, async {
+        let stream = crate::conn::connect_existing(socket).await?;
+        let mut framed = Framed::new(stream, length_codec());
+        let hello = crate::conn::hello(AttachTarget::Control, 0, 0, Encoding::Json);
+        framed.send(encode(&hello, Encoding::Json)?).await?;
+        let Some(Ok(bytes)) = framed.next().await else {
+            anyhow::bail!("the daemon closed the connection during the handshake")
+        };
+        match decode::<ServerMsg>(&bytes, Encoding::Json)? {
+            // A daemon older than the field itself, and therefore older than
+            // any build that could report one — the same case `skew_notice`
+            // reads as "it predates this client".
+            ServerMsg::Hello { server_version, .. } => {
+                server_version.context("this daemon predates the version field")
+            }
+            other => anyhow::bail!("the daemon greeted with {other:?}"),
+        }
+    })
+    .await
+    .context("the daemon did not answer its handshake")?
 }
 
 /// A chooser over the agent types the daemon has configured.
@@ -4763,12 +5612,18 @@ enum Flow {
     /// Turn the offered update down, for good, for that version. Writes
     /// `[update] declined_version`; see [`chrome::ConfirmKind::Update`].
     DeclineUpdate(String),
-    /// `:update` — ask now, whatever the file says, and say what came back.
-    CheckUpdate,
-    /// `:update` on a tab from another machine: hand the whole thing to the
-    /// daemon there. Stays in the loop, unlike [`Flow::Update`] — nothing local
-    /// is being replaced, so the terminal never has to be given back.
-    UpdateDaemon,
+    /// Ask now, whatever the file says, and say what came back. `:update`, and
+    /// the SETTINGS page's per-machine update row.
+    CheckUpdate(UpdateTarget),
+    /// Hand the whole thing to the daemon on that machine. Stays in the loop,
+    /// unlike [`Flow::Update`] — nothing local is being replaced, so the
+    /// terminal never has to be given back.
+    ///
+    /// The badge rides along rather than being re-derived from the active tab.
+    /// It was the active tab's, and the tab bar moves under an open confirm
+    /// box: answering yes a moment after `alt->` would have updated a machine
+    /// nobody had been asked about.
+    UpdateMachine(String),
     RestartDaemon,
     /// Open the agent picker; the list comes from the daemon, so the loop
     /// fetches it rather than the key handler.
@@ -4915,6 +5770,24 @@ enum Flow {
     /// The SETTINGS page changed something the key handler could not finish:
     /// a file to write, a palette to repaint in, or both.
     SettingsEdit(chrome::settings::Edit),
+    /// The SETTINGS page's MACHINES section, acting rather than editing.
+    ///
+    /// **Why these are not [`chrome::settings::Edit`]s.** An `Edit` is a change
+    /// the page has already made and needs written down: it cannot fail, it is
+    /// over by the time the loop sees it, and the row it came from already
+    /// reads the new value. Dropping an ssh, dialling one, and asking a daemon
+    /// to replace its own binary are none of those things — they take seconds,
+    /// they fail for reasons the page cannot know, and two of them need the
+    /// forwards and the daemon list, which live in the loop and nowhere else.
+    /// So they come back as flows, like every other thing on this client that
+    /// touches a machine.
+    SettingsRefresh,
+    /// Drop the link to a machine and forget its `[[remote]]` block — the same
+    /// pair the machines picker's disconnect row does.
+    DisconnectMachine(String),
+    /// Remove a `[[remote]]` block for a machine that is not connected, so it
+    /// stops being dialled every morning.
+    ForgetMachine(String),
     /// Go to the SETTINGS page, remembering the one being left.
     OpenSettings,
     /// Leave it, for the page it was opened from.
@@ -4978,6 +5851,29 @@ enum Flow {
     /// Move along the tab bar. Clamped against the number of tabs, which spans
     /// every connected daemon and so is the loop's to count.
     GoTab(TabMove),
+}
+
+/// Which machine a [`Flow::CheckUpdate`] is about.
+///
+/// Three cases rather than an `Option<String>`, because the daemon on this
+/// machine has no badge — `hosts` holds `None` for it — so "this one" and
+/// "whichever one the active tab is on" would be the same value and mean
+/// different things.
+///
+/// The distinction they turn on is not where the daemon is but *what an update
+/// costs*: locally the new build is fetched by this process and the client is
+/// replaced along with it, which is why that path leaves the loop and gives the
+/// terminal back; on another machine the daemon fetches its own and this client
+/// carries on drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateTarget {
+    /// The machine behind the active tab. What `:update` means: "update the
+    /// butai this tab is looking at".
+    ActiveTab,
+    /// The daemon on this machine, named by a row that is about it.
+    Here,
+    /// The daemon on another machine, by the badge its tabs carry.
+    Machine(String),
 }
 
 /// Which tab a [`Flow::GoTab`] means.
@@ -5741,6 +6637,52 @@ fn handle_usage_key(k: event::KeyEvent, usage: &mut chrome::usage::Usage) -> Opt
     }
 }
 
+/// What Enter on one of the MACHINES section's action rows means.
+///
+/// One function because two gestures reach these rows — the key and the click —
+/// and a clicked row doing something other than the Enter it stands for is the
+/// bug this client avoids everywhere by routing both through one place. It
+/// matches on [`chrome::settings::RowId`] for the reason that type exists:
+/// inserting a row above `forget` must not turn Enter on the row above it into
+/// a forget.
+fn machine_action(
+    id: chrome::settings::RowId,
+    machine: Option<String>,
+    target: Option<String>,
+) -> Option<Flow> {
+    use chrome::settings::RowId;
+    Some(match (id, machine) {
+        // An empty badge is the daemon on this machine — `hosts` spells that
+        // `None` — and updating it replaces the binary this client is itself
+        // running out of, which is a different act from asking a daemon
+        // somewhere else to fetch its own. See [`UpdateTarget`].
+        (RowId::MachineUpdate, Some(h)) if h.is_empty() => Flow::CheckUpdate(UpdateTarget::Here),
+        (RowId::MachineUpdate, Some(h)) => Flow::CheckUpdate(UpdateTarget::Machine(h)),
+        // Through the same dial `[+ host]` uses, arguments, remembering and
+        // all: a page with its own connect path is a second answer to what
+        // "connected" means.
+        (RowId::MachineConnect, _) => Flow::DialHost(target?),
+        (RowId::MachineDisconnect, Some(h)) => Flow::DisconnectMachine(h),
+        (RowId::MachineForget, Some(h)) => Flow::ForgetMachine(h),
+        // Where machines come in from everywhere else in this client. A
+        // settings page that grew its own destination prompt would be a second
+        // implementation of the machines picker.
+        (RowId::MachineAdd, _) => Flow::PickHost,
+        _ => Flow::Continue,
+    })
+}
+
+/// The ssh destination behind a badge, for the row that offers to dial it.
+///
+/// A block's badge and its destination differ whenever `[[remote]] name` is
+/// set, and it is the destination `ssh` takes. `None` for a `[[remote]] socket`
+/// block, which nothing here can bring up — the connect row is not offered for
+/// one, and this is the second half of that rule rather than a repeat of it.
+fn machine_target(st: &chrome::Settings, badge: Option<&str>) -> Option<String> {
+    let badge = badge?;
+    st.machines.iter().find(|m| m.badge == badge)?.target.clone()
+}
+
 /// Keys on the SETTINGS page. `None` means "not mine, carry on".
 ///
 /// The page has one cursor, not two: `j`/`k` walk the settings, `tab` walks the
@@ -5770,6 +6712,13 @@ fn handle_settings_key(
     st.row = st.row.min(grp.rows.len().saturating_sub(1));
     let row = grp.rows.get(st.row)?;
     let (id, kind, value) = (row.id, row.kind.clone(), row.value.clone());
+    // Which machine this row is about, taken off the row that was drawn rather
+    // than off the cursor's position: the list is rebuilt every frame and a
+    // machine can leave it between the frame you were reading and the key you
+    // pressed. The destination is then looked up *by that badge*, which is a
+    // key rather than a position and so cannot slide onto its neighbour.
+    let machine = row.machine.clone();
+    let target = machine_target(st, machine.as_deref());
     let last = grp.rows.len().saturating_sub(1);
     let moved = Some(Flow::SettingsEdit(Edit::Moved));
 
@@ -5824,6 +6773,7 @@ fn handle_settings_key(
                 st.open = Some(opts.iter().position(|o| *o == value).unwrap_or(0));
                 moved
             }
+            (_, Kind::Action(_)) => machine_action(id, machine, target),
             _ => Some(Flow::Continue),
         },
         K::Char(' ') => match (&kind, id) {
@@ -5842,6 +6792,12 @@ fn handle_settings_key(
         // other five. `h`/`l` come along because they always do here.
         K::Char('-') | K::Char('h') | K::Left => nudge(view, &kind, cols, rows, -2),
         K::Char('+') | K::Char('=') | K::Char('l') | K::Right => nudge(view, &kind, cols, rows, 2),
+        // Only in MACHINES, where it is the one thing on the page that another
+        // machine can change while you are looking at it. Guarded on the group
+        // rather than bound globally so `r` stays free everywhere else.
+        K::Char('r') if grp.id == chrome::settings::GroupId::Machines => {
+            Some(Flow::SettingsRefresh)
+        }
         // Back to sizing itself to the terminal, which is a real state and the
         // one every band starts in — so there has to be a way back to it.
         K::Char('0') => match &kind {
@@ -6383,7 +7339,9 @@ fn confirm(view: &mut View) -> Flow {
         // recorded so it goes through this time.
         chrome::ConfirmKind::Pick { target, value, .. } => Flow::Pick { target, value },
         chrome::ConfirmKind::Update { .. } => Flow::Update,
-        chrome::ConfirmKind::UpdateDaemon { .. } => Flow::UpdateDaemon,
+        // The box named a machine; the answer acts on that machine, not on
+        // whichever tab happens to be showing when yes is pressed.
+        chrome::ConfirmKind::UpdateDaemon { host } => Flow::UpdateMachine(host),
         chrome::ConfirmKind::RestartDaemon => Flow::RestartDaemon,
         chrome::ConfirmKind::MenuAction => match view.pending_menu_action.take() {
             Some(action) => {
@@ -6529,10 +7487,20 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 /// **Every branch moves the cursor first.** The flows that follow carry no row
 /// index and resolve `view.booth_sel` when they run, so a click and the act it
 /// asks for cannot come to name two different rows.
+///
+/// **And every branch leaves the keyboard on the fleet, `[+ claude]` included.**
+/// That press does end with the keyboard in the new agent's pane — but not from
+/// here, and not yet: the pane has no fleet row for a pass or two after the
+/// spawn, and [`follow_new_agent`] hands the focus over at the same instant it
+/// moves the cursor onto that row, because the two are one act. Handing it over
+/// here as well would be this function guessing at an outcome it does not know:
+/// a spawn that fails, or an agent that dies before it is ever listed, would
+/// leave the keyboard pointed at a sibling agent nobody asked for. The fleet
+/// keeps it in the meantime, which is where the click found it.
 fn fleet_click(hit: hit::FleetHit, view: &mut View) -> Flow {
     let (row, flow) = match hit {
         hit::FleetHit::Row(row) => (row, Flow::Continue),
-        hit::FleetHit::Open(row) | hit::FleetHit::Go(row) => (row, Flow::OpenFleetRow),
+        hit::FleetHit::Open(row) => (row, Flow::OpenFleetRow),
         hit::FleetHit::New(row) => (row, Flow::NewFleetAgent { pick: false }),
         hit::FleetHit::Close(row) => (row, Flow::AskCloseFleetSpace),
         hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
@@ -6946,6 +7914,17 @@ fn page_wheel(
             return Some(Flow::Continue);
         }
         if c.compute_box.width > 0 && c.compute_box.contains(x, y) {
+            // **Machines, not rows**, now that a machine is a block of four or
+            // five rather than a line. A row scroll would be smoother and would
+            // buy nothing: the column has seventy-six rows for four machines,
+            // so there is no long list to inch through. What it would cost is
+            // the guarantee that every scroll position starts on a block
+            // boundary — the same all-or-none rule the drawing keeps at the
+            // bottom edge, kept at the top edge for free — and it would put a
+            // second arithmetic between `draw_compute` and
+            // `booth_compute_machine_at`, which is the pair this whole column's
+            // correctness rests on agreeing.
+            //
             // Clamped to the last machine so the column cannot be scrolled into
             // empty space it can never scroll back from.
             let last = machines_len.saturating_sub(1);
@@ -7420,7 +8399,7 @@ fn run_view(verb: ViewVerb, view: &mut View) -> Flow {
             Flow::Search(String::new())
         }
         ViewVerb::Branch => Flow::PickBranch,
-        ViewVerb::Update => Flow::CheckUpdate,
+        ViewVerb::Update => Flow::CheckUpdate(UpdateTarget::ActiveTab),
         // The list is built by the loop, which is where the painted screen is.
         ViewVerb::Links => Flow::PickLinks,
         // The reference is a page of its own — not a modal, which covered the
@@ -7651,7 +8630,6 @@ fn handle_input(
                     ) {
                         let (hit::FleetHit::Row(row)
                         | hit::FleetHit::Open(row)
-                        | hit::FleetHit::Go(row)
                         | hit::FleetHit::New(row)
                         | hit::FleetHit::Close(row)
                         | hit::FleetHit::Fold(row)) = fleet_hit;
@@ -7685,6 +8663,32 @@ fn handle_input(
                         // the more useful ones to be able to quote.
                         drag.press(view, *cols, *rows, m.column, m.row, metrics);
                         return fleet_click(fleet_hit, view);
+                    }
+                    // COMPUTE's blocks, on the same terms and for the same
+                    // reason: they are per-machine rows assembled from every
+                    // daemon, and `hit::at` answers `Nothing` for the whole of
+                    // BOOTH's band that is not the stage, so nothing else is
+                    // competing for the press.
+                    //
+                    // The `>` on a machine's name is the button, and a press
+                    // anywhere in that machine's block is the same press —
+                    // `booth_compute_machine_at` resolves the meters under the
+                    // name as well as the name, because a mark you can see and
+                    // a target you have to find are not the same control.
+                    //
+                    // It was drawn for a release and wired to nothing: the mark
+                    // was there, `toggle_expanded` was there, and the only
+                    // caller of either was a unit test. Reported as the compute
+                    // column not expanding when you press the button, which is
+                    // exactly what it was.
+                    if let Some(i) =
+                        hit::on_compute(*cols, *rows, view, &fleet_machines, m.column, m.row)
+                    {
+                        drag.press(view, *cols, *rows, m.column, m.row, metrics);
+                        if let Some(machine) = fleet_machines.get(i) {
+                            view.folds.toggle_expanded(machine.label);
+                        }
+                        return Flow::Continue;
                     }
                     // SETTINGS resolves its own clicks, because doing it in
                     // `hit` would mean handing that module the page's cursor
@@ -8588,6 +9592,135 @@ fn stage_new_pane(view: &mut View, pane: PaneId) {
     view.page = Page::Agents;
 }
 
+/// An agent started from BOOTH, waiting for its row in the fleet.
+///
+/// [`stage_new_pane`]'s counterpart for the one page that does not have a
+/// stage of its own to put a pane on: BOOTH's middle column follows
+/// [`chrome::booth_preview`] from the fleet cursor, so "show me the thing I
+/// just started" is a *cursor* move and nothing else. Setting `view.staged`
+/// there did nothing at all — the cursor was still on the project row, and on a
+/// project row the preview picks the agent that most needs you, which for a
+/// brand-new one (working, nothing unread, so no [`chrome::booth_tray`] rank at
+/// all) is never it. You watched the first agent in the project while the one
+/// you asked for ran off screen.
+///
+/// **Why it waits.** [`spawn_agent_in`] polls the *daemon's* agent list until
+/// the new pane shows up there, which says nothing about this client's copy:
+/// `daemons[d].state` is fed by the event stream, and the stream is not being
+/// drained while the flow that spawned the agent is awaiting. So the row is
+/// reliably *not* there when the POST returns, and resolving the cursor on the
+/// spot would put it on whatever row that index happened to hold. This carries
+/// the pane id instead, and the loop retries it at the top of each pass until
+/// the row exists.
+///
+/// **Why it expires.** A pending cursor move is a small hijack waiting to
+/// happen: an agent that dies in its first second never gets a row, and without
+/// a deadline this would sit there and pounce on the next unrelated repaint.
+/// [`Self::live`] is the whole guard — the page has to still be BOOTH, the
+/// cursor has to still be where the spawn was asked from, and the grace has to
+/// not have run out.
+#[derive(Debug, Clone, Copy)]
+struct NewAgentFollow {
+    /// Which daemon the spawn was asked of.
+    ///
+    /// Half of the pane's address, and the half that is easy to drop: see
+    /// [`fleet_row_of`] for what a bare id finds instead.
+    daemon: usize,
+    /// The pane [`spawn_agent_in`] reported.
+    pane: PaneId,
+    /// The fleet row the spawn was asked from — the project's own row.
+    ///
+    /// Anything that moves the cursor in the meantime is the user going
+    /// somewhere, and this stops rather than yanking them back.
+    from: usize,
+    /// When to give up.
+    until: Instant,
+}
+
+impl NewAgentFollow {
+    fn new(view: &View, daemon: usize, pane: PaneId) -> Self {
+        Self { daemon, pane, from: view.booth_sel, until: Instant::now() + NEW_AGENT_GRACE }
+    }
+
+    /// Whether this is still worth trying — see the type's own doc comment.
+    fn live(&self, view: &View, now: Instant) -> bool {
+        view.page == Page::Booth && view.booth_sel == self.from && now < self.until
+    }
+}
+
+/// How long BOOTH will wait for a just-started agent's row to reach the client
+/// before it stops trying to put the cursor on it.
+///
+/// Generous against the round trip it is covering — the daemon rebuilds its
+/// agent list on a sampler tick and pushes a `WorkspaceDetail`, which is one
+/// pass of this loop away — and short enough that nothing is still armed by the
+/// time you have read the flash and moved on.
+const NEW_AGENT_GRACE: Duration = Duration::from_secs(3);
+
+/// Where one daemon's pane sits in the fleet list.
+///
+/// **The daemon is half of the address.** A [`PaneId`] is a counter inside one
+/// daemon process, handed out to that daemon's agents and its processes alike,
+/// so two machines both start at 1 and have diverged by their second pane.
+/// [`all_agent_rows`] spans every daemon, and asking it for a bare id gets the
+/// first machine that has one — always the local daemon, which is index 0, for
+/// a pane that was started on `gpu-box`. Everything downstream then agrees with
+/// that row and not with what was asked for: the fold, the cursor, the preview,
+/// and finally the keyboard, which is handed to a stranger's agent.
+///
+/// The two bare comparisons in [`crate::chrome`] are not this: both are inside
+/// one workspace, which is inside one daemon, where a pane id is the whole
+/// address.
+fn fleet_row_of(all: &[chrome::AllAgentRow], daemon: usize, pane: PaneId) -> Option<usize> {
+    all.iter().position(|r| r.daemon == daemon && r.agent.pane == pane)
+}
+
+/// Put BOOTH's cursor on a just-started agent and hand the keyboard to it.
+///
+/// False while the fleet has no row for that pane yet, which is the ordinary
+/// state for the first pass or two after the spawn — the caller retries.
+///
+/// **The page does not move**: no `view.tab`, no `view.page`. That rule is the
+/// same one that made agent rows two-step ([`hit::FleetHit`]), and it is the
+/// whole difference between "start an agent over there" and "throw the
+/// workbench onto somebody else's project". What moves is the cursor, the
+/// preview that follows it, and the focus — so the very next key you press is
+/// the new agent's, which is what you started it to do.
+///
+/// A folded project is unfolded on the way. Its agents have no rows at all
+/// while it is shut, and the fold would otherwise be the one thing standing
+/// between `[+ claude]` and the pane it promised you: an extra sprite in a
+/// strip is not an answer to "start an agent and put me in it".
+fn follow_new_agent(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &mut View,
+    daemon: usize,
+    pane: PaneId,
+) -> bool {
+    let all = all_agent_rows(daemons, hosts);
+    let Some(sel) = fleet_row_of(&all, daemon, pane) else { return false };
+    let machines = machine_rows(daemons, hosts, &all);
+    // The label the fold is keyed by, which is the one `machine_rows` draws —
+    // asking `hosts` directly here would spell "local" a second time and get it
+    // wrong on the day that default changes.
+    if let Some(machine) = machines.get(all[sel].daemon).map(|m| m.label) {
+        if view.folds.space_folded(machine, all[sel].workspace_id) {
+            view.folds.toggle_space(machine, all[sel].workspace_id);
+        }
+    }
+    let spaces = fleet_spaces(daemons, &all, None);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    let Some(row) =
+        rows.iter().position(|r| matches!(r, chrome::BoothRow::Agent { sel: s, .. } if *s == sel))
+    else {
+        return false;
+    };
+    view.booth_sel = row;
+    view.focus = Focus::Stage;
+    true
+}
+
 /// Go to a workspace because the user asked for that workspace.
 ///
 /// Every page but BOOTH is a *view of* the active workspace, so switching tab
@@ -8865,6 +9998,12 @@ fn move_sel(view: &mut View, (agents, procs, changes, all_agents): Counts, delta
 /// subtle: blitting the pane after an overlay paints the pane over the modal,
 /// which looked like "the overlay never opened" until it was seen on a real
 /// screen.
+///
+/// Returns what the chrome reported about itself, which the loop's clocks are
+/// gated on. The two layers drawn over it add nothing to that answer and the
+/// comments on each say why: an overlay is still text, and the stage's notice
+/// is repainted by the clock that paces the reconnect it is narrating rather
+/// than by the one the marquee runs on.
 fn compose(
     screen: &mut Buffer,
     cols: u16,
@@ -8873,14 +10012,21 @@ fn compose(
     view: &View,
     theme: &Theme,
     stage: Option<&Buffer>,
-) {
-    chrome::draw(screen, cols, rows, scene, view, theme);
+) -> chrome::Painted {
+    let out = chrome::draw(screen, cols, rows, scene, view, theme);
     if let Some(pane) = stage {
         chrome::blit(screen, pane, chrome::stage_rect(cols, rows, view));
     }
     // After the blit for the same reason the overlay is after both: the cells it
     // dims are the pane's, and a notice explaining that the screen is a
     // photograph is no use underneath the photograph.
+    // The notice does not claim `wants_anim`, though it is the one layer here
+    // that visibly moves. Its spinner is worth a repaint a second and not four:
+    // a machine that is off stays off for hours, and the first draft of this
+    // held the whole workbench at 4Hz for every one of them — the same
+    // unconditional repainting the rest of this change removes, hiding behind a
+    // failure state where nobody would look for it. The stage's own clock in
+    // the loop repaints it, at the cadence of the reconnect it is narrating.
     if let Some(down) = scene.stage_down.as_ref() {
         if stage.is_some() {
             chrome::draw_stage_down(
@@ -8893,6 +10039,7 @@ fn compose(
         }
     }
     chrome::draw_overlay_layer(screen, cols, rows, view, theme);
+    out
 }
 
 /// The tab bar's chips, in the order they are drawn.
@@ -8927,6 +10074,12 @@ fn sync_gauges(view: &mut View, daemons: &[Daemon], hosts: &[Option<String>]) {
 }
 
 /// Compose the screen and write only what changed.
+///
+/// Returns the two things a frame produces besides its cells: the URLs on it,
+/// and whether any of it is still moving. The second is what the loop's clocks
+/// are gated on — see [`repaint_on_tick`] — and it has to come back out of here
+/// rather than being recomputed, because the only way to know whether a title
+/// is mid-scroll is to have drawn it.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     painted: &mut Buffer,
@@ -8946,7 +10099,7 @@ fn paint(
     help: Option<&chrome::Help>,
     usage: Option<&chrome::usage::Usage>,
     drag: &Drag,
-) -> Result<links::ScreenLinks> {
+) -> Result<(links::ScreenLinks, chrome::Painted)> {
     let area = Rect::new(0, 0, cols, rows);
     let mut screen = Buffer::empty(area);
     let tabs = tabs_of(daemons, hosts);
@@ -9006,7 +10159,7 @@ fn paint(
         | Page::Help
         | Page::Usage => None,
     };
-    compose(&mut screen, cols, rows, &scene, view, theme, pane);
+    let moving = compose(&mut screen, cols, rows, &scene, view, theme, pane);
     // Over the composed screen, so a drag can cover the rails, a diff and the
     // pane alike — and so what is highlighted is exactly what a copy takes,
     // because both read this same buffer.
@@ -9066,7 +10219,7 @@ fn paint(
     }
     out.flush()?;
     *painted = screen;
-    Ok(links)
+    Ok((links, moving))
 }
 
 /// Ends the hyperlink a cell run was written into: OSC 8 with no id and no
@@ -10357,7 +11510,11 @@ mod tests {
         // being replaced, so the terminal is never given back.
         view.overlay = Some(update_daemon_overlay("workhorse"));
         let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
-        assert!(matches!(flow, Flow::UpdateDaemon), "{flow:?}");
+        // And it names the machine the box named. The tab bar moves under an
+        // open overlay — `alt->`, a machine disconnecting, a workspace closing
+        // — so an answer that re-derived its target from the active tab would
+        // update a daemon nobody was asked about.
+        assert!(matches!(&flow, Flow::UpdateMachine(h) if h == "workhorse"), "{flow:?}");
     }
 
     /// A daemon that is not this build gets asked about, and which question it
@@ -10544,7 +11701,10 @@ mod tests {
             Ok(crate::keymap::Action::View(ViewVerb::Update))
         );
         let mut view = View::default();
-        assert!(matches!(run_view(ViewVerb::Update, &mut view), Flow::CheckUpdate));
+        assert!(matches!(
+            run_view(ViewVerb::Update, &mut view),
+            Flow::CheckUpdate(UpdateTarget::ActiveTab)
+        ));
     }
 
     /// A commit message is typed, and an empty one is refused before it reaches
@@ -11151,6 +12311,323 @@ mod tests {
         };
         assert_eq!(plain.chosen(), Some("claude"));
         assert_eq!(plain.chosen_label(), Some("claude"));
+    }
+
+    /// The section's list is a reading of the `[[remote]]` blocks and the tab
+    /// bar, and a block that is not in the bar is a machine you can dial.
+    ///
+    /// Asserted with no daemons at all, which is exactly the half that matters
+    /// here: every machine in this list came out of the file, and the badge it
+    /// is keyed by is the one its tabs would carry — derive that a third way
+    /// and every configured machine appears twice, once as itself and once as
+    /// the block that dials it.
+    #[test]
+    fn a_configured_machine_that_is_not_in_the_bar_is_one_you_can_dial() {
+        let remotes = vec![
+            crate::config::RemoteDef { host: Some("gpu-box".into()), ..Default::default() },
+            crate::config::RemoteDef {
+                name: Some("pi".into()),
+                host: Some("pi@farm".into()),
+                ssh_args: vec!["-p".into(), "2222".into()],
+                ..Default::default()
+            },
+            crate::config::RemoteDef { socket: Some("/tmp/fwd.sock".into()), ..Default::default() },
+        ];
+        let mut errors = HashMap::new();
+        errors.insert("gpu-box".to_string(), "ssh: no route to host".to_string());
+        let mut dialling = HashSet::new();
+        dialling.insert("pi@farm".to_string());
+
+        let list = machine_list(&[], &[], &[], &[], &dialling, &remotes, &HashMap::new(), &errors);
+        let badges: Vec<&str> = list.iter().map(|m| m.badge.as_str()).collect();
+        assert_eq!(badges, vec!["gpu-box", "pi", "fwd.sock"], "{badges:?}");
+
+        // The one that failed says why, minutes after the footer line that
+        // said it once.
+        assert_eq!(list[0].link, chrome::settings::Link::Offline);
+        assert_eq!(list[0].note.as_deref(), Some("ssh: no route to host"));
+        assert_eq!(list[0].how, "ssh gpu-box");
+        assert_eq!(list[0].target.as_deref(), Some("gpu-box"));
+
+        // A `name` moves the badge and leaves the destination alone, and the
+        // dial row has to offer the destination — `ssh pi` is a different
+        // machine, or none.
+        assert_eq!(list[1].link, chrome::settings::Link::Dialling, "an ssh is in flight");
+        assert_eq!(list[1].target.as_deref(), Some("pi@farm"));
+
+        // Somebody else's forward: remembered, so it can be forgotten, and
+        // with nothing this client could dial to bring it up.
+        assert!(list[2].configured);
+        assert_eq!(list[2].target, None);
+        assert_eq!(list[2].how, "socket /tmp/fwd.sock");
+    }
+
+    /// Connecting a machine writes its block and forgetting one takes it out,
+    /// and the section is a reading of what is in the file at that moment.
+    ///
+    /// Through a path of the test's own choosing, because the real one is the
+    /// user's config. This is the round trip the page's `connect` and `forget`
+    /// rows make: `save_remote` on the way in, `forget_remote` on the way out,
+    /// and `machine_list` over what the file says in between.
+    #[test]
+    fn the_page_writes_a_block_and_takes_it_out_again() {
+        let dir =
+            std::env::temp_dir().join(format!("butai-settings-remotes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# hand written
+[theme]
+name = \"terminal\"
+",
+        )
+        .unwrap();
+
+        crate::config::Config::save_remote_at(&path, None, "gpu-box", &[]).unwrap();
+        let remotes = crate::config::Config::load_from(&path).0.remote;
+        let list = machine_list(
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashSet::new(),
+            &remotes,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].badge, "gpu-box");
+        assert!(list[0].configured, "it is in the file, so the block row names it");
+
+        // Forgetting it is the row's other half, and it leaves the rest of the
+        // file exactly as it was — the whole reason these writes are surgical.
+        assert!(crate::config::Config::forget_remote_at(&path, "gpu-box").unwrap());
+        let remotes = crate::config::Config::load_from(&path).0.remote;
+        assert!(machine_list(
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashSet::new(),
+            &remotes,
+            &HashMap::new(),
+            &HashMap::new()
+        )
+        .is_empty());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# hand written"), "{text}");
+        assert!(text.contains("name = \"terminal\""), "{text}");
+
+        // And forgetting one that was never written is a no-op, not an error:
+        // a machine adopted from an announcement has no block to remove.
+        assert!(!crate::config::Config::forget_remote_at(&path, "never-seen").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A daemon that has not opted in refuses, and the refusal has to name the
+    /// machine, the key and the file — not the status code.
+    ///
+    /// `[update] allow_remote` is off by default and deliberately so, so this
+    /// is the *ordinary* answer rather than a fault, and a client that flashed
+    /// `400 Bad Request` would be reporting documented behaviour as a bug. The
+    /// daemon's own 400 already names the key; what it cannot name is whose
+    /// `~/.butai/config.toml` that is, which on a page listing four machines is
+    /// the only part you need.
+    #[test]
+    fn a_daemon_that_does_not_take_update_requests_says_what_to_set_and_where() {
+        let refused = anyhow::Error::from(crate::api::ApiError {
+            status: hyper::StatusCode::BAD_REQUEST,
+            message: "this daemon does not take update requests".into(),
+        });
+        let said = update_refusal("gpu-box", &refused);
+        assert!(said.contains("gpu-box"), "which machine's config file: {said}");
+        assert!(said.contains("allow_remote = true"), "the key to set: {said}");
+        assert!(said.contains("config.toml"), "the file to set it in: {said}");
+        assert!(said.contains("butai update"), "and the way that needs no key: {said}");
+        assert!(!said.contains("400"), "a status code explains nothing: {said}");
+
+        // Everything else is passed through. A daemon that is not there, or a
+        // download that failed, is not an opt-in question and must not be
+        // dressed as one.
+        let gone = anyhow::anyhow!("no response from the daemon on /run/gpu.sock");
+        let said = update_refusal("gpu-box", &gone);
+        assert!(said.contains("no response"), "{said}");
+        assert!(!said.contains("allow_remote"), "{said}");
+    }
+
+    /// Every action row lands on the flow it advertises, and the one about this
+    /// machine lands on a different one from the ones about the others.
+    #[test]
+    fn a_machine_row_acts_on_the_machine_it_names() {
+        use chrome::settings::RowId;
+        let act = |id, badge: Option<&str>, target: Option<&str>| {
+            machine_action(id, badge.map(str::to_string), target.map(str::to_string))
+        };
+
+        // The local daemon's badge is empty — `hosts` spells it `None` — and
+        // updating it replaces the binary this client is running out of.
+        assert!(matches!(
+            act(RowId::MachineUpdate, Some(""), None),
+            Some(Flow::CheckUpdate(UpdateTarget::Here))
+        ));
+        assert!(matches!(
+            act(RowId::MachineUpdate, Some("gpu-box"), None),
+            Some(Flow::CheckUpdate(UpdateTarget::Machine(h))) if h == "gpu-box"
+        ));
+        // The *destination*, not the badge: `[[remote]] name` moves one and not
+        // the other, and it is the destination ssh takes.
+        assert!(matches!(
+            act(RowId::MachineConnect, Some("pi"), Some("pi@farm")),
+            Some(Flow::DialHost(t)) if t == "pi@farm"
+        ));
+        assert!(matches!(
+            act(RowId::MachineDisconnect, Some("gpu-box"), Some("gpu-box")),
+            Some(Flow::DisconnectMachine(h)) if h == "gpu-box"
+        ));
+        assert!(matches!(
+            act(RowId::MachineForget, Some("pi"), Some("pi@farm")),
+            Some(Flow::ForgetMachine(h)) if h == "pi"
+        ));
+        // Adding one goes to the picker every other surface uses.
+        assert!(matches!(act(RowId::MachineAdd, None, None), Some(Flow::PickHost)));
+    }
+
+    /// Enter on a machine's row does what the row says, and the click on it
+    /// does the same — the two gestures share one function so they cannot come
+    /// to mean different things.
+    #[test]
+    fn enter_on_a_machine_row_carries_out_that_row() {
+        let mut view = View { page: Page::Settings, ..Default::default() };
+        let mut st = chrome::Settings {
+            group: 3,
+            machines: vec![chrome::settings::Machine {
+                badge: "gpu-box".into(),
+                link: chrome::settings::Link::Here,
+                build: chrome::settings::Build::On("1.2.0".into()),
+                how: "ssh gpu-box".into(),
+                agents: 1,
+                spaces: 1,
+                configured: true,
+                ours: true,
+                local: false,
+                target: Some("gpu-box".into()),
+                note: None,
+            }],
+            ..settings_state()
+        };
+        // Rows: auto-attach, the machine, version, where, update, disconnect,
+        // add. Walked to rather than indexed, because the point of `RowId` is
+        // that positions are not the thing being matched on.
+        let grps = chrome::settings::groups(&st, &view);
+        let machines = grps.iter().find(|g| g.id == chrome::settings::GroupId::Machines).unwrap();
+        st.row = machines.rows.iter().position(|r| r.label == "disconnect").expect("a row");
+        let flow = handle_settings_key(key(event::KeyCode::Enter), &mut view, &mut st, 150, 40);
+        assert!(matches!(&flow, Some(Flow::DisconnectMachine(h)) if h == "gpu-box"), "{flow:?}");
+
+        st.row = machines.rows.iter().position(|r| r.label == "update").expect("a row");
+        let flow = handle_settings_key(key(event::KeyCode::Enter), &mut view, &mut st, 150, 40);
+        assert!(
+            matches!(&flow, Some(Flow::CheckUpdate(UpdateTarget::Machine(h))) if h == "gpu-box"),
+            "{flow:?}"
+        );
+
+        // `r` re-reads, and only here: the version and the link state are the
+        // only things on this page another machine can change under you.
+        let flow = handle_settings_key(key(event::KeyCode::Char('r')), &mut view, &mut st, 150, 40);
+        assert!(matches!(flow, Some(Flow::SettingsRefresh)), "{flow:?}");
+        st.group = 0;
+        let flow = handle_settings_key(key(event::KeyCode::Char('r')), &mut view, &mut st, 150, 40);
+        assert!(flow.is_none(), "`r` means nothing on the other groups: {flow:?}");
+    }
+
+    /// A dial that failed is kept, not just flashed.
+    ///
+    /// It used to live for exactly one footer line, which is long enough to
+    /// read and not long enough to act on — and the page whose job is to answer
+    /// "why is that machine not here" had nothing to say but "not connected".
+    #[test]
+    fn a_dial_failure_is_kept_for_the_row_it_belongs_to() {
+        let mut view = View::default();
+        let mut errors = HashMap::new();
+        // `spawn_dial` contexts its error with the destination, so the reason
+        // arrives already carrying the name the row is drawn under.
+        let err = anyhow::anyhow!("gpu-box: ssh: connect to host gpu-box port 22: No route");
+        dial_failed("gpu-box", &err, &mut errors, &mut view);
+        assert_eq!(
+            errors.get("gpu-box").map(String::as_str),
+            Some("ssh: connect to host gpu-box port 22: No route"),
+            "the note sits under a row that is already the name"
+        );
+        assert_eq!(
+            view.flash.as_deref(),
+            Some("gpu-box: ssh: connect to host gpu-box port 22: No route"),
+            "the footer still says which machine"
+        );
+    }
+
+    /// A link that comes up or goes down rebuilds the MACHINES list, once.
+    ///
+    /// The section's news arrives from nowhere near the keyboard, and the arms
+    /// that carry it — `Lost`, `Connected`, the adoption landing an ssh — all
+    /// repaint. Repainting a snapshot nobody retook is the whole bug: Enter on
+    /// a `connect` row went on saying `connecting…` after the ssh had landed,
+    /// until a `j` rebuilt the list for an unrelated reason.
+    ///
+    /// The second assertion is the other half of the fix. Leaving the page and
+    /// coming back reloads nothing (`settings.loaded` is a one-way latch), so a
+    /// mark taken while you were on BOOTH would strand the machine that arrived
+    /// there for as long as the client ran — it is kept, not spent.
+    ///
+    /// Mutation check: return the flag from [`MachinesStale::due`] without
+    /// clearing it and the last assertion fails, which is `machine_list`
+    /// becoming a per-frame cost.
+    #[test]
+    fn a_link_that_changed_rebuilds_the_machines_list_once() {
+        let mut stale = MachinesStale::default();
+        assert!(!stale.due(Page::Settings), "nothing has happened to the fleet");
+
+        stale.mark();
+        assert!(!stale.due(Page::Booth), "a page that does not draw the list rebuilt it");
+        assert!(stale.due(Page::Settings), "the ssh landed and the row never noticed");
+        assert!(!stale.due(Page::Settings), "rebuilt again on a frame with no news");
+    }
+
+    /// Four machines that have stopped answering cost the page one timeout.
+    ///
+    /// [`probe_builds`] is awaited in the loop *body* and not in the `select!`,
+    /// so its wait is a client that reads no key, repaints nothing and draws no
+    /// stage frame. `state.connected` is no protection against that wait: these
+    /// listeners are bound and never accepted from, which is precisely what an
+    /// `ssh -L` whose process is alive and whose network has gone looks like —
+    /// the local socket takes the connection and the handshake is answered by
+    /// nobody.
+    ///
+    /// Mutation check: await the probes one at a time and this takes six bounds
+    /// rather than one.
+    #[tokio::test]
+    async fn silent_machines_cost_the_page_one_timeout_between_them() {
+        let dir = std::env::temp_dir().join(format!("butai-probe-bound-{}", std::process::id()));
+        // A run that was killed mid-test leaves the paths behind, and `bind`
+        // will not have them.
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sockets: Vec<PathBuf> = (0..6).map(|i| dir.join(format!("{i}.sock"))).collect();
+        let _listeners: Vec<tokio::net::UnixListener> =
+            sockets.iter().map(|s| tokio::net::UnixListener::bind(s).expect("bind")).collect();
+
+        let bound = Duration::from_millis(200);
+        let started = Instant::now();
+        let answers = probe_versions(&sockets, bound).await;
+        let took = started.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(answers.len(), sockets.len());
+        assert!(answers.iter().all(|(_, a)| a.is_err()), "a silent socket named a version");
+        assert!(
+            took < bound * 3,
+            "six silent machines took {took:?}, which is a queue of timeouts and not a bound"
+        );
     }
 
     /// A settings page with two themes and two agents to choose between.
@@ -11862,10 +13339,11 @@ mod tests {
         // And the button is the one thing that travels.
         assert!(matches!(fleet_click(hit::FleetHit::Open(2), &mut view), Flow::OpenFleetRow));
         assert_eq!(view.booth_sel, 2, "and it aims at the row it was pressed on");
-        // A project's name travels the same way, and its `[+]` does not travel
-        // at all — the two acts a project row adds, neither of which is a
-        // second meaning for pressing an agent.
-        assert!(matches!(fleet_click(hit::FleetHit::Go(1), &mut view), Flow::OpenFleetRow));
+        // A project's name does not travel — it is text, and text on this
+        // list looks. Its `[+]` does not travel either, which is the one act a
+        // project row adds.
+        assert!(matches!(fleet_click(hit::FleetHit::Row(1), &mut view), Flow::Continue));
+        assert_eq!(view.page, Page::Booth, "a project's name must not leave BOOTH");
         assert!(matches!(
             fleet_click(hit::FleetHit::New(1), &mut view),
             Flow::NewFleetAgent { pick: false }
@@ -11962,6 +13440,39 @@ mod tests {
         // A row that has gone between the frame and the press is not an error to
         // report, it is nothing to do.
         assert_eq!(fleet_route(&fleet, 2), None);
+    }
+
+    /// Following a just-started agent names its machine as well as its pane.
+    ///
+    /// The same difficulty as the test above, arrived at from the other side.
+    /// A [`PaneId`] starts at 1 on every daemon process and is spent on that
+    /// daemon's agents and its processes alike, so two machines are handing out
+    /// the same ids from their first pane and have diverged by their second —
+    /// the collision here is the ordinary case, not a contrived one.
+    ///
+    /// `[+ claude]` on a `gpu-box` project asked for a bare id, and the local
+    /// daemon is index 0: it matched the wrong row, unfolded the wrong project,
+    /// put the cursor on somebody else's agent and then handed that agent the
+    /// keyboard, which is where the next thing typed went.
+    ///
+    /// Mutation check: drop the `r.daemon == daemon` clause from
+    /// [`fleet_row_of`] and the second assertion fails.
+    #[test]
+    fn following_a_new_agent_names_its_machine_and_not_just_its_pane() {
+        use butai_protocol::api::AgentState;
+        let agents =
+            [agent_dto(3, "claude", AgentState::Idle), agent_dto(3, "codex", AgentState::Waiting)];
+        let fleet = two_machine_fleet(&agents);
+        assert_eq!(fleet_row_of(&fleet, 0, PaneId(3)), Some(0));
+        assert_eq!(
+            fleet_row_of(&fleet, 1, PaneId(3)),
+            Some(1),
+            "an agent started on gpu-box was followed to the local pane of the same id"
+        );
+        // No row yet is the ordinary state for a pass or two after a spawn, and
+        // the loop retries rather than treating it as a failure.
+        assert_eq!(fleet_row_of(&fleet, 1, PaneId(4)), None);
+        assert_eq!(fleet_row_of(&fleet, 2, PaneId(3)), None, "a daemon that is not in the bar");
     }
 
     /// `x` is the fleet's one lettered verb, and it only answers while the fleet
@@ -13407,6 +14918,72 @@ mod tests {
         assert_eq!(view.page, Page::Booth, "a tab closing should not move the screen");
     }
 
+    /// Going to a workspace goes to the view that workspace was left on.
+    ///
+    /// The user's sentence for it: open butai on GIT, switch to caliper which
+    /// was on FILES, switch back to butai and you are on GIT again. Before
+    /// this, the page was a property of the *client* — one `view.page` carried
+    /// across every tab — so the second half of that sentence read "and you are
+    /// on FILES", which is a view of a project you are no longer in.
+    ///
+    /// Both halves the loop composes are here, because the seam between them is
+    /// where this can go wrong: [`select_tab`] moves the tab and leaves BOOTH,
+    /// and [`restore_view`] puts the page back. The tests below it are the two
+    /// arrivals that must *not* move the screen.
+    #[test]
+    fn switching_workspace_restores_that_workspaces_own_page() {
+        let dir = std::env::temp_dir().join(format!("butai-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let butai = crate::views::key(None, "/p/butai");
+        let caliper = crate::views::key(None, "/p/caliper");
+        std::fs::write(
+            &path,
+            format!("[views]\n\"{butai}\" = \"git\"\n\"{caliper}\" = \"files\"\n"),
+        )
+        .unwrap();
+        let (cfg, warnings) = crate::config::Config::load_from(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let views = crate::views::Views::at(path.clone(), &cfg);
+
+        let mut view = View::default();
+        restore_view(&views, Some(&butai), &mut view);
+        assert_eq!(view.page, Page::Git, "launching lands on the view it was left on");
+        // Through `open_page`, so arriving here has GIT's own focus rule: the
+        // history is the list `j`/`k` walk, not the stage.
+        assert_eq!(view.focus, Focus::History);
+
+        select_tab(&mut view, 1);
+        restore_view(&views, Some(&caliper), &mut view);
+        assert_eq!(view.page, Page::Files);
+        assert_eq!(view.focus, Focus::Stage, "and GIT's cursor did not follow off GIT");
+
+        select_tab(&mut view, 0);
+        restore_view(&views, Some(&butai), &mut view);
+        assert_eq!(view.page, Page::Git, "back on butai, back on its own page");
+
+        // A workspace butai has never seen keeps the view you carried in, which
+        // is the behaviour every tab change had before there was anything to
+        // remember — and is then what gets remembered about it.
+        select_tab(&mut view, 2);
+        restore_view(&views, Some(&crate::views::key(None, "/p/new")), &mut view);
+        assert_eq!(view.page, Page::Git);
+        restore_view(&views, None, &mut view);
+        assert_eq!(view.page, Page::Git, "nor does a tab bar with nothing in it move the screen");
+
+        // None of the three that are not views of a workspace is moved by
+        // arriving at one. BOOTH spans machines, SETTINGS is about this client
+        // and HELP is about the program, so a tab closing under any of them
+        // must not throw the screen onto a project's page.
+        for page in [Page::Booth, Page::Settings, Page::Help] {
+            let mut view = View { page, ..Default::default() };
+            restore_view(&views, Some(&caliper), &mut view);
+            assert_eq!(view.page, page, "arriving at a workspace pulled the screen off {page:?}");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A click on a tab that is not there does nothing.
     ///
     /// The chips are drawn from a list that can shrink between the paint and
@@ -13595,6 +15172,134 @@ mod tests {
             handle_diff_key(key(event::KeyCode::Enter), &mut view, &mut diff),
             Some(Flow::ApplyDiff { discard: false })
         ));
+    }
+
+    /// A clock tick repaints only when the frame it is following drew something
+    /// that clock is for.
+    ///
+    /// The whole of the idle client's cost was in this decision, and for the
+    /// life of the two clocks it was not made: the slow arm set `dirty` every
+    /// 250ms whatever was on screen, and the fast arm never set it at all — so
+    /// an untouched workbench rebuilt every row and scanned every cell for URLs
+    /// four times a second to write an empty diff, while the sprites the fast
+    /// clock exists for were drawn at 250ms and skipped every second frame of
+    /// their own cycle.
+    ///
+    /// Tested here rather than in the loop because a condition inside a
+    /// `tokio::select!` arm is unreachable from a test, which is how the answer
+    /// [`chrome::draw`] had been returning all along came to be dropped on the
+    /// floor without anything noticing.
+    #[test]
+    fn a_clock_tick_repaints_only_for_what_the_last_frame_drew() {
+        let still = chrome::Painted::default();
+        let scrolling = chrome::Painted { wants_anim: true, ..still };
+        let sprite = chrome::Painted { wants_fast_anim: true, ..still };
+        let both = chrome::Painted { wants_anim: true, wants_fast_anim: true };
+
+        assert!(!repaint_on_tick(still, Clock::Slow), "an idle screen repainted itself");
+        assert!(!repaint_on_tick(still, Clock::Fast), "an idle screen repainted itself");
+
+        // The two are separately gated, and that is the point of there being
+        // two: a title scrolling at 250ms must not pull the sprite clock up to
+        // 120ms behind it, and a sprite must not be held down to 250ms by a
+        // screen with nothing scrolling on it.
+        assert!(repaint_on_tick(scrolling, Clock::Slow));
+        assert!(!repaint_on_tick(scrolling, Clock::Fast), "a marquee woke the sprite clock");
+        assert!(repaint_on_tick(sprite, Clock::Fast));
+        assert!(!repaint_on_tick(sprite, Clock::Slow), "a sprite woke the marquee clock");
+        assert!(repaint_on_tick(both, Clock::Slow) && repaint_on_tick(both, Clock::Fast));
+
+        // The heartbeat is the one clock that is not asking the frame, because
+        // the thing it is for does not report itself — see `HEARTBEAT`.
+        for last in [still, scrolling, sprite, both] {
+            assert!(repaint_on_tick(last, Clock::Heartbeat), "the heartbeat stopped");
+        }
+    }
+
+    /// The heartbeat is measured against the only thing it exists for.
+    ///
+    /// It has no animation behind it and nothing on screen asks for it, so the
+    /// pressure on it is entirely one way: the next person to want a repaint
+    /// will reach for this number. What it is actually covering is the age glyph
+    /// on an agent's sprite, whose first threshold is five *minutes* — so it can
+    /// be two orders of magnitude slower than that and still be early, and it
+    /// must never drift back towards being a paint clock.
+    #[test]
+    fn the_heartbeat_is_slow_against_the_glyph_it_exists_for() {
+        let first_threshold = Duration::from_secs(chrome::AGE_HEADS[0].0);
+        assert!(
+            HEARTBEAT * 20 <= first_threshold,
+            "{HEARTBEAT:?} is not comfortably inside {first_threshold:?}"
+        );
+        // And is a heartbeat rather than a frame rate: anything at the marquee's
+        // cadence is the unconditional repaint this replaced, wearing a new
+        // name.
+        assert!(HEARTBEAT >= Duration::from_secs(1), "{HEARTBEAT:?} is a paint clock");
+    }
+
+    /// A machine that is away costs one repaint a second, and a client with
+    /// nothing staged costs none.
+    ///
+    /// The reconnect rides the repaint — see [`repaint_for_lost_stage`] — so
+    /// the first version of that fix simply declared the notice animated, which
+    /// put the whole workbench back on the 4Hz clock for as long as a laptop
+    /// stayed shut. That is the bug the rest of this change removes, hidden in
+    /// a failure state where nobody would go looking for it, so the two halves
+    /// are pinned together here: the connection keeps being retried, and the
+    /// screen does not pay the marquee's rate to watch it happen.
+    #[test]
+    fn a_machine_that_is_away_costs_one_repaint_a_second_and_no_more() {
+        let (mut stage, _sent) = fake_stage();
+        assert!(!repaint_for_lost_stage(Some(&stage)), "a live stage has nothing to re-open");
+        assert!(!repaint_for_lost_stage(None), "nothing staged is nothing to re-dial");
+
+        stage.mark_lost(Instant::now());
+        assert!(repaint_for_lost_stage(Some(&stage)), "a lost stage stopped being re-opened");
+
+        // The pacing is the reconnect's, not the animation's and not the
+        // heartbeat's. Five seconds is generous for an age glyph and is five
+        // seconds of black stage after a daemon restart, which is the case
+        // `STAGE_RETRY` was sized for; 250ms is four repaints per attempt.
+        assert!(STAGE_RETRY < HEARTBEAT, "the stage would re-open on the age glyph's clock");
+        assert!(STAGE_RETRY > TICK, "the stage would re-open at the marquee's rate");
+    }
+
+    /// The notice over a dropped stage draws a spinner, and still must not ask
+    /// the marquee's clock for it.
+    ///
+    /// Asserted through `compose` rather than `chrome::draw`, because the card
+    /// is one of the two layers drawn *after* the chrome and no test of `draw`
+    /// alone can see it — the same reason the modal has its own test here.
+    #[test]
+    fn a_dropped_stage_draws_its_notice_without_claiming_the_marquee_clock() {
+        use butai_protocol::api::SysDto;
+        use chrome::{Scene, StageDown, Theme};
+
+        let (cols, rows) = (100u16, 30u16);
+        let view = View::default();
+        let rect = chrome::stage_rect(cols, rows, &view);
+        let pane = Buffer::empty(rect);
+        let mut screen = Buffer::empty(Rect::new(0, 0, cols, rows));
+        let sys = SysDto::default();
+        let scene = Scene {
+            stage_down: Some(StageDown { host: Some("gpu-box"), secs: 4, has_frame: true }),
+            ..Scene::new(&[], &sys)
+        };
+        let out = compose(&mut screen, cols, rows, &scene, &view, &Theme::default(), Some(&pane));
+
+        let text: String = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .filter_map(|x| screen.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("gpu-box went away"), "the notice was not drawn:\n{text}");
+        assert!(
+            !out.wants_anim,
+            "the disconnected notice put the workbench back on the 250ms clock"
+        );
     }
 
     /// The retry used to ride on the repaint. Anything animating makes that

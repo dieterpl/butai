@@ -458,6 +458,25 @@ impl Page {
         }
     }
 
+    /// The space a written word names, or `None` for anything else.
+    ///
+    /// The inverse of [`label`](Self::label), and built *out of* it rather than
+    /// beside it: a second table of the same ten words is a second table to get
+    /// wrong, and the failure would be silent — a view saved under a name
+    /// nothing reads back.
+    ///
+    /// **Scoped to [`ORDER`](Self::ORDER), which is the whole of how `[views]`
+    /// stays honest.** That table remembers which page a *workspace* was last
+    /// on, so the only names it can mean are the ones that are views of one.
+    /// BOOTH, SETTINGS and HELP are not among them and are not names this can
+    /// return: a hand-written `"local:/srv/x" = "settings"` reads as a word this
+    /// build does not know and is ignored, exactly as a page name from a newer
+    /// butai is. Neither is DIFF, which is what is *on* the stage rather than
+    /// somewhere you navigate to — see the note on `ORDER`.
+    pub fn space_named(name: &str) -> Option<Page> {
+        Page::ORDER.iter().copied().find(|p| p.label() == name)
+    }
+
     fn order_index(self) -> usize {
         Page::ORDER.iter().position(|p| *p == self).unwrap_or(0)
     }
@@ -3200,13 +3219,22 @@ pub fn draw(
         Page::Git => draw_git_page(buf, &geom, ws, scene.git, view, theme),
         Page::Settings => settings::draw(buf, &geom, scene.settings, view, theme),
         Page::Help => help::draw(buf, &geom, scene.help, view, theme),
-        Page::Usage => usage::draw(buf, &geom, scene.usage, theme),
+        // The one page whose text is a reading of the wall clock rather than of
+        // the daemon's state: `resets in 3h 12m` and `8s ago` both go stale on
+        // their own, with nothing arriving to say so. Which is exactly what
+        // `wants_anim` is for, and it is asked for only while the page is up —
+        // the difference between a countdown that counts and a client that
+        // never sleeps.
+        Page::Usage => {
+            usage::draw(buf, &geom, scene.usage, theme);
+            out.wants_anim |= true;
+        }
     }
     if rails && geom.right_box.width > 0 {
         if view.zen {
             draw_right_zen(buf, &geom, ws, theme);
         } else {
-            draw_right_rail(buf, &geom, ws, view, theme);
+            out.wants_anim |= draw_right_rail(buf, &geom, ws, view, theme);
         }
     }
     // The host the active chip carries, so the footer can say which machine
@@ -3780,6 +3808,26 @@ pub struct SpaceLayout {
     pub close: Option<(u16, u16)>,
 }
 
+/// Whether the fleet's `row`th line is laid out as the cursor's row.
+///
+/// **One answer, read by the painter and by the hit-test**, because the row's
+/// whole geometry turns on it: [`space_layout`] reserves `[x]` on the cursor's
+/// row and on no other, and those four cells at the right end carry
+/// `[+ claude]` along with them. The two spelled the condition out separately
+/// once and drifted by exactly that much — the drawing asked for the cursor's
+/// row *while the fleet has the keyboard*, the hit-test asked only for the
+/// cursor's row, so the moment the middle column took the keyboard a press on
+/// the `[+ claude]` you could see landed on an `[x]` nothing had drawn, and
+/// starting an agent opened the close-workspace confirm instead.
+///
+/// The focus half is not incidental to the layout, it is the reason for it. A
+/// cursor belongs to the list that has the keyboard, and `[x]` ends a workspace
+/// and everything running in it: that is a button to put on the row you are
+/// steering, not on the row a fleet you tabbed away from happens to remember.
+pub fn fleet_cursor_row(view: &View, row: usize) -> bool {
+    row == view.booth_sel && view.focus == Focus::AllAgents
+}
+
 /// Lay out one project row inside the fleet column.
 ///
 /// Right to left, because everything on the right is a control and the name is
@@ -4046,7 +4094,7 @@ fn draw_booth_page(
             let bound = area.x + area.width;
             for (i, row) in rows.iter().skip(first).take(visible).enumerate() {
                 let y = area.y + i as u16;
-                let cursor = first + i == view.booth_sel && focused;
+                let cursor = fleet_cursor_row(view, first + i);
                 match row {
                     BoothRow::Machine { label, agents, folded, .. } => {
                         let bg = theme.row_bg(cursor);
@@ -4225,6 +4273,11 @@ fn draw_booth_page(
 /// the number says how loaded a machine is and the bar is what you read without
 /// reading. Below three cells it can no longer say anything a percentage does
 /// not, so that is where it stops.
+///
+/// The cap is the *summary* row's alone. A sub-row's meter is the whole subject
+/// of the row it is on rather than one field of five, so it takes every cell
+/// the readings beside it did not want — which is how a wide column buys
+/// resolution instead of whitespace.
 const COMPUTE_METER_MAX: u16 = 8;
 const COMPUTE_METER_MIN: u16 = 3;
 
@@ -4232,23 +4285,115 @@ const COMPUTE_METER_MIN: u16 = 3;
 /// dropping the fields to its right instead of squeezing it further.
 const COMPUTE_MIN_NAME: u16 = 6;
 
+/// What a sub-row spends before it has drawn anything: two cells of indent, the
+/// three-cell label, the space after it and the space before the reading.
+const COMPUTE_SUB_FIXED: u16 = 7;
+
+/// One row of a machine's compact block: `RAM ███████░░ 19/32G`.
+///
+/// Built without a [`Theme`] on purpose, so [`compute_machine_h`] can ask the
+/// same function the drawing asks how many of these a machine has. The colour
+/// is a [`Role`] and not a resolved one for the same reason.
+struct SubRow {
+    /// The SYSTEM rail's own word for this reading — `CPU`, `RAM`, `GPU`,
+    /// `DSK`. The rail's and not a second alphabet: the two surfaces are one
+    /// glance apart and a `DSK` here beside a `Disk` there would be two names
+    /// for one thing.
+    label: &'static str,
+    /// What the meter draws. Not always what `value` says — RAM's bar is the
+    /// fraction and its text is the pair.
+    pct: f32,
+    /// The reading in words. RAM says `19/32G` because "how much is left" is
+    /// the question anyone has about memory, and the bar beside it has already
+    /// drawn the fraction.
+    value: String,
+    /// What the reading is *of*, when that is not obvious from the label. Only
+    /// the disk has one, and only because the configured selection can pick a
+    /// mount that is not `/`: a bare `91%` under the shipping `disks = "all"`
+    /// is precisely the ambiguity that made the old headline unreadable.
+    ident: String,
+    /// `None` where the reading is stale, which is drawn faint rather than in
+    /// the colour the number earned — see `draw_system`'s disk arm.
+    role: Option<Role>,
+}
+
+/// The rows of one machine's compact block, in drawing order.
+///
+/// **Empty for a machine that is away.** Its telemetry is the last thing it
+/// sent, and four meters redrawn every tick off a frozen sample is a strong
+/// claim to be alive. The summary keeps saying `away`, and that is the whole
+/// reading.
+///
+/// A GPU row only where there is a GPU. A `DSK` row for the fullest of the
+/// mounts the rail was configured to watch — the same one [`MachineRead`]
+/// handed the headline, so the block and the headline cannot come to two
+/// opinions about which disk is the one to worry about.
+fn compute_sub_rows(m: &MachineRow<'_>, read: &MachineRead) -> Vec<SubRow> {
+    if !m.live {
+        return Vec::new();
+    }
+    let pct_row = |label, pct: f32| SubRow {
+        label,
+        pct,
+        value: format!("{pct:.0}%"),
+        ident: String::new(),
+        role: Some(load_role(pct)),
+    };
+    let mut rows = vec![
+        pct_row("CPU", read.cpu),
+        SubRow {
+            value: cap_pair(m.sys.ram_used_gb, m.sys.ram_total_gb),
+            ..pct_row("RAM", read.ram)
+        },
+    ];
+    rows.extend(read.gpu.map(|pct| pct_row("GPU", pct)));
+    if let Some(d) = read.disk.filter(|d| m.sys.disks.get(d.idx).is_some()) {
+        rows.push(SubRow {
+            ident: m.sys.disks[d.idx].mount.clone(),
+            role: (!d.stale).then(|| load_role(d.pct)),
+            ..pct_row("DSK", d.pct)
+        });
+    }
+    rows
+}
+
 /// Rows one machine takes in COMPUTE.
 ///
-/// One, until it is expanded: then its summary, its whole gauge stack, and a
-/// blank to keep the next machine's name off the last trace. The drawing and
-/// the hit test both ask this rather than each doing the arithmetic, which is
-/// the same discipline `draw_system` returning its own row count already keeps.
+/// Its summary, then either its compact block or — once it is expanded — the
+/// whole SYSTEM gauge stack, and a blank under either to keep the next
+/// machine's name off the last row of this one's. The drawing and the hit test
+/// both ask this rather than each doing the arithmetic, which is the same
+/// discipline `draw_system` returning its own row count already keeps.
 pub fn compute_machine_h(m: &MachineRow<'_>, view: &View) -> u16 {
-    if !view.folds.machine_expanded(m.label) {
-        return 1;
+    if view.folds.machine_expanded(m.label) {
+        return 1 + system_rows_used(&system_gauges(m.sys, &view.net, &view.disks)) + 1;
     }
-    1 + system_rows_used(&system_gauges(m.sys, &view.net, &view.disks)) + 1
+    match compute_sub_rows(m, &machine_read(m.sys, &view.disks)).len() as u16 {
+        // An away machine is its summary and nothing else, so there is nothing
+        // for a blank row to separate.
+        0 => 1,
+        n => 1 + n + 1,
+    }
+}
+
+/// Whether a collapsed machine's readings fit between its summary and the foot
+/// of the column — which is the same question as whether they were drawn at
+/// all, because [`draw_compute`] draws that block whole or not at all.
+///
+/// Written down once because it is asked twice. The drawing asks it to decide
+/// what to paint; the hit test asks it to decide what a press can land on, and
+/// the rows a clip left blank belong to nobody. A hit test that walked
+/// [`compute_machine_h`] regardless answered `Some` for that empty space, so
+/// pressing the foot of a short column folded whichever machine happened to be
+/// last — a fold nothing on screen invited.
+fn compute_block_drawn(rows: usize, top: u16, bottom: u16) -> bool {
+    rows > 0 && bottom.saturating_sub(top.saturating_add(1).min(bottom)) >= rows as u16
 }
 
 /// Which machine's block contains `y`, as an index into `machines`.
 ///
-/// Answers for the gauge rows as well as the summary, because a press on a
-/// machine's own trace meaning nothing — while the name one row up folds it —
+/// Answers for the block's rows as well as the summary, because a press on a
+/// machine's own meters meaning nothing — while the name one row up folds it —
 /// is a dead zone the pointer has no way to know about.
 pub fn booth_compute_machine_at(
     cols: &BoothColumns,
@@ -4261,28 +4406,58 @@ pub fn booth_compute_machine_at(
     if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
         return None;
     }
+    let bottom = area.y + area.height;
     let mut top = area.y;
     for (i, m) in machines.iter().enumerate().skip(view.booth_compute_scroll) {
+        // `draw_compute`'s own stop. Without it the walk carries on past the
+        // foot of the column and the machine after a clipped one answers for
+        // rows it never had.
+        if top >= bottom {
+            break;
+        }
         let h = compute_machine_h(m, view);
-        if y < top + h {
+        // The rows a press can land on, which is the whole height except where
+        // a collapsed block was dropped for want of room — then it is the
+        // summary and nothing else. An expanded stack is not the same case:
+        // `draw_system` clips gauge by gauge and what it drops is off the foot
+        // of the column, where the bounds check above has already said `None`.
+        let hit = if view.folds.machine_expanded(m.label)
+            || compute_block_drawn(
+                compute_sub_rows(m, &machine_read(m.sys, &view.disks)).len(),
+                top,
+                bottom,
+            ) {
+            h
+        } else {
+            1
+        };
+        if y < top + hit {
             return Some(i);
         }
+        // The full height either way, because that is what the drawing
+        // advanced by — and after a clip it is what carries `top` past the
+        // floor so the loop above stops there, exactly as the drawing did.
         top += h;
     }
     None
 }
 
-/// COMPUTE: one row per machine, and the gauges under whichever ones are open.
+/// COMPUTE: a block per machine, and the full gauge stack under whichever ones
+/// are open.
 ///
 /// The column used to draw the SYSTEM rail's whole stack per machine, which is
 /// twelve to twenty rows for a workstation — right for the rail, which describes
 /// the one machine you are working on, and wrong here, where the question is
 /// which of four machines is in trouble and the answer did not fit on screen.
 ///
-/// So a machine is a line: what it is, how many agents it is running, and
-/// [`machine_pressure`] — the worst of its four readings, named. Nothing is
-/// lost, because `z` expands one back to the stack, drawn by the same
-/// [`draw_system`] the rail uses.
+/// It then went the whole way the other way, to one line each: the headline and
+/// nothing else. That answered the question in four rows of the seventy-six the
+/// column has, and left every follow-up — *what* is it doing, which disk is
+/// that, how much memory is actually left — to a stack you had to open. So a
+/// machine is a small block now: the headline, then a row per reading, meter
+/// and number. Still not the stack — no history, no network, no per-mount
+/// detail — because the column chooses between machines and the rail describes
+/// one, and [`Folds::toggle_expanded`] is the door between the two.
 ///
 /// Returns whether anything is marquee-scrolling.
 fn draw_compute(
@@ -4300,45 +4475,129 @@ fn draw_compute(
         if y >= bottom {
             break;
         }
+        let read = machine_read(m.sys, &view.disks);
         let expanded = view.folds.machine_expanded(m.label);
-        anim |= draw_compute_summary(buf, area, y, m, expanded, view, theme);
-        y += 1;
-        if !expanded {
-            continue;
+        anim |= draw_compute_summary(buf, area, y, m, &read, view, theme);
+
+        // Rows left under the summary for whatever this machine puts there.
+        let room = bottom.saturating_sub((y + 1).min(bottom));
+        if expanded {
+            // Indented, so the stack visibly belongs to the name above it
+            // rather than reading as four more machines. `draw_system` keeps
+            // its own all-or-none rule per gauge, which is what stops a label
+            // being stranded above the fold without its trace — and its return
+            // is deliberately *not* read: `y` advances by what the hit test
+            // will walk, and the two used to be two copies of one sum that
+            // agreed only while nothing clipped.
+            let gauges = LRect::new(area.x + 2, y + 1, area.width.saturating_sub(2), room);
+            if gauges.height > 0 {
+                let gs = system_gauges(m.sys, &view.net, &view.disks);
+                draw_system(buf, gauges, m.sys, &gs, theme);
+            }
+        } else {
+            let rows = compute_sub_rows(m, &read);
+            // The whole block or none of it — `draw_system`'s discipline, one
+            // level up. Three of a machine's four readings at the foot of the
+            // column reads as a screen that broke rather than one that ran out,
+            // and the summary above it has already said the thing that matters.
+            // Asked of `compute_block_drawn` rather than measured here, because
+            // `booth_compute_machine_at` has to reach the same verdict and the
+            // rows dropped here are the rows it must refuse to name.
+            if compute_block_drawn(rows.len(), y, bottom) {
+                draw_compute_block(buf, area, y + 1, &rows, theme);
+            }
         }
-        // Indented, so the block visibly belongs to the name above it rather
-        // than reading as four more machines.
-        let gauges =
-            LRect::new(area.x + 2, y, area.width.saturating_sub(2), bottom.saturating_sub(y));
-        if gauges.height > 0 {
-            // The renderer's own answer, not a recomputation: this arithmetic
-            // was `2 + gpus` back when a gauge was one row and network did not
-            // exist, then `n * GAUGE_H` until the network gauge stopped being
-            // the same height as the rest. Every version of it could disagree
-            // with what was drawn; asking cannot. It already stops on whole
-            // gauges, which is what keeps the next machine's name off the
-            // previous one's trace.
-            let gs = system_gauges(m.sys, &view.net, &view.disks);
-            y += draw_system(buf, gauges, m.sys, &gs, theme);
-        }
-        y += 1;
+        y += compute_machine_h(m, view);
     }
     anim
 }
 
-/// One machine's line: `v local     4 ███░░░ CPU 41%`.
+/// One machine's compact block, as a small table.
+///
+/// Every meter is one width and every reading starts in one column, both taken
+/// from the widest row before anything is drawn — four rows that each sized
+/// themselves would be four bars you cannot compare, which is the one thing a
+/// column of bars is for.
+///
+/// The mount is the first thing to go, the way [`gauge_head`] drops a gauge's
+/// identity first: a bar too short to read is a bigger loss than a path you can
+/// open the machine to see. It is also drawn past its *own* reading rather than
+/// past the widest one, so it only competes with the meter for cells the
+/// reading column had not already spent.
+fn draw_compute_block(buf: &mut Buffer, area: LRect, top: u16, rows: &[SubRow], theme: &Theme) {
+    let bound = area.x + area.width;
+    let core_w = rows.iter().map(|r| r.value.chars().count() as u16).max().unwrap_or(0);
+    let idents: Vec<String> = rows
+        .iter()
+        .map(|r| match r.ident.is_empty() {
+            true => String::new(),
+            // What the mount may take without pushing the meter under the width
+            // at which it stops saying anything the percentage does not — and
+            // then only if what came back is still a *path*. `fit_path` will
+            // fall through to the bare tail of a segment for the rail, where a
+            // mount is a `DSK` row's only identity and two mounts under one
+            // parent have to be told apart somehow. Here the row already says
+            // `DSK` and the percentage already says the fact: `…/fast` names a
+            // disk, `…ast` names nothing, and three cells are worth more to the
+            // bar than to that.
+            false => {
+                let spent = COMPUTE_SUB_FIXED + COMPUTE_METER_MIN + 1;
+                let room = area.width.saturating_sub(spent + r.value.chars().count() as u16);
+                match fit_path(&r.ident, room) {
+                    cut if cut.contains('/') => cut,
+                    _ => String::new(),
+                }
+            }
+        })
+        .collect();
+    let tail = rows
+        .iter()
+        .zip(&idents)
+        .filter(|(_, id)| !id.is_empty())
+        .map(|(r, id)| (r.value.chars().count() + 1 + id.chars().count()) as u16)
+        .max()
+        .unwrap_or(0);
+    let meter_w = match area.width.saturating_sub(COMPUTE_SUB_FIXED + core_w.max(tail)) {
+        w if w >= COMPUTE_METER_MIN => w,
+        // Gone rather than shrunk to a bar that cannot say anything a number
+        // does not: its cells go to the readings, which never drop.
+        _ => 0,
+    };
+    let meter_x = area.x + 6;
+    let value_x = meter_x + meter_w + u16::from(meter_w > 0);
+
+    for ((i, r), ident) in rows.iter().enumerate().zip(&idents) {
+        let y = top + i as u16;
+        fill_row(buf, area.x, y, bound, theme.ground);
+        let color = r.role.map_or(theme.faint, |role| theme.role(role));
+        put_str(buf, area.x + 2, y, r.label, bound, Pen::new(theme.muted, theme.ground));
+        if meter_w > 0 {
+            draw_meter(buf, meter_x, y, meter_w, r.pct, color, theme);
+        }
+        put_str(buf, value_x, y, &r.value, bound, Pen::new(color, theme.ground));
+        let ident_x = value_x + r.value.chars().count() as u16 + 1;
+        put_str(buf, ident_x, y, ident, bound, Pen::new(theme.faint, theme.ground));
+    }
+}
+
+/// One machine's headline: `v local     4 ███░░░ CPU 41%`.
 ///
 /// Laid out from the right, because every field on that side is a reading and
 /// the name is the one thing that can be shortened without losing a fact. When
 /// even that runs out the fields drop outward-in — the meter first, since it is
 /// the percentage drawn twice, then the agent count. The reading itself never
 /// goes: a row that cannot say how loaded a machine is has no reason to exist.
+///
+/// The `>` / `v` at the left edge is the fold mark the whole workbench uses, and
+/// it is a button: a press anywhere on the machine swaps this row's block for
+/// the SYSTEM rail's stack. It spent a release drawn but unwired, which is what
+/// a mark you can press and nothing happens looks like from outside.
 fn draw_compute_summary(
     buf: &mut Buffer,
     area: LRect,
     y: u16,
     m: &MachineRow<'_>,
-    expanded: bool,
+    read: &MachineRead,
     view: &View,
     theme: &Theme,
 ) -> bool {
@@ -4348,13 +4607,12 @@ fn draw_compute_summary(
     // A machine that is away keeps its last agent count out of the row and says
     // the word instead, in the colour you notice without reading. Its gauges
     // would go on animating from telemetry nobody is taking any more, and a
-    // moving trace is a strong claim to be alive — so there is no meter either.
-    let (value, value_fg) = match m.live {
-        true => {
-            let p = machine_pressure(m.sys, &view.disks);
-            (format!("{} {:>3.0}%", p.label, p.pct), theme.role(load_role(p.pct)))
-        }
-        false => ("away".to_string(), theme.attention),
+    // moving trace is a strong claim to be alive — so there is no meter either,
+    // and no block under it.
+    let pressure = m.live.then(|| read.pressure());
+    let (value, value_fg) = match pressure {
+        Some(p) => (format!("{} {:>3.0}%", p.label, p.pct), theme.role(load_role(p.pct))),
+        None => ("away".to_string(), theme.attention),
     };
     let vw = value.chars().count() as u16;
     let value_x = bound.saturating_sub(vw);
@@ -4375,14 +4633,13 @@ fn draw_compute_summary(
     }
 
     let meter_w = next.saturating_sub(name_x + COMPUTE_MIN_NAME + 1).min(COMPUTE_METER_MAX);
-    if m.live && meter_w >= COMPUTE_METER_MIN {
-        let p = machine_pressure(m.sys, &view.disks);
+    if let Some(p) = pressure.filter(|_| meter_w >= COMPUTE_METER_MIN) {
         let meter_x = next - 1 - meter_w;
         draw_meter(buf, meter_x, y, meter_w, p.pct, theme.role(load_role(p.pct)), theme);
         next = meter_x;
     }
 
-    let mark = if expanded { "v" } else { ">" };
+    let mark = if view.folds.machine_expanded(m.label) { "v" } else { ">" };
     put_str(buf, area.x, y, mark, bound, Pen::new(theme.faint, theme.ground));
     let room = next.saturating_sub(name_x).saturating_sub(1);
     let (text, moving) = marquee(m.label, room as usize, view.tick);
@@ -5372,7 +5629,10 @@ fn page_badge(
     }
 }
 
-/// AGENTS / PROCESSES / SYSTEM. Returns whether anything is marquee-scrolling.
+/// AGENTS / PROCESSES / SYSTEM. Returns [`Painted::wants_anim`] for the rail:
+/// whether anything on it is marquee-scrolling *or* running a working agent's
+/// spinner and turn timer. Both move on [`View::tick`], so both are the same
+/// question to the clock that has to be kept turning for them.
 fn draw_left_rail(
     buf: &mut Buffer,
     geom: &Geom,
@@ -5413,13 +5673,20 @@ fn draw_left_rail(
     for (i, a) in agents.iter().skip(first).take(rows.height as usize).enumerate() {
         let y = rows.y + i as u16;
         let cursor = first + i == view.agent_sel && view.focus == Focus::Agents;
-        let (status, status_role, name_role, _) = agent_status(
+        let (status, status_role, name_role, animating) = agent_status(
             a.state,
             a.exited,
             a.working_since_ms.map(secs_since),
             view.tick,
             a.unread,
         );
+        // A working row is a spinner and a running clock, and `agent_status`
+        // has always said so in its fourth return value — which this dropped on
+        // the floor. It cost nothing while the loop repainted four times a
+        // second no matter what, and it is the whole of the row the moment the
+        // clock has to be asked for: an agent that says `◐ 1:07` would have sat
+        // at `◐ 1:07` until the next keystroke.
+        scrolling |= animating;
         // The agent's own spinner is pinned, not scrolled: it is the same kind
         // of token as a file's `M`, and a `◐` towed through the row by the
         // marquee is a moving target where a fixed one said the same thing.
@@ -5662,13 +5929,14 @@ pub fn system_gauges(sys: &SysDto, net: &NetSelect, disks: &DiskSelect) -> Vec<G
 /// The one reading that answers "is this machine in trouble".
 ///
 /// **Not the CPU.** A box at 30% CPU with a full root filesystem is in trouble
-/// and its CPU number says it is fine, so this is the *worst* of the four things
-/// that can run out — and it carries which one it was, because "97%" without a
-/// name is a number you have to go and investigate.
+/// and its CPU number says it is fine, so this is the *worst* of the things a
+/// machine can be short of — and it carries which one it was, because "97%"
+/// without a name is a number you have to go and investigate.
 ///
-/// COMPUTE draws this and nothing else per machine. The SYSTEM rail still draws
-/// every gauge, and that is the right division: the rail describes the one
-/// machine you are working on, and this column exists to choose between four.
+/// The headline of a machine's block in COMPUTE, above the block's own row per
+/// reading. The SYSTEM rail still draws every gauge with its history, and that
+/// is the right division: the rail describes the one machine you are working
+/// on, and this column exists to choose between four.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pressure {
     /// The SYSTEM rail's own label for whatever won — `CPU`, `RAM`, `GPU`,
@@ -5688,40 +5956,153 @@ fn pct_of(used: f32, total: f32) -> f32 {
     }
 }
 
-/// The worst-off resource on a machine.
+/// How full a filesystem has to be before it outranks everything a machine is
+/// actually *doing*. See [`MachineRead::pressure`].
 ///
-/// Ties go to whichever comes first in CPU, RAM, GPU, disk order — a strict
-/// `>`, so a machine sitting at exactly 40% everywhere reports its CPU every
-/// tick instead of flickering between four labels that are all equally true.
+/// Well above [`load_role`]'s 85% danger line, and that gap is the entire fix:
+/// a disk that has been 88% full for a year is a fact about the machine, not an
+/// event, and the band from 85 to 95 is exactly where a well-used media drive
+/// lives permanently. Ninety was tried first and is the number the reported
+/// machine sat at, so it would have shipped the same red row it was meant to
+/// clear.
+///
+/// Ninety-five is also where the number stops being arbitrary: ext4 reserves 5%
+/// of a filesystem for root by default, so 95% used is where ordinary writes
+/// start failing rather than where they are merely getting close.
+const DISK_ALARM_PCT: f32 = 95.0;
+
+/// One filesystem, as the compute column reads it.
+#[derive(Debug, Clone, Copy)]
+pub struct DiskRead {
+    /// Index into `sys.disks`, so a row can name the mount and print its
+    /// capacity without walking the configured selection a second time.
+    pub idx: usize,
+    pub pct: f32,
+    /// Whether the daemon's last sweep missed this mount. Carried rather than
+    /// resolved here, because the two readers want opposite things of it: the
+    /// `DSK` row still prints the number it last saw, faint, and
+    /// [`MachineRead::pressure`] must not raise an alarm on it at all.
+    pub stale: bool,
+}
+
+/// The readings COMPUTE takes off one machine, taken once.
+///
+/// The headline and the block under it are answers about the same numbers, and
+/// both used to go and take them again — [`machine_pressure`] was called twice
+/// inside a single row, so the meter and the value drawn beside it were two
+/// separate walks of the disk table. Reading once and passing the result down
+/// is also what lets the headline and the `DSK` row agree on *which* mount they
+/// are talking about, which under `disks = "all"` is not a given.
+#[derive(Debug, Clone, Copy)]
+pub struct MachineRead {
+    pub cpu: f32,
+    pub ram: f32,
+    /// `None` on a machine with no GPU, which is not the same fact as a GPU
+    /// sitting at 0% — one has nothing to say and the other is saying it.
+    pub gpu: Option<f32>,
+    /// The fullest of the mounts [`disk_mounts`] selected, if it selected any.
+    pub disk: Option<DiskRead>,
+}
+
+/// Take a machine's readings.
 ///
 /// Disks are filtered through [`disk_mounts`], not read raw: which mounts count
 /// is a configured choice, and a machine whose rail deliberately shows only `/`
 /// must not be reported as full because of a snap loopback the user already
-/// said they did not care about.
+/// said they did not care about. The *fullest* of the selected mounts wins,
+/// because it is the one that stops the machine first — but a live mount beats
+/// every stale one before fullness is even asked about, and only then do the
+/// live ones compete on how full they are.
+///
+/// That ordering is the whole of the fix for a `disks = "all"` machine with a
+/// hung NFS export on it. Taking the plain maximum handed the winner to a mount
+/// [`MachineRead::pressure`] then had to throw away for being stale, and there
+/// was nothing behind it: `/mnt/nas` stale at 99% next to a root filesystem
+/// genuinely at 97% reported `CPU 12%`, which is the exact emergency the disk
+/// rule exists to catch, vetoed by the one mount that had no news. Ranking
+/// staleness first means the alarm sees the fullest mount that is actually
+/// saying something — which is what the TypeScript port does by filtering
+/// before its reduce, and the two halves of one rule have to agree.
+///
+/// A machine whose mounts are *all* stale still reports its last reading here,
+/// because this is also what the block's `DSK` row is drawn from and the alarm
+/// and the display are different questions. `pressure` keeps its own stale
+/// guard for that case; the row draws the number faint, the way `draw_system`
+/// has always drawn a mount nobody has heard from.
 ///
 /// A GPU contributes the worse of its utilisation and its memory. Both are ways
 /// for it to be unavailable to the next agent you start.
-pub fn machine_pressure(sys: &SysDto, disks: &DiskSelect) -> Pressure {
+pub fn machine_read(sys: &SysDto, disks: &DiskSelect) -> MachineRead {
     let gpu = sys
         .gpus
         .iter()
         .map(|g| g.pct.max(pct_of(g.mem_used_gb, g.mem_total_gb)))
         .fold(f32::NEG_INFINITY, f32::max);
-    let dsk = disk_mounts(sys, disks)
+    let disk = disk_mounts(sys, disks)
         .into_iter()
-        .filter_map(|i| sys.disks.get(i))
-        .map(|d| pct_of(d.used_gb, d.total_gb))
-        .fold(f32::NEG_INFINITY, f32::max);
+        .filter_map(|idx| {
+            let d = sys.disks.get(idx)?;
+            Some(DiskRead { idx, pct: pct_of(d.used_gb, d.total_gb), stale: d.stale })
+        })
+        .max_by(|a, b| b.stale.cmp(&a.stale).then(a.pct.total_cmp(&b.pct)));
+    MachineRead {
+        cpu: sys.cpu_pct,
+        ram: pct_of(sys.ram_used_gb, sys.ram_total_gb),
+        gpu: (!sys.gpus.is_empty()).then_some(gpu),
+        disk,
+    }
+}
 
-    let mut worst = Pressure { label: "CPU", pct: sys.cpu_pct };
-    for (label, pct) in
-        [("RAM", pct_of(sys.ram_used_gb, sys.ram_total_gb)), ("GPU", gpu), ("DSK", dsk)]
-    {
-        if pct > worst.pct {
-            worst = Pressure { label, pct };
+impl MachineRead {
+    /// The worst-off resource on a machine, named.
+    ///
+    /// **Rates first; fullness only once it is an emergency.** CPU, RAM and GPU
+    /// are *rates* — what the machine is doing this second, and numbers that
+    /// come back down on their own. Disk fullness is a *level*: the same number
+    /// all day, moved by nobody but you. Taking the plain maximum of the four
+    /// let the level win permanently. The shipping default watches the three
+    /// largest local filesystems, so one 90%-full media drive held every row of
+    /// the column at `DSK 90%` in danger red while the CPUs idled, and a column
+    /// whose only job is answering "which of these machines is busy" answered
+    /// "the disk" forever. Reported as the compute column reading high.
+    ///
+    /// The original insight is kept rather than reversed — a full root
+    /// filesystem *is* trouble no CPU number will tell you about — it just has
+    /// to be full enough to outrank what the machine is actually doing, which
+    /// is [`DISK_ALARM_PCT`]. Below that the level is not hidden: the block's
+    /// own `DSK` row draws it unconditionally, with its mount. It is merely no
+    /// longer shouted.
+    ///
+    /// A stale mount is out of it entirely. A filesystem nobody has heard from
+    /// is not news about how full it is, and a hung NFS export reporting 99%
+    /// from an hour ago must not paint a working machine as an emergency —
+    /// the judgement `draw_system` already makes when it draws a stale disk
+    /// faint instead of in the colour its number earned.
+    ///
+    /// Ties go to whichever comes first in CPU, RAM, GPU order — a strict `>`,
+    /// so a machine sitting at exactly 40% everywhere reports its CPU every tick
+    /// instead of flickering between labels that are all equally true.
+    pub fn pressure(&self) -> Pressure {
+        let mut worst = Pressure { label: "CPU", pct: self.cpu };
+        for (label, pct) in [("RAM", self.ram), ("GPU", self.gpu.unwrap_or(f32::NEG_INFINITY))] {
+            if pct > worst.pct {
+                worst = Pressure { label, pct };
+            }
+        }
+        match self.disk {
+            Some(d) if !d.stale && d.pct >= DISK_ALARM_PCT && d.pct > worst.pct => {
+                Pressure { label: "DSK", pct: d.pct }
+            }
+            _ => worst,
         }
     }
-    worst
+}
+
+/// The worst-off resource on a machine. See [`MachineRead::pressure`], which is
+/// where the rule lives; this is the one-shot form for a caller that wants the
+/// headline and nothing else.
+pub fn machine_pressure(sys: &SysDto, disks: &DiskSelect) -> Pressure {
+    machine_read(sys, disks).pressure()
 }
 
 /// Rows one gauge takes. Not a constant any more: the network gauge draws a
@@ -7564,19 +7945,33 @@ pub fn changes_split(geom: &Geom) -> (u16, u16) {
     (rows.height - footer, footer)
 }
 
+/// CHANGES. Returns [`Painted::wants_anim`] for the rail, the way
+/// [`draw_left_rail`] does: a path too long for the name column is
+/// marquee-scrolling on [`View::tick`], and the clock that turns `tick` only
+/// runs while a frame asks for it.
+///
+/// The rail dropped [`draw_row`]'s answer and had nowhere to put it, which was
+/// free while the loop repainted four times a second regardless. It stopped
+/// being free the moment the repaint was gated: a marquee nobody asks a clock
+/// for advances on whatever unrelated frame comes along next — the five-second
+/// heartbeat, twenty phases later — so the path does not scroll slowly, it
+/// jumps. The column is about sixteen cells wide at the default rail, which is
+/// narrower than almost any real path, so this is the ordinary case rather than
+/// the long one.
 fn draw_right_rail(
     buf: &mut Buffer,
     geom: &Geom,
     ws: Option<&WorkspaceDetail>,
     view: &View,
     theme: &Theme,
-) {
+) -> bool {
+    let mut scrolling = false;
     let changes = ws.and_then(|w| w.changes.as_ref());
     let label = changes
         .map(|c| changes_label(c, geom.right_box.width))
         .unwrap_or_else(|| " CHANGES ".into());
     draw_box(buf, geom.right_box, &label, theme.border(view.focus == Focus::Changes), theme.ground);
-    let Some(c) = changes else { return };
+    let Some(c) = changes else { return scrolling };
 
     let area = geom.changes_rows;
     let bound = area.x + area.width;
@@ -7628,7 +8023,7 @@ fn draw_right_rail(
                 // whose `M` slides away is a row that has stopped saying what
                 // happened to the file, and the path is the only part of it too
                 // long to fit in the first place.
-                draw_row(
+                scrolling |= draw_row(
                     buf,
                     area,
                     y,
@@ -7658,6 +8053,7 @@ fn draw_right_rail(
             }
         }
     }
+    scrolling
 }
 
 /// The footer's right-hand buttons, as one string because that is how they are
@@ -8333,9 +8729,10 @@ mod tests {
         let view = View::default();
         let theme = Theme::default();
 
+        let read = machine_read(&sys, &view.disks);
         let row = |w: u16| {
             let mut b = buf(w, 1);
-            draw_compute_summary(&mut b, LRect::new(0, 0, w, 1), 0, &m, false, &view, &theme);
+            draw_compute_summary(&mut b, LRect::new(0, 0, w, 1), 0, &m, &read, &view, &theme);
             text_of(&b, 0).trim_end().to_string()
         };
 
@@ -8365,7 +8762,7 @@ mod tests {
         // strong claim to be alive.
         let gone = MachineRow { live: false, ..m };
         let mut b = buf(34, 1);
-        draw_compute_summary(&mut b, LRect::new(0, 0, 34, 1), 0, &gone, false, &view, &theme);
+        draw_compute_summary(&mut b, LRect::new(0, 0, 34, 1), 0, &gone, &read, &view, &theme);
         let text = text_of(&b, 0);
         assert!(text.contains("away") && !text.contains('█'), "{text:?}");
     }
@@ -8419,6 +8816,380 @@ mod tests {
         let empty =
             SysDto { cpu_pct: 1.0, ram_used_gb: 0.0, ram_total_gb: 0.0, ..Default::default() };
         assert_eq!(machine_pressure(&empty, &disks).label, "CPU");
+
+        // **And the same machine under the config that actually ships.**
+        // Every arm above asks `DiskMode::Auto`, which watches `/` alone — the
+        // default is `All`, which watches the three largest local filesystems,
+        // and that is the difference the pinning bug lived in. A 96%-full root
+        // is still the answer under either.
+        let p = machine_pressure(&full_disk, &DiskSelect::default());
+        assert_eq!((p.label, p.pct as u32), ("DSK", 96));
+    }
+
+    /// A disk is only allowed to be the headline once it is an *emergency*.
+    ///
+    /// The column's question is which of these machines is busy, and the four
+    /// readings do not answer it in the same tense: CPU, RAM and GPU are rates
+    /// that come back down, and fullness is a level that does not. Taking the
+    /// plain maximum let the level win forever — under the shipping
+    /// `disks = "all"` a 3.6 TB media drive that has been 90% full for a year
+    /// held every row of the column at `DSK 90%` in danger red while the CPUs
+    /// idled. Reported as the compute column reading high, and it was.
+    #[test]
+    fn a_disk_is_the_headline_only_once_it_is_an_emergency() {
+        // What ships, and the shape that broke: three real disks, largest
+        // first, exactly as the daemon sends them.
+        let disks = DiskSelect::default();
+        let disk = |mount: &str, used: f32, total: f32, stale: bool| DiskDto {
+            mount: mount.into(),
+            source: format!("/dev/{}", mount.replace('/', "-")),
+            fstype: "ext4".into(),
+            kind: DiskKind::Local,
+            used_gb: used,
+            total_gb: total,
+            stale,
+        };
+        // The CPU above the RAM so the *rate* the headline names is a settled
+        // fact of the fixture rather than a coincidence of two small numbers.
+        let idle = |media: DiskDto| SysDto {
+            cpu_pct: 12.0,
+            ram_used_gb: 3.0,
+            ram_total_gb: 32.0,
+            disks: vec![media, disk("/", 64.0, 215.0, false)],
+            ..Default::default()
+        };
+
+        // 85% is where `load_role` starts painting red, and it is exactly the
+        // band a well-used media drive lives in permanently. An idle machine
+        // reads as idle.
+        let p = machine_pressure(&idle(disk("/media/archive", 3117.0, 3667.0, false)), &disks);
+        assert_eq!(p.label, "CPU", "a full-ish disk is not a busy machine");
+        assert_ne!(load_role(p.pct), Role::Danger, "…and nothing is on fire");
+
+        // 95% is: ext4 keeps 5% back for root, so this is where ordinary writes
+        // start failing rather than where they are getting close.
+        let p = machine_pressure(&idle(disk("/media/archive", 3484.0, 3667.0, false)), &disks);
+        assert_eq!((p.label, p.pct as u32), ("DSK", 95), "an emergency still outranks a rate");
+        assert_eq!(load_role(p.pct), Role::Danger);
+
+        // A mount nobody has heard from is news about the clock, not about the
+        // disk — the judgement `draw_system` already makes when it draws a
+        // stale reading faint instead of in the colour it earned. A hung NFS
+        // export must not paint a working machine as an emergency.
+        let p = machine_pressure(&idle(disk("/mnt/nas", 3630.0, 3667.0, true)), &disks);
+        assert_eq!(p.label, "CPU", "a stale 99% is an old answer, not an alarm");
+
+        // …and it must not take the real emergency down with it. The stale
+        // mount above was also the *fullest*, which is how it used to veto the
+        // rule outright: `machine_read` took the maximum across every selected
+        // mount, `pressure` discarded the winner for being stale, and the mount
+        // that was actually out of space was never asked. Under the shipping
+        // `disks = "all"` that is a hung NFS export next to a full root
+        // filesystem — the exact case the rule exists for — headlined `CPU 12%`
+        // while `/` had six gigabytes left.
+        let cramped = SysDto {
+            cpu_pct: 12.0,
+            ram_used_gb: 3.0,
+            ram_total_gb: 32.0,
+            disks: vec![disk("/mnt/nas", 3630.0, 3667.0, true), disk("/", 209.0, 215.0, false)],
+            ..Default::default()
+        };
+        let p = machine_pressure(&cramped, &disks);
+        assert_eq!((p.label, p.pct as u32), ("DSK", 97), "the stale mount vetoed the live one");
+        // And the block agrees about *which* mount, which is the whole reason
+        // the headline and the row are read once and passed down together.
+        let m = MachineRow { label: "build", sys: &cramped, agents: 2, live: true };
+        let rows = compute_sub_rows(&m, &machine_read(&cramped, &disks));
+        let dsk = rows.iter().find(|r| r.label == "DSK").expect("the block names the disk");
+        assert_eq!(dsk.ident.as_str(), "/", "the row named a mount the headline is not about");
+
+        // The alarm and the display stay different questions. A machine whose
+        // only mount is stale has nothing live to fall back to, and it still
+        // prints the number it last saw — `role: None`, which is what draws it
+        // faint rather than in the red that 99% earns.
+        let nas_only =
+            SysDto { disks: vec![disk("/mnt/nas", 3630.0, 3667.0, true)], ..Default::default() };
+        assert_eq!(machine_pressure(&nas_only, &disks).label, "CPU");
+        let m = MachineRow { label: "nas", sys: &nas_only, agents: 0, live: true };
+        let rows = compute_sub_rows(&m, &machine_read(&nas_only, &disks));
+        let dsk = rows.iter().find(|r| r.label == "DSK").expect("a stale mount is still drawn");
+        assert_eq!((dsk.value.as_str(), dsk.role), ("99%", None));
+
+        // The rates still win when they are worse, which is the strict `>` that
+        // stops the label flickering between two equally true readings.
+        let busy = SysDto { cpu_pct: 98.0, ..idle(disk("/media/archive", 3520.0, 3667.0, false)) };
+        assert_eq!(machine_pressure(&busy, &disks).label, "CPU");
+
+        // The level never stops being *shown*, though — it is only no longer
+        // shouted. The block draws it unconditionally, with the mount, which is
+        // the half of the trade that keeps the original insight.
+        let sys = idle(disk("/media/archive", 3117.0, 3667.0, false));
+        let m = MachineRow { label: "gpu-box", sys: &sys, agents: 1, live: true };
+        let rows = compute_sub_rows(&m, &machine_read(&sys, &disks));
+        let dsk = rows.iter().find(|r| r.label == "DSK").expect("the block names the disk");
+        assert_eq!((dsk.value.as_str(), dsk.ident.as_str()), ("85%", "/media/archive"));
+        assert_eq!(dsk.role, Some(Role::Danger), "the row it is on still says so in red");
+    }
+
+    /// **Every row of COMPUTE belongs to the machine drawn on it, at every
+    /// scroll position.**
+    ///
+    /// There was no test at all for this pair, and they had already drifted:
+    /// `draw_compute` advanced `y` by `1 + draw_system(..) + 1` — what the
+    /// renderer *had* used — while `booth_compute_machine_at` walked
+    /// `compute_machine_h`, what it *would* use. Those are the same number only
+    /// while nothing clips, so a stack cut off at the foot of the column put
+    /// every machine below it one row away from where the pointer thought it
+    /// was. `draw_compute` takes its step from `compute_machine_h` now, and
+    /// this is what says the two are one arithmetic rather than two that agree.
+    ///
+    /// Walked with an expanded machine, an away machine and a plain one in the
+    /// list, because the three have three different heights — and away is the
+    /// only one with no block at all, which is exactly the case an `h` computed
+    /// twice gets wrong.
+    #[test]
+    fn every_row_of_the_compute_column_names_the_machine_drawn_on_it() {
+        let plain =
+            SysDto { cpu_pct: 12.0, ram_used_gb: 4.0, ram_total_gb: 16.0, ..Default::default() };
+        let workstation = SysDto {
+            cpu_pct: 61.0,
+            ram_used_gb: 19.0,
+            ram_total_gb: 32.0,
+            disks: vec![DiskDto {
+                mount: "/media/fast".into(),
+                source: "/dev/sda1".into(),
+                fstype: "ext4".into(),
+                kind: DiskKind::Local,
+                used_gb: 853.0,
+                total_gb: 916.0,
+                stale: false,
+            }],
+            gpus: vec![butai_protocol::api::GpuDto {
+                pct: 34.0,
+                mem_used_gb: 4.0,
+                mem_total_gb: 24.0,
+                hist: Vec::new(),
+                name: "RTX 4070".into(),
+                temp_c: None,
+                power_w: None,
+            }],
+            ..Default::default()
+        };
+        let ms = [
+            MachineRow { label: "local", sys: &workstation, agents: 3, live: true },
+            MachineRow { label: "gpu-box", sys: &workstation, agents: 1, live: true },
+            // No block: its readings are the last it sent, so the summary is
+            // the whole of it and the machine after it starts a row earlier
+            // than every other one here would predict.
+            MachineRow { label: "attic", sys: &plain, agents: 0, live: false },
+            MachineRow { label: "shed", sys: &plain, agents: 2, live: true },
+        ];
+
+        // Wide enough for the column to reach its 36-cell cap, so a name is a
+        // name rather than the marquee's slice of one.
+        let base = View { page: Page::Booth, ..Default::default() };
+        let geom = page_geom(160, 30, &base);
+        let c = booth_columns(booth_area(160, &geom));
+        let area = c.compute_rows;
+        let bottom = area.y + area.height;
+
+        for scroll in 0..ms.len() {
+            let mut view = base.clone();
+            view.booth_compute_scroll = scroll;
+            // One open, so the walk crosses a block of one height into a stack
+            // of another.
+            view.folds.toggle_expanded("gpu-box");
+            let mut b = buf(160, 30);
+            draw_compute(&mut b, area, &ms, &view, &Theme::default());
+            // Only this column's cells: `local` is a fleet heading too, and a
+            // whole-row read would find it there.
+            let col = |y: u16| -> String {
+                (area.x..area.x + area.width)
+                    .filter_map(|x| b.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect()
+            };
+
+            let mut top = area.y;
+            for (i, m) in ms.iter().enumerate().skip(scroll) {
+                if top >= bottom {
+                    break;
+                }
+                let head = col(top);
+                assert!(head.contains(m.label), "scroll {scroll}: row {top} is {head:?}");
+                assert!(head.starts_with('>') || head.starts_with('v'), "{head:?}");
+                for y in top..(top + compute_machine_h(m, &view)).min(bottom) {
+                    assert_eq!(
+                        booth_compute_machine_at(&c, &ms, &view, area.x + 1, y),
+                        Some(i),
+                        "scroll {scroll}: row {y} was drawn for `{}`",
+                        m.label
+                    );
+                }
+                top += compute_machine_h(m, &view);
+            }
+            // Past the last machine is nobody's, which is what keeps a press on
+            // an empty column from folding whatever happens to be last.
+            for y in top.min(bottom)..bottom {
+                assert_eq!(booth_compute_machine_at(&c, &ms, &view, area.x + 1, y), None);
+                assert_eq!(col(y).trim(), "", "scroll {scroll}: row {y} should be empty");
+            }
+        }
+
+        // And the same property where it was actually broken. The sweep above
+        // states it and never tests it: once a block clips, `top` is already
+        // past the foot of the column when the walk ends, so that last loop is
+        // empty in exactly the case it was written for.
+        //
+        // A collapsed block is drawn whole or not at all, and `y` advances by
+        // the full height either way — so a machine whose readings ran out of
+        // column left its summary with blank rows under it as far as the floor,
+        // and the hit test went on naming it for every one of them. Shrink the
+        // terminal until the last machine's sub-rows do not fit, press the empty
+        // space under its name, and it folded.
+        // Four blocks of one height as well as the mixed list, so the clip
+        // lands in the middle of the list and not only at the end of it. A
+        // machine *after* a clipped one is the half of the walk that the
+        // drawing's own `break` stands for: nothing below the clip was painted,
+        // so nothing below it may be named either.
+        let dense = [
+            MachineRow { label: "alpha", sys: &workstation, agents: 3, live: true },
+            MachineRow { label: "bravo", sys: &workstation, agents: 1, live: true },
+            MachineRow { label: "charlie", sys: &workstation, agents: 2, live: true },
+            MachineRow { label: "delta", sys: &workstation, agents: 0, live: true },
+        ];
+        let short = View { page: Page::Booth, ..Default::default() };
+        let mut ever_clipped = false;
+        let mut ever_clipped_mid_list = false;
+        for list in [&ms[..], &dense[..]] {
+            for rows_h in 16..40u16 {
+                let geom = page_geom(160, rows_h, &short);
+                let c = booth_columns(booth_area(160, &geom));
+                let area = c.compute_rows;
+                if area.width == 0 || area.height == 0 {
+                    continue;
+                }
+                let bottom = area.y + area.height;
+                let mut b = buf(160, rows_h);
+                draw_compute(&mut b, area, list, &short, &Theme::default());
+                let col = |y: u16| -> String {
+                    (area.x..area.x + area.width)
+                        .filter_map(|x| b.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                        .collect()
+                };
+
+                // Walk the *natural* heights — what the drawing steps by, and
+                // what the hit test used to walk unconditionally — until one
+                // machine's block runs off the end.
+                let mut top = area.y;
+                for (i, m) in list.iter().enumerate() {
+                    if top >= bottom {
+                        break;
+                    }
+                    let n = compute_sub_rows(m, &machine_read(m.sys, &short.disks)).len() as u16;
+                    if n == 0 || bottom.saturating_sub(top + 1) >= n {
+                        top += compute_machine_h(m, &short);
+                        continue;
+                    }
+                    ever_clipped = true;
+                    ever_clipped_mid_list |= i + 1 < list.len();
+                    let head = col(top);
+                    assert!(head.contains(m.label), "{rows_h} rows: {head:?}");
+                    assert_eq!(
+                        booth_compute_machine_at(&c, list, &short, area.x + 1, top),
+                        Some(i),
+                        "{rows_h} rows: the summary that *was* drawn stopped answering"
+                    );
+                    for y in (top + 1)..bottom {
+                        assert_eq!(col(y).trim(), "", "{rows_h} rows: row {y} was drawn after all");
+                        assert_eq!(
+                            booth_compute_machine_at(&c, list, &short, area.x + 1, y),
+                            None,
+                            "{rows_h} rows: blank row {y} still folds `{}`",
+                            m.label
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        assert!(
+            ever_clipped,
+            "no column height in the sweep clipped a block, so nothing was tested"
+        );
+        assert!(
+            ever_clipped_mid_list,
+            "every clip was the last machine, so the walk never had to stop"
+        );
+    }
+
+    /// A machine's block at the narrowest column and at the widest.
+    ///
+    /// The two widths are the whole range: `BOOTH_COMPUTE_MIN_W` is 20, so the
+    /// interior is 18, and the cap is 36 for an interior of 34. Everything the
+    /// block does about width happens between those two numbers.
+    #[test]
+    fn a_compute_block_keeps_its_meter_and_gives_up_the_mount_first() {
+        let sys = SysDto {
+            cpu_pct: 41.0,
+            ram_used_gb: 19.0,
+            ram_total_gb: 32.0,
+            disks: vec![DiskDto {
+                mount: "/media/fast".into(),
+                source: "/dev/sda1".into(),
+                fstype: "ext4".into(),
+                kind: DiskKind::Local,
+                used_gb: 833.0,
+                total_gb: 916.0,
+                stale: false,
+            }],
+            ..Default::default()
+        };
+        let m = MachineRow { label: "gpu-box", sys: &sys, agents: 3, live: true };
+        let view = View::default();
+        let rows = compute_sub_rows(&m, &machine_read(&sys, &view.disks));
+        // No GPU on this machine, so no GPU row — an absent card is not a card
+        // at 0%.
+        assert_eq!(rows.iter().map(|r| r.label).collect::<Vec<_>>(), ["CPU", "RAM", "DSK"]);
+
+        let block = |w: u16| {
+            let mut b = buf(w, rows.len() as u16);
+            draw_compute_block(
+                &mut b,
+                LRect::new(0, 0, w, rows.len() as u16),
+                0,
+                &rows,
+                &Theme::default(),
+            );
+            (0..rows.len() as u16).map(|y| text_of(&b, y)).collect::<Vec<_>>()
+        };
+
+        // Wide: the mount fits, so the meters give up the cells for it — and
+        // every row keeps one meter width and one reading column even so,
+        // because four bars you cannot compare are the one thing a column of
+        // bars is not allowed to be.
+        let wide = block(34);
+        assert_eq!(wide[0], "  CPU █████        41%");
+        assert_eq!(wide[1], "  RAM ███████      19/32G");
+        assert_eq!(wide[2], "  DSK ███████████  91% /media/fast");
+        assert!(wide.iter().all(|r| r.chars().count() <= 34), "{wide:?}");
+
+        // Narrow: the mount goes, which is `gauge_head`'s rule — the identity
+        // drops before the reading does — and the meter takes back the cells
+        // rather than the row shrinking around a fragment of a path.
+        let narrow = block(18);
+        assert_eq!(narrow[0], "  CPU ██    41%");
+        assert_eq!(narrow[1], "  RAM ███   19/32G");
+        assert_eq!(narrow[2], "  DSK █████ 91%");
+        assert!(
+            narrow.iter().all(|r| r.chars().count() <= 18),
+            "nothing may run past the column: {narrow:?}"
+        );
+
+        // An away machine has no block at all: four meters redrawn every tick
+        // off a frozen sample is a strong claim to be alive.
+        let gone = MachineRow { live: false, ..m };
+        assert!(compute_sub_rows(&gone, &machine_read(&sys, &view.disks)).is_empty());
+        assert_eq!(compute_machine_h(&gone, &View { page: Page::Booth, ..view.clone() }), 1);
     }
 
     /// A turn that landed while you were away belongs in the tray; the same turn
@@ -8576,13 +9347,23 @@ mod tests {
         let screen2: String = (0..40).map(|y| text_of(&b2, y)).collect::<Vec<_>>().join("\n");
         assert!(screen2.contains("codex · local:butai"), "{screen2}");
 
-        // COMPUTE is one row per machine now: both names, both readings, and
-        // no gauge stack until one is asked for.
+        // COMPUTE gives every machine a compact block: the headline, then a row
+        // per reading.
         assert!(screen.contains("COMPUTE"), "{screen}");
         assert!(screen.contains("CPU  42%"), "the worst reading, named:\n{screen}");
-        assert!(!screen.contains("RAM"), "a summary must not draw the stack:\n{screen}");
+        assert!(screen.contains("8/32G"), "the block says what the RAM is doing:\n{screen}");
 
-        // …and `z` on a machine puts the whole stack back, through the very
+        // **The block is not the stack, and this is the line between them.**
+        // The assertion here used to be `!screen.contains("RAM")` — a summary
+        // was one line and anything more was the stack — and a per-resource row
+        // is exactly what it forbade. What separates the two now is *history*:
+        // the block draws meters, which say where a machine is this second, and
+        // the stack draws traces, which say where it has been. That is the
+        // difference between choosing a machine and reading one, which is the
+        // whole reason the column and the rail are two surfaces.
+        assert!(!screen.contains('⣀'), "a block draws meters, not traces:\n{screen}");
+
+        // …and a press on a machine puts the whole stack back, through the very
         // renderer the SYSTEM rail uses.
         let mut open = view.clone();
         open.folds.toggle_expanded("local");
@@ -8590,6 +9371,7 @@ mod tests {
         draw(&mut b3, 160, 40, &scene, &open, &Theme::default());
         let screen3: String = (0..40).map(|y| text_of(&b3, y)).collect::<Vec<_>>().join("\n");
         assert!(screen3.contains("RAM"), "expanding a machine draws its gauges:\n{screen3}");
+        assert!(screen3.contains('⣀'), "…with the history a gauge is for:\n{screen3}");
     }
 
     /// One interface, `carrier` up and carrying the default route, with the
@@ -9050,11 +9832,14 @@ mod tests {
 
         let mut seen = String::new();
         let mut ever_wanted_anim = false;
+        let mut ever_wanted_fast = false;
         for tick in 0..80 {
             let view =
                 View { page: Page::Booth, focus: Focus::AllAgents, tick, ..Default::default() };
             let mut b = buf(160, 40);
-            ever_wanted_anim |= draw(&mut b, 160, 40, &scene, &view, &Theme::default()).wants_anim;
+            let out = draw(&mut b, 160, 40, &scene, &view, &Theme::default());
+            ever_wanted_anim |= out.wants_anim;
+            ever_wanted_fast |= out.wants_fast_anim;
             seen.push_str(&(0..40).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n"));
             seen.push('\n');
         }
@@ -9064,6 +9849,161 @@ mod tests {
         // The clock has to be told, or the row scrolls only when something else
         // happens to repaint.
         assert!(ever_wanted_anim, "BOOTH never asked the slow clock to keep running");
+        // And told *which* clock. The two are separately gated, so a title
+        // scrolling at 250ms must not also drag the 120ms sprite clock along
+        // behind it — every one of these agents is resting.
+        assert!(!ever_wanted_fast, "a scrolling title woke the sprite clock as well");
+    }
+
+    /// The contract the loop's clocks are gated on: a frame asks for a clock
+    /// when it drew something that clock is for, and asks for nothing when it
+    /// did not.
+    ///
+    /// This is the half that matters for what an idle workbench costs. The
+    /// renderer computed both flags correctly from the day they were added and
+    /// the loop threw the answer away, so the client rebuilt every row, rendered
+    /// every cell and scanned the whole screen for URLs four times a second to
+    /// produce a diff that was empty every time. Nothing measured it because
+    /// nothing asserted it.
+    ///
+    /// The three cases are three separate mechanisms, which is why they are
+    /// worth pinning together — a still screen, a sprite (fast clock only), and
+    /// the rail's own spinner (slow clock only), each of which has to be
+    /// reported by a different part of the renderer.
+    #[test]
+    fn a_frame_asks_only_for_the_clocks_it_actually_drew_for() {
+        let sys = SysDto::default();
+        let theme = Theme::default();
+
+        // Nothing moving: four resting agents with names short enough that no
+        // column has to scroll one. Every tick, so a phase-dependent flag
+        // cannot pass by being sampled at the right moment.
+        let calm = [
+            agent(1, "codex", AgentState::Idle),
+            agent(2, "aider", AgentState::Idle),
+            agent(3, "gemini", AgentState::Finished),
+            agent(4, "amp", AgentState::Exited),
+        ];
+        let all = booth_fleet(&calm);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let booth = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
+        let ws = detail(calm.to_vec(), None);
+        let rail = scene(&[], Some(&ws), &sys, &[]);
+        for tick in 0..40 {
+            for (page, focus, scene) in
+                [(Page::Booth, Focus::AllAgents, &booth), (Page::Agents, Focus::Agents, &rail)]
+            {
+                let view = View { page, focus, tick, fast_tick: tick, ..Default::default() };
+                let mut b = buf(160, 40);
+                let out = draw(&mut b, 160, 40, scene, &view, &theme);
+                assert!(!out.wants_anim, "{page:?} asked the slow clock to keep running at {tick}");
+                assert!(!out.wants_fast_anim, "{page:?} asked the sprite clock at {tick}");
+            }
+        }
+
+        // A working agent on BOOTH is a sprite with moving hands and a title
+        // that fits — the fast clock and nothing else.
+        let busy = [
+            agent(1, "codex", AgentState::Working),
+            agent(2, "aider", AgentState::Idle),
+            agent(3, "gemini", AgentState::Idle),
+            agent(4, "amp", AgentState::Idle),
+        ];
+        let all = booth_fleet(&busy);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let busy_booth = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
+        let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        let mut b = buf(160, 40);
+        let out = draw(&mut b, 160, 40, &busy_booth, &view, &theme);
+        assert!(out.wants_fast_anim, "a working agent's hands are not animating");
+        assert!(!out.wants_anim, "a working sprite pinned the slow clock too");
+
+        // The same agent on the AGENTS rail is the other way round: no sprite
+        // there, but a `◐ 0s` that is a spinner over a running clock. The rail
+        // used to compute that flag and drop it, which cost nothing only
+        // because the loop repainted regardless.
+        let ws =
+            detail(vec![AgentDto { working_since_ms: Some(now_ms()), ..busy[0].clone() }], None);
+        let working_rail = scene(&[], Some(&ws), &sys, &[]);
+        let view = View { page: Page::Agents, focus: Focus::Agents, ..Default::default() };
+        let mut b = buf(160, 40);
+        let out = draw(&mut b, 160, 40, &working_rail, &view, &theme);
+        assert!(out.wants_anim, "the rail's working spinner never asked for a clock");
+        assert!(!out.wants_fast_anim, "the rail has no sprites and should want no sprite clock");
+    }
+
+    /// **The other rail has a marquee too, and it had no way to say so.**
+    ///
+    /// `draw_row` returns whether the name is scrolling and both AGENTS and
+    /// PROCESSES pass it up; CHANGES threw it away, and `draw_right_rail`
+    /// returned nothing to thread it through. Free while the loop repainted
+    /// regardless, and a frozen client the moment the repaint was gated: the
+    /// path then moved only when something unrelated redrew the screen, which
+    /// on a still WORK page is the five-second heartbeat — twenty phases of
+    /// `tick` at a time, so the row jumps rather than scrolls.
+    ///
+    /// Not an unlikely shape. The name column is `width - (2 + pin + stat + 1)`,
+    /// about sixteen cells at the default rail, and a modified file two
+    /// directories down is already past that.
+    #[test]
+    fn a_path_too_long_for_the_changes_rail_asks_the_clock_to_keep_turning() {
+        let sys = SysDto::default();
+        let theme = Theme::default();
+        // WORK, with one resting agent and nothing else that moves, so the flag
+        // has exactly one place it can have come from.
+        let view = View { page: Page::Agents, ..Default::default() };
+        let flag = |path: &str| {
+            let c = ChangesDto {
+                unstaged: vec![FileChange {
+                    path: path.into(),
+                    code: "M".into(),
+                    added: 3,
+                    deleted: 1,
+                }],
+                ..changes(0, 0, RepoState::Clean)
+            };
+            let ws = detail(vec![agent(1, "codex", AgentState::Idle)], Some(c));
+            let scene = scene(&[], Some(&ws), &sys, &[]);
+            let mut b = buf(160, 40);
+            let out = draw(&mut b, 160, 40, &scene, &view, &theme);
+            (out.wants_anim, (0..40).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n"))
+        };
+
+        let (wants, screen) = flag("crates/butai-client/src/chrome/mod.rs");
+        assert!(
+            !screen.contains('\u{2026}'),
+            "the path ellipsized instead of scrolling:\n{screen}"
+        );
+        assert!(wants, "the CHANGES rail never asked the slow clock to keep running");
+
+        // And it is the marquee asking, not the rail asking always: a path that
+        // fits its column leaves the clock alone.
+        let (wants, _) = flag("a.rs");
+        assert!(!wants, "a path that fits woke the slow clock anyway");
+
+        // The whole point of the flag is that the phase advances every tick,
+        // which is what turns the jump back into a scroll.
+        let mut seen = String::new();
+        for tick in 0..80 {
+            let c = ChangesDto {
+                unstaged: vec![FileChange {
+                    path: "crates/butai-client/src/chrome/mod.rs".into(),
+                    code: "M".into(),
+                    added: 3,
+                    deleted: 1,
+                }],
+                ..changes(0, 0, RepoState::Clean)
+            };
+            let ws = detail(vec![agent(1, "codex", AgentState::Idle)], Some(c));
+            let scene = scene(&[], Some(&ws), &sys, &[]);
+            let view = View { tick, ..view.clone() };
+            let mut b = buf(160, 40);
+            draw(&mut b, 160, 40, &scene, &view, &theme);
+            seen.push_str(&(0..40).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n"));
+        }
+        assert!(seen.contains("mod.rs"), "the path's tail never scrolled into view");
     }
 
     /// BOOTH pins the agent's own spinner too — both in the fleet list and in

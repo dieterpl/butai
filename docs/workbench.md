@@ -147,6 +147,30 @@ all three take the whole width and are left the way you arrived — and while on
 of them is up the button reads `views` rather than claiming you are in a space
 you are not.
 
+### The space is the project's, not the window's
+
+Each workspace remembers the space it was last on, and going to a workspace goes
+to that space. Open butai on GIT, switch to caliper — which was on FILES — and
+switch back, and butai is on GIT again. It survives a detach and a restart,
+because it is written to `[views]` in the client's config, keyed by the machine
+the project is on and the directory it is open in: two machines with the same
+path checked out are two workspaces and keep two answers. See
+[configuration.md](configuration.md#views) for the table and what bounds it.
+
+This follows from what a space *is*. Every row of the menu above is a way of
+looking at one project, so which way you were looking at a project is a fact
+about the project — it was only ever a fact about the client because there was
+one `view.page` and every tab shared it.
+
+The three that are not views of a workspace are exactly the three left out. A
+workspace never remembers BOOTH, SETTINGS or HELP, and going to a workspace
+while one of them is up does not move the screen off it: BOOTH spans machines,
+SETTINGS is about this client and HELP is about the program, so none of them is
+answering the question "which project". Choosing a workspace chip still leaves
+BOOTH, as it always has — that is a choice about where to be, and the space you
+land on is then the one that project was left on. A project butai has not seen
+before keeps whatever space you arrived with.
+
 ### The rails
 
 The left rail is 28 columns by default and holds three stacked sections —
@@ -735,10 +759,10 @@ and the name here exactly as the AGENTS rail pins it, in the tray and in the
 fleet list both. Only the name marquees.
 
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk rows; `tab` or a click hands it to the pane and
-everything you type from then on is that agent's. `alt-w` or `alt-esc` takes it
-back — it has to be one of those, because once the pane has the keyboard `esc`
-and `tab` are the agent's too.
+the fleet, so `j`/`k` walk rows; `tab`, a click, or starting an agent hands it to
+the pane, and everything you type from then on is that agent's. `alt-w` or
+`alt-esc` takes it back — it has to be one of those, because once the pane has
+the keyboard `esc` and `tab` are the agent's too.
 
 The cursor walks *rows*, machines and projects included, because starting a
 session belongs to a project and so does going somewhere. The agent under it is
@@ -756,19 +780,43 @@ spelling. This split exists because a click that meant "let me look at this" was
 throwing the whole workbench onto somebody else's project. `[open]` is dropped
 when the column is too narrow for it, and then the two-step click is the only way.
 
-That rule is about *agent* rows and it has not moved. A **project's name** goes to
-that workspace, because a project row has nothing to preview and travelling is
-the only thing pressing its name could be asking for. Nothing here takes you
-somewhere by accident: every route out is a field you aimed at.
+That rule is the whole list's, project rows included: **text looks, buttons act.**
+A project's name puts the cursor on the project — which points the middle column
+at the agent in it that most needs you — and travels nowhere. It briefly did
+travel, on the grounds that a project row had nothing to preview; it has one, so
+that was the same accidental route off the page in different clothes. `enter` is
+how you go to a project, and `[open]` how you go to an agent. Nothing here takes
+you somewhere by accident: every route out is a field you aimed at, or a key.
 
 **`a` starts a session in the project the cursor is in**, and `A` picks the type
 whatever the project says. They are the rails' own two verbs, bound here
 unchanged — what moved is only what they act on, from the tab you are looking at
 to the project the row names, which on this page are routinely not the same
-project or even the same machine. The new agent appears in the fleet and the
-preview points at it; **the page does not move**, because a button that started
-something *and* threw the tab bar onto another machine is the bug that made agent
-rows two-step in the first place.
+project or even the same machine. **The page does not move**, because a button
+that started something *and* threw the tab bar onto another machine is the bug
+that made agent rows two-step in the first place.
+
+**What does move is the cursor, and the keyboard with it.** Once the new agent
+has a row in the fleet, the cursor goes to that row — which points the middle
+column at its screen, because the preview follows the cursor — and the focus goes
+to the middle column, so the next thing you type is the first thing that agent
+reads. Nothing else changes: same page, same tab, same machine. A project that was
+folded opens on the way, because a folded project has no agent rows at all and the
+fold would otherwise be the one thing standing between `[+ claude]` and the pane
+it promised you — an extra sprite in a strip is not an answer to "start an agent
+and put me in it".
+
+That is two steps rather than one because it has to be. The client's fleet is fed
+by the daemon's event stream, so the row does not exist at the instant the spawn
+returns, and the cursor cannot be put on a row that is not there — it stayed on
+the *project* row instead, where the preview picks the agent that most needs you,
+which for a brand-new one (working, nothing unread, so not asking for anything)
+is never it: you got a fly-over of the project's first agent and no way to type
+into the one you had just started. So the pane id is held and the cursor lands
+the moment the row appears. It is held for three seconds and no longer, and only
+while the page is still BOOTH and the cursor has not moved: an agent that dies
+before it is ever listed must not leave a cursor move armed to fire at whatever
+you are doing a minute later.
 
 `[+ claude]` on the row is the same button under the pointer, and it names what
 it will start for the reason the AGENTS rail's does: a button that spawns on a
@@ -797,15 +845,78 @@ simply not emitted and the rows around it keep the positions they had. The tray
 is untouched by it — the tray holds copies, so an agent waiting inside a folded
 project is still one click from the top of the page.
 
-**The compute column** is one row per machine: what it is, how many agents it is
-running, and the *worst* of its four readings, named. Not the CPU — a box at 30%
-CPU with a full root filesystem is in trouble and its CPU number says it is fine.
-The column used to draw the SYSTEM rail's whole stack per machine, which is right
-for the rail (it describes the one machine you are working on) and wrong here,
-where the question is which of four machines is in trouble and the answer did not
-fit on screen. `z` or a click expands one back to the stack, drawn by the same
-renderer the rail uses, so the two cannot come to two opinions of what 41% means.
-It has nothing to select, so the wheel scrolls it and `j`/`k` stay with the fleet.
+**The compute column** is a small block per machine. Its first row is the
+headline — what the machine is, how many agents it is running, and the *worst*
+of its readings, named — and under it comes a row per reading: a three-cell
+label, a meter, and the number, for CPU, RAM, the GPU where there is one, and
+the fullest of the disks the rail is configured to watch, with its mount.
+
+```
+> gpu-box       4 ██████░░ CPU 61%
+  CPU ██████░░░░░░  61%
+  RAM ███████░░░░░  19/32G
+  GPU ████░░░░░░░░  34%
+  DSK ███████████░  91% /media/fast
+```
+
+The column has been both extremes and neither worked. It drew the SYSTEM rail's
+whole stack per machine first — twelve to twenty rows for a workstation, which
+is right for the rail (it describes the one machine you are working on) and
+wrong here, where the question is which of four machines is in trouble and the
+answer did not fit on screen. Then it was one line each, which answered that
+question in four of the seventy-six rows the column has and left every follow-up
+— *what* is it doing, which disk is that, how much memory is actually left — to
+a stack you had to go and open. The block is the middle: enough to act on, and
+still not the stack. What separates the two is **history**. The block draws
+meters, which say where a machine is this second; the rail draws traces, which
+say where it has been. Choosing a machine and reading one are different jobs.
+
+**A press anywhere on a machine's block expands it** into that full stack, drawn
+by the same renderer the rail uses, so the two cannot come to two opinions of
+what 41% means. The `>` on the name is the mark, and the whole block is the
+target — a mark you can see beside a target you have to find is worse than
+either. There is no key for it: `z` is zoom on the stage and the fold key on the
+fleet, and this page has no third meaning to spare. (This paragraph used to say
+`z` expanded a machine. It never did, and the click was drawn but wired to
+nothing, which is what "the compute button does not work" looked like from
+outside.)
+
+A machine that is **away** is its headline alone. Its readings are the last ones
+it sent, and four meters redrawn every tick off a frozen sample is a strong
+claim to be alive.
+
+The column has nothing to select, so the wheel scrolls it and `j`/`k` stay with
+the fleet. It scrolls in **machines, not rows**: every position starts on a
+block boundary, which is the same all-or-none rule the drawing keeps at the
+bottom edge — a block that does not fit is not half-drawn — applied at the top
+edge for free.
+
+**What the headline names: rates first, and fullness only when it is an
+emergency.** CPU, RAM and GPU are *rates* — what the machine is doing this
+second, numbers that come back down on their own. Disk fullness is a *level*:
+the same number all day, moved by nobody but you. The column took the plain
+worst of all four for a while, and the level won permanently — the shipping
+`disks = "all"` watches the three largest local filesystems, so one 3.6 TB media
+drive that had been 90% full for a year held every row at `DSK 90%` in danger
+red while the CPUs idled. A column whose only job is answering *which of these
+machines is busy* answered "the disk", forever. Reported as the compute column
+reading high, and it was.
+
+The original insight is kept rather than reversed — a box at 30% CPU with a full
+root filesystem is in trouble and its CPU number says it is fine — it just has
+to be full enough to outrank what the machine is actually doing, which is 95%.
+That is well clear of the 85% where the colour ramp starts painting red, because
+85–95 is exactly the band a well-used drive lives in permanently; and it is
+where ext4's 5% root reserve runs out, so it is where ordinary writes start
+failing rather than where they are getting close. Below it nothing is hidden:
+the block's own `DSK` row draws the level unconditionally, with the mount. It is
+merely no longer shouted.
+
+A **stale** mount is out of the headline entirely. A filesystem nobody has heard
+from is not news about how full it is, and a hung NFS export reporting 99% from
+an hour ago must not paint a working machine as an emergency. Its `DSK` row still
+prints the number it last saw, faint — the same judgement the SYSTEM rail
+already makes.
 
 **`x` ends the thing the row is.** On an agent that is the session, wherever it
 lives, and it does not ask, for the reason the rail's `x` does not: an agent is
@@ -814,11 +925,21 @@ everything running in it, so it asks — in the tab bar's own box and its own
 words, because that is the same act reached from somewhere else.
 
 `[x]` is that press under the pointer, right of `[+]`, and it is drawn **on the
-cursor's row and nowhere else**. That is the tab bar's rule for its own `[x]`
-and it has the same reason: a button that ends a workspace has to be one you
-aimed at, not one sitting under a row you were passing. It costs four cells,
+cursor's row and nowhere else — and only while the fleet has the keyboard**. That
+is the tab bar's rule for its own `[x]` and it has the same reason: a button that
+ends a workspace has to be one you aimed at, not one sitting under a row you were
+passing, and a cursor belongs to the column being steered. It costs four cells,
 which on this column is a sprite or half a name — worth spending on the row you
 are looking at and not on the ten you are not.
+
+Because those four cells are spent at the right end, whether the row is the
+cursor's decides where every control left of it sits. The drawing and the
+hit-test therefore ask *one function* whether a row is the cursor's, rather than
+each spelling the condition out. They did each spell it out, and drifted by
+exactly those four cells: with the cursor on a project row and the keyboard on
+the middle column, `[+ claude]` was drawn flush right with no `[x]` beside it,
+while a press on it resolved four cells to the left — so clicking the button you
+could see opened the close-workspace confirm, or folded the project.
 
 Every control on the row keeps its place before any of them is spelled out, so a
 narrow column draws `[+] [x]` rather than `[+ claude]` and no way to close: `[+]`
@@ -1096,7 +1217,7 @@ key and leaves every comment and unrelated table alone.
 | APPEARANCE | `[theme] name`, and the themes directory as a fact |
 | AGENTS | `[general] default_agent`, and the daemon's configured agent types |
 | WORKBENCH | `[ui] left_rail`, `right_rail`, `procs_height`, `system_height` |
-| MACHINES | `[general] remote_auto_attach`, and each `[[remote]]` block |
+| MACHINES | `[general] remote_auto_attach`, then a block per machine, then `add a machine` |
 | KEYS | the prefix, and how many keys are bound and how many came from your config |
 | ABOUT | version, the config path, the socket path |
 
@@ -1110,15 +1231,87 @@ swatches under the APPEARANCE rows and nowhere else.
 |---|---|
 | `j` `k` | rows, or options inside an open list |
 | `tab` `S-tab` | groups — only while nothing is expanded |
-| `enter` | open a list, or choose from it |
+| `enter` | open a list, or choose from it — or, on one of MACHINES' action rows, do what it says |
 | `space` | toggle |
 | `-` `+` (and `h` `l`, `←` `→`) | adjust a size |
 | `0` | back to automatic |
+| `r` | in MACHINES: re-read the blocks, and ask every connected daemon its version again |
 | `esc` `q` | close the list first, the page second |
 
 A size row cannot be typed past the floor a drag stops at: both gestures go
 through the same clamp, so a rail you can type is a rail you could have dragged
 to.
+
+### MACHINES
+
+**The one group that is not only a view of the file.** Its first row is
+`[general] remote_auto_attach` and its last is `add a machine`, which opens the
+same machines picker `alt-h` does; between them is a block per machine this
+client knows of — the ones in the tab bar *and* the `[[remote]]` blocks that are
+not, which is the list nothing else in the client puts in one place.
+
+A machine's name heads its block, and its value is what that machine is doing
+and what it is carrying while it does it: `connected — 3 agents, 2 workspaces`,
+`away — last seen with 3 agents, 2 workspaces`, `connecting…`, or `not
+connected — <the last dial failure>`. The counts stay when a machine goes away,
+and say what they are: it is still running everything it was running, and the
+last numbers it sent are a better answer than nothing at all.
+
+Under the name, indented two columns, are `version` and `where`. `version` is
+the build the daemon named at its handshake — `1.3.0`, or `1.3.0 — 1.3.1
+available` when this client's own update check has seen a newer one, or
+`1.3.0 → 1.3.1, restarting` once it has accepted an update and is going down.
+"Newer" there is *this* client's answer, and a daemon follows the release
+channel configured where it runs, so a machine on the dev track can be ahead of
+a stable client that thinks it is behind. `where` is the ssh destination, or the
+socket already forwarded here. A machine that is not answering has no handshake
+to read, and its version says `unknown` rather than dressing that up.
+
+Then the two or three things you can do about it. These are not settings and
+have no value to report — an ssh takes several seconds and a toggle that flips
+back when it fails is worse than a row that plainly says what it will do — so
+their right-hand column is the sentence describing the act, and the footer
+offers the row's own verb rather than the word "act".
+
+| row | offered on | what `enter` does |
+|---|---|---|
+| `update` | any machine that is answering | On another machine, `POST /v1/update`: that daemon fetches its own build, replaces its binary and restarts, and a confirm box names the machine first. On this one it is the client's own update — the same question `:update` asks — because a local daemon is spawned from the binary you are running. |
+| `disconnect` | a machine in the tab bar, on an ssh this client opened | Kills the forward, drops the machine out of the tab bar, **and** removes its `[[remote]]` block. Both halves, in that order: a disconnect that left the block behind came back on the next attach and read as having quietly undone itself. The far daemon keeps running. |
+| `connect` | a configured machine that is not here, with a destination to dial | The same dial the machines picker runs, arguments and remembering and all. The row goes to `connecting…` on the press rather than waiting for the ssh to land. |
+| `forget` | a configured machine that is not here | Removes its `[[remote]]` block and nothing else, so it stops being dialled every morning. Nothing on the machine is touched. |
+
+The rows a machine does *not* get are the point of the shape. An unreachable
+machine gets no `update` and no `disconnect`, because both are requests to a
+daemon that has to answer them and a row that can only ever report a refusal
+reads as broken. A machine reached over somebody else's `ssh -L` gets a `link`
+row saying `on a forward of its own` instead of a `disconnect`, because there is
+no ssh of ours to kill — the same rule the machines picker follows. The daemon
+on this machine gets `update` alone: it is never dialled and never dropped.
+
+**`update` on another machine is refused unless that machine opted in.**
+`[update] allow_remote` lives in the *daemon's* own `config.toml` and is off by
+default; the refusal is the ordinary answer rather than a fault, so the flash
+names the machine and the key instead of reporting a `400`. See
+[`[update]`](configuration.md#update) and
+[remote.md](remote.md#ending-the-skew-from-this-side) for why the default is
+what it is.
+
+**What keeps up on its own, and what `r` is for.** Which machines are connected
+and what each is carrying is rebuilt whenever the fleet moves, so the head rows
+follow a machine going away or coming back without being asked. The two things
+that do not are the `[[remote]]` blocks and the versions. The blocks are read
+off disk, and each connected daemon is asked for its build by opening a control
+connection and taking the version off its handshake — there is no REST route
+that reports one — and both happen once, the first time you open the page, and
+after that only on `r`. A daemon's version changes when it restarts, and half a
+dozen socket round trips a frame to watch for something that happens twice a
+week is not a trade worth making.
+
+`disconnect` and `forget` re-read the blocks themselves, so a section still
+listing a machine whose block you just removed cannot happen. `r` is bound in
+this group and nowhere else on the page: every other group is a view of a file
+this page has just written, so a refresh key on one would be a key that does
+nothing.
 
 ## HELP
 
@@ -1447,8 +1640,12 @@ lockfile in the repo. Two consequences worth knowing:
 | BOOTH: what the cursor is on, and what the pane shows | `crates/butai-client/src/chrome/mod.rs` (`booth_selected`, `booth_preview`), `crates/butai-client/src/workbench.rs` (`booth_cursor`) |
 | BOOTH: folding, and what `Z` folds | `crates/butai-client/src/chrome/mod.rs` (`Folds`, `booth_space_keys`), `crates/butai-client/src/workbench.rs` (`fold_cursors_space`) |
 | BOOTH: a project row's fields and where each sits | `crates/butai-client/src/chrome/mod.rs` (`space_layout`) |
-| BOOTH: the compute summary and what it names | `crates/butai-client/src/chrome/mod.rs` (`machine_pressure`, `draw_compute`, `compute_machine_h`) |
+| BOOTH: which row is the cursor's, for the drawing and the pointer alike | `crates/butai-client/src/chrome/mod.rs` (`fleet_cursor_row`) |
+| BOOTH: what the compute headline names, and when a disk gets to be it | `crates/butai-client/src/chrome/mod.rs` (`MachineRead`, `machine_read`, `machine_pressure`, `DISK_ALARM_PCT`) |
+| BOOTH: a machine's block, its rows and its widths | `crates/butai-client/src/chrome/mod.rs` (`draw_compute`, `draw_compute_summary`, `draw_compute_block`, `compute_sub_rows`) |
+| BOOTH: which machine a press in COMPUTE lands on, and the height both sides walk | `crates/butai-client/src/chrome/mod.rs` (`compute_machine_h`, `booth_compute_machine_at`), `crates/butai-client/src/hit.rs` (`on_compute`) |
 | BOOTH: starting an agent in a row's project | `crates/butai-client/src/workbench.rs` (`spawn_agent_in`, `fleet_agent_picker`, `open_fleet_row`) |
+| BOOTH: putting the cursor and the keyboard in the agent you just started | `crates/butai-client/src/workbench.rs` (`NewAgentFollow`, `follow_new_agent`, `NEW_AGENT_GRACE`) |
 | BOOTH: what a press on the fleet or the tray lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`, `booth_tray_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |
 | BOOTH: `x`, the row menu, and which machine they act on | `crates/butai-client/src/workbench.rs` (`handle_fleet_key`, `fleet_menu`, `fleet_route`, `selected_route`) |
 | FILES / DOCS: the trail, editor, gutter, `[find]` | `crates/butai-client/src/chrome/mod.rs` (`Files`, `Column`, `Editor`, `draw_files_page`), `crates/butai-client/src/syntax.rs` |
@@ -1459,6 +1656,9 @@ lockfile in the repo. Two consequences worth knowing:
 | DOCKER: stacks, rows, the commands they run | `crates/butai-client/src/chrome/mod.rs` (`project_stacks`, `docker_rows`), `crates/butai-client/src/workbench.rs` (`docker_command`) |
 | the diff view, hunks and line-select | `crates/butai-client/src/chrome/mod.rs` (`DiffView`, `draw_diff_in`) |
 | SETTINGS: groups, rows, the keys they write | `crates/butai-client/src/chrome/settings.rs` |
+| SETTINGS → MACHINES: a machine's block, its state, its version, the rows it gets | `crates/butai-client/src/chrome/settings.rs` (`Machine`, `Link`, `Build`, `machine_rows`, `status_line`, `version_line`), `crates/butai-client/src/workbench.rs` (`machine_list`, `probe_builds`, `daemon_version`) |
+| SETTINGS → MACHINES: what `enter` on `update`, `connect`, `disconnect` or `forget` does, and `r` | `crates/butai-client/src/workbench.rs` (`machine_action`, `machine_target`, `ask_daemon_to_update`, `update_refusal`, `Flow::UpdateMachine`, `Flow::DialHost`, `Flow::DisconnectMachine`, `Flow::ForgetMachine`, `Flow::SettingsRefresh`), `crates/butai-client/src/config.rs` (`save_remote`, `forget_remote`) |
+| which space each workspace was left on, and the key it is filed under | `crates/butai-client/src/views.rs` (`key`, `Views`), `crates/butai-client/src/config.rs` (`save_view_at`, `VIEWS_CAP`), `crates/butai-client/src/workbench.rs` (`active_view_key`, `restore_view`) |
 | HELP: topics, layout, wrapping | `crates/butai-client/src/chrome/help.rs`, `crates/butai-client/src/reference.rs` |
 | overlays: lists, prompts, confirmations, find | `crates/butai-client/src/chrome/mod.rs` (`Overlay`, `overlay_rows`, `draw_overlay`, `overlay_hit`) |
 | the git menu's groups and rows | `crates/butai-client/src/git_menu.rs` |

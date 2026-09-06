@@ -392,14 +392,14 @@ export function machineIsDown(m: MachineRow | null | undefined): boolean {
 /// The one reading that answers "is this machine in trouble".
 ///
 /// **Not the CPU.** A box at 30% CPU with a full root filesystem is in trouble
-/// and its CPU number says it is fine, so this is the *worst* of the four
-/// things that can run out — and it carries which one it was, because "97%"
+/// and its CPU number says it is fine, so this is the *worst* of the things a
+/// machine can be short of — and it carries which one it was, because "97%"
 /// without a name is a number you have to go and investigate.
 ///
 /// The port of `machine_pressure`. Ties go to whichever comes first in CPU,
-/// RAM, GPU, disk order: a strict `>`, so a machine sitting at 40% everywhere
-/// reports its CPU every tick instead of flickering between four labels that
-/// are all equally true.
+/// RAM, GPU order: a strict `>`, so a machine sitting at 40% everywhere
+/// reports its CPU every tick instead of flickering between labels that are
+/// all equally true.
 export interface Pressure {
   /// The SYSTEM rail's own label for whatever won — three cells every time, so
   /// the reading beside it lands in one column down the whole list.
@@ -413,7 +413,33 @@ function pctOf(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0;
 }
 
+/// How full a filesystem has to be before it outranks everything a machine is
+/// actually *doing*. The port of `DISK_ALARM_PCT`.
+///
+/// Well above the 85% where the colour ramp starts painting red, and that gap
+/// is the whole point: 85–95 is exactly the band a well-used drive lives in
+/// permanently. Ninety-five is also where ext4's 5% root reserve runs out, so
+/// it is where ordinary writes start failing rather than where they are merely
+/// getting close.
+const DISK_ALARM_PCT = 95;
+
 /// The worst-off resource on a machine.
+///
+/// **Rates first; fullness only once it is an emergency.** CPU, RAM and GPU are
+/// *rates* — what the machine is doing this second, numbers that come back down
+/// on their own. Disk fullness is a *level*: the same number all day, moved by
+/// nobody but you. Taking the plain maximum of the four let the level win
+/// permanently — a media drive that had been 90% full for a year held every row
+/// of the column at `DSK 90%` in danger red while the CPUs idled, and a column
+/// whose only job is answering "which of these machines is busy" answered "the
+/// disk" forever.
+///
+/// The original insight is kept rather than reversed — a full root filesystem
+/// *is* trouble no CPU number will tell you about — it just has to be full
+/// enough to outrank what the machine is doing. Below `DISK_ALARM_PCT` the
+/// level is not hidden; it is drawn on its own row, and merely no longer
+/// shouted. A stale mount is out of it entirely: a filesystem nobody has heard
+/// from is news about the clock, not about the disk.
 ///
 /// Disks come from `sys.disks` unfiltered here, where the TUI asks its
 /// configured `disk_mounts`: this client has no per-mount setting to honour
@@ -427,15 +453,15 @@ export function machinePressure(sys: SysDto | null | undefined): Pressure {
     -Infinity,
   );
   const dsk = (sys.disks || [])
-    .filter((d) => d.kind === "local")
+    .filter((d) => d.kind === "local" && !d.stale)
     .reduce((worst, d) => Math.max(worst, pctOf(d.used_gb, d.total_gb)), -Infinity);
 
   let out: Pressure = { label: "CPU", pct: sys.cpu_pct || 0 };
-  const rest: Pressure[] = [
+  const rates: Pressure[] = [
     { label: "RAM", pct: pctOf(sys.ram_used_gb, sys.ram_total_gb) },
     { label: "GPU", pct: gpu },
-    { label: "DSK", pct: dsk },
   ];
-  for (const p of rest) if (p.pct > out.pct) out = p;
+  for (const p of rates) if (p.pct > out.pct) out = p;
+  if (dsk >= DISK_ALARM_PCT && dsk > out.pct) out = { label: "DSK", pct: dsk };
   return out;
 }

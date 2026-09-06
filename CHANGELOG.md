@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Each workspace remembers the space it was last on.** The page was a property
+  of the *client* — one `view.page`, carried across every tab — so leaving a
+  project you were reading the history of for one you were reading the files of
+  put you on the history of the second. That is the wrong owner: every space is
+  a way of looking at one project, so which way you were looking at a project is
+  a fact about the project.
+
+  Open butai on GIT, switch to caliper which was on FILES, switch back, and
+  butai is on GIT again. It survives a detach and a restart: it is written to a
+  new `[views]` table in `~/.butai/config.toml`, keyed by the machine the
+  project is on and the directory it is open in, so the same path checked out on
+  a laptop and on `gpu-box` keeps two answers. Arriving restores the page *and*
+  loads it, through the same funnel a keypress goes through — a project left on
+  FILES comes back with its directory listed.
+
+  BOOTH, SETTINGS and HELP are never remembered, and going to a workspace while
+  one of them is up does not move the screen off it. None of the three is a view
+  of a workspace, and landing in the settings page because that is where you
+  were when you last left a project would be exactly wrong. A page change is
+  written a couple of seconds later rather than on the keypress, the table is
+  capped at 64 projects with the least recently visited falling off the end, and
+  two clients running at once write one line each without erasing the other's.
+  [docs/configuration.md](docs/configuration.md#views) has the table.
+
 - **The FILES browser is a Finder-style trail of columns.** It was one directory
   and one cursor, and descending into a folder replaced both. That made every
   folder a one-way trip you could only reverse by remembering you had: nothing
@@ -220,10 +244,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the machine it runs on, and is shared with whoever else opens it, which a
   client-side pin keyed by directory would not.
 
-- **A project's name goes to that workspace.** An agent row still only moves the
-  cursor, because a click meaning "let me look at this" must not throw the
-  workbench onto somebody else's project. A project row has nothing to preview,
-  so going there is the only thing pressing its name could be asking for.
+- **Pressing a project's name puts the cursor on it, and nothing more.** One rule
+  for the whole fleet: text looks, buttons act. A click meaning "let me look at
+  this" must not throw the workbench onto somebody else's project, and that is
+  as true of a project row as of an agent row — a project row previews the agent
+  in it that most needs you, so pressing its name is the ordinary ask to see
+  that. `enter` goes to a project; `[open]` goes to an agent.
 
 - **`[x]` closes a workspace from BOOTH**, and `x` with the cursor on a project
   row does the same. It ends what the row *is*: on an agent that is the session
@@ -243,6 +269,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sprites where their rows were, so folding costs you the titles and the buttons
   and not the states.
 
+- **SETTINGS → MACHINES is your machines, not two lines about a key.** The group
+  was `[general] remote_auto_attach` and a row saying `[[remote]]` blocks
+  existed. Everything you might actually want to know about a machine — whether
+  it is connected, what it is running, what build it is on, why it is *not* here
+  — was spread across the tab bar, the machines picker and the config file, and
+  nothing put the machines you have configured next to the machines you are
+  talking to.
+
+  Each machine is a block now, under its own name. The name row says what it is
+  doing and what it is carrying: `connected — 3 agents, 2 workspaces`, `away —
+  last seen with 3 agents, 2 workspaces`, `connecting…`, or `not connected —`
+  and the last dial failure, which is the whole answer to "why is that machine
+  not here". Under it, `version` — read off the daemon's handshake, because no
+  REST route reports one, and carrying `— 1.3.1 available` when this client's
+  update check has seen a newer build — and `where`, the ssh destination or the
+  socket already forwarded here.
+
+  Then the two or three things you can do about it: `update`, `disconnect`,
+  `connect`, `forget`, and `add a machine` at the bottom, which opens the picker
+  `alt-h` opens rather than growing a second destination prompt of its own.
+  **None of them is a toggle**, and that is the decision the section turned on.
+  Every other row on the page answers a question the file also answers, and its
+  value is that answer; connecting a machine has no such value. A toggle would
+  have to read `off` for "not connected" and flip several seconds later when an
+  ssh landed, or not flip at all when it did not — and a toggle that lies about
+  whether it took is worse than a row that plainly says what it will do. So an
+  action row's value is the sentence describing the act, and the footer offers
+  the row's own verb rather than the word "act".
+
+  A machine is only offered the rows that could work on it. One that is not
+  answering gets `connect` and `forget` instead of `update` and `disconnect`,
+  because those two are requests to a daemon that has to answer them and a row
+  that can only ever report a refusal reads as broken. One reached over a
+  forward this client did not open says `on a forward of its own` where its
+  `disconnect` would be — there is no ssh of ours to kill — which is the rule
+  the machines picker already followed. The daemon on this machine gets `update`
+  alone, and that `update` is the client's own, since a local daemon is spawned
+  from the binary you are running.
+
+  `disconnect` drops the link **and** removes the `[[remote]]` block, in the
+  order the machines picker does them: one that left the block behind came back
+  on the next attach and read as having quietly undone itself. `forget` is that
+  second half on its own, for a machine that is not here to disconnect.
+  `update` on another machine is `POST /v1/update`, refused unless that machine
+  set [`[update] allow_remote`](docs/configuration.md#update) — the ordinary
+  answer rather than a fault, so the flash names the machine and the key instead
+  of showing you a `400`. And `r` re-reads the blocks and asks every connected
+  daemon its version again: this is the one page whose facts another machine can
+  change while you are looking at them, so it is the one page with a way to ask
+  again. [docs/workbench.md](docs/workbench.md#machines) has the rows.
+
 ### Changed
 
 - **BOOTH's compute column is one row per machine, and it names what is wrong.**
@@ -251,11 +328,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you are working on) and wrong on a page whose question is which of four
   machines is in trouble. Four machines did not fit.
 
-  A machine is a line now: what it is, how many agents it is running, and the
-  *worst* of its four readings, named. Not the CPU — a box at 30% CPU with a full
-  root filesystem is in trouble and its CPU number says it is fine. `z` or a
-  click expands one back to the stack, drawn by the same renderer the rail uses,
-  so the two cannot come to two opinions of what 41% means.
+  A machine is a short block now: a summary line — what it is, how many agents
+  it is running, and its worst reading, named — and under it a row each for CPU,
+  RAM, the GPU where the machine has one, and the fullest of the disks the rail
+  is configured to watch, with their own meters. Five rows a machine, six with a
+  GPU: four of them fit in a third of the seventy-six the column has, where the
+  stack cost more than the screen had.
+  A click expands one back to the full stack, drawn by the same renderer the
+  rail uses, so the two cannot come to two opinions of what 41% means.
+
+  **The summary answers "is this machine busy", and disk fullness is not that.**
+  It was the worst of four readings, but three of the four are rates and disk
+  used/total is a level: with the default `disks = "all"` — the three largest
+  local filesystems — a 90%-full archive disk pinned every machine to a red
+  `DSK 90%` for ever, with the CPU idle, and the column stopped answering the
+  question it exists for. The summary is now the worst of the rates, and a disk
+  takes it over only above 95%, where it really is the emergency the original
+  rule was written for. The level is never hidden: it is on the DSK row
+  unconditionally. A mount whose reading has gone stale no longer raises a
+  full-saturation alarm either, which is the rule the SYSTEM rail already kept.
 
 - **BOOTH's cursor walks rows rather than agents**, since a machine and a project
   are now things you can sit on. The agent under it is derived — one function for
@@ -277,6 +368,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backspace` still walks up, and so does `←`.
 
 ### Fixed
+
+- **BOOTH's `[+ claude]` was four cells left of where it was drawn.** The painter
+  asked "is this the cursor's row" as `row == booth_sel && focused`; the hit test
+  asked it without the focus half. `[x]` is drawn only on the focused cursor row
+  and costs four cells, so with the keyboard anywhere but the fleet — after a
+  click into the pane, say — the hit test reserved space for an `[x]` that was
+  not on screen and every field on the row shifted under the pointer. Of the ten
+  cells you could see as `[+ claude]`, six started an agent, one folded the
+  project and three opened the close-workspace confirm. The project's *name* was
+  drifting by the same four cells, so a long name's tail folded the row instead
+  of going there. Both sides now ask one function, which is the rule the rest of
+  the row already followed: the painter draws from a layout and the hit test
+  reads the same one, so a press cannot land on a field the row did not draw.
+
+- **BOOTH's compute column could not be expanded.** `hit::on_compute` and
+  `Folds::toggle_expanded` were both written, and neither had a caller outside a
+  unit test — so the `>` on a machine was a button that did nothing, and the
+  documented way back to the full gauge stack did not exist. The click is wired.
+  The `z` half of the documented gesture never existed either: `z` is zoom, and
+  on the fleet it folds. The docs said so and no longer do.
+
+- **Starting an agent from BOOTH pointed the stage at a different agent.** The
+  spawn set `view.staged`, which BOOTH does not read — its middle column follows
+  the fleet cursor, and the cursor was still on the project row, where the
+  preview shows whichever agent most needs you. On a project that already had
+  one, `[+ claude]` started an agent and showed you a sibling. The new pane is
+  now followed onto its own row as soon as the daemon lists it, the project is
+  unfolded if it was folded, and the keyboard goes to the stage so you can type
+  into what you just started. The page still does not move. `A` was worse than
+  this and is fixed with it: it left BOOTH entirely and dropped you on the
+  AGENTS page of whatever tab happened to be active.
+
+- **The client repainted four times a second whether or not anything moved.**
+  Every frame rebuilt each row list, allocated a buffer, rendered every cell and
+  scanned every cell for URLs; only the terminal write was cheap, because the
+  diff came out empty. The renderer has always computed whether it drew anything
+  that animates — `marquee` reports a title actually scrolling, sprites report a
+  figure actually moving — and `paint` discarded the answer. An idle workbench
+  now paints twelve times a minute instead of two hundred and forty. Two further
+  things fell out of wiring it: agent sprites were being drawn at 4 Hz while
+  their phase counter ran at 8.3 Hz, so every second frame was dropped, and a
+  client that had lost its daemon repainted at 4 Hz indefinitely — that retry
+  needs 1 Hz, and now takes it.
 
 - **`scripts/install.sh` stopped the wrong daemon when `BUTAI_HOME` was set.**
   It read `BUTAI_SOCKET` and nothing else to find the daemon it was replacing,

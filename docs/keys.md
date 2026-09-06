@@ -224,8 +224,12 @@ the container · `q` close.
 page reports a state of the world it does not own — an account's standing lives
 with the provider — so there is nothing on it to change from here.
 
-**SETTINGS** — `j` `k` rows · `tab` groups · `enter` open a list or choose ·
-`space` toggle · `-` `+` resize a rail · `0` back to automatic · `esc` leave.
+**SETTINGS** — `j` `k` rows · `tab` groups · `enter` open a list, choose, or
+carry out an action row · `space` toggle · `-` `+` resize a rail · `0` back to
+automatic · `r` re-read MACHINES · `esc` leave. `enter` does more here than
+anywhere else because the MACHINES section holds rows that *act* rather than
+hold a value — `connect`, `disconnect`, `forget`, `update` — and an action has
+no value a toggle could report while an ssh is still landing.
 
 **Overlays** — `j` `k` move · `enter` choose · `esc` or `q` dismiss · `y` / `n`
 answer a confirmation. In the agent picker, `d` pins the highlighted agent as

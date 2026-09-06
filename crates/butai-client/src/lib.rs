@@ -25,6 +25,7 @@ pub mod theme;
 pub mod tui;
 pub mod update;
 pub mod verbs;
+pub mod views;
 pub mod workbench;
 
 use std::path::{Path, PathBuf};

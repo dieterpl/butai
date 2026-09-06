@@ -315,6 +315,49 @@ describe("compute", () => {
     expect(machinePressure({ ...base, ram_total_gb: 0, cpu_pct: 1 } as never).label).toBe("CPU");
     expect(machinePressure(null)).toEqual({ label: "CPU", pct: 0 });
   });
+
+  // Rates come back down on their own and a level does not, so a level that is
+  // merely high must not outrank what the machine is actually doing. A media
+  // drive that had been 90% full for a year held every row of the column at
+  // `DSK 90%` in red while the CPUs idled — reported as the compute column
+  // reading high, and it was.
+  test("fleet/pressure — a disk is the headline only once it is an emergency", () => {
+    const base = { cpu_pct: 12, ram_used_gb: 3, ram_total_gb: 32, gpus: [] };
+    const disk = (used: number, extra = {}) => [
+      { mount: "/media/archive", kind: "local", used_gb: used, total_gb: 100, stale: false, ...extra },
+    ];
+    // 85% is where the ramp starts painting red, and where a well-used drive
+    // sits for years. An idle machine reads as idle.
+    expect(machinePressure({ ...base, disks: disk(85) } as never).label).toBe("CPU");
+    // 95% is where ext4's root reserve runs out and writes start failing.
+    expect(machinePressure({ ...base, disks: disk(95) } as never)).toEqual({
+      label: "DSK",
+      pct: 95,
+    });
+    // A mount nobody has heard from is news about the clock, not about the disk.
+    expect(
+      machinePressure({ ...base, disks: disk(99, { stale: true }) } as never).label,
+    ).toBe("CPU");
+    // …and it must not take the live mount down with it. Filtering before the
+    // reduce is what makes the fullest *live* mount the one the rule sees; the
+    // TUI took the plain maximum, threw the winner away for being stale, and
+    // never looked behind it — a hung NFS export at 99% next to a root
+    // filesystem genuinely at 97% headlined `CPU 12%`. This is the assertion
+    // that says which of the two shapes is the right one.
+    const nas = { mount: "/mnt/nas", kind: "local", used_gb: 99, total_gb: 100, stale: true };
+    const root = { mount: "/", kind: "local", used_gb: 97, total_gb: 100, stale: false };
+    expect(machinePressure({ ...base, disks: [nas, root] } as never)).toEqual({
+      label: "DSK",
+      pct: 97,
+    });
+    // With nothing live to fall back to there is no alarm at all, which is the
+    // stale rule and not an accident of the ordering.
+    expect(machinePressure({ ...base, disks: [nas] } as never).label).toBe("CPU");
+    // And a rate still wins when it is genuinely worse.
+    expect(
+      machinePressure({ ...base, cpu_pct: 98, disks: disk(96) } as never).label,
+    ).toBe("CPU");
+  });
 });
 
 describe("the preferred agent", () => {
