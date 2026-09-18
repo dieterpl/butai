@@ -17,7 +17,11 @@ test.skipIf(process.platform !== "win32" || !executable)("standalone Windows lau
   try {
     let ready = false;
     for (let i = 0; i < 200; i++) {
-      try { ready = (await fetch(`${origin}/api/state`)).ok; } catch { /* starting */ }
+      try {
+        const response = await fetch(`${origin}/api/state`);
+        const state = await response.json();
+        ready = response.ok && Array.isArray(state.daemons) && state.daemons.length === 1 && state.daemons[0].error === null;
+      } catch { /* starting */ }
       if (ready) break;
       if (child.exitCode !== null) throw new Error(await new Response(child.stderr).text());
       await Bun.sleep(100);

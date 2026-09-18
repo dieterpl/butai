@@ -120,7 +120,7 @@ target below.
 | Linux (glibc) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf` |
 | Linux (static, no libc dependency) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
 | macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` |
-| Windows (beta) | `x86_64-pc-windows-msvc` |
+| Windows (experimental alpha) | `x86_64-pc-windows-msvc` |
 
 The `musl` builds are fully static — they run on Alpine, on a distroless or
 scratch container, and on any glibc too old for the `gnu` builds.
@@ -140,7 +140,13 @@ build natively. `TARGETS="..." scripts/release.sh` builds a subset.
 
 </details>
 
-**Native Windows (beta).** Run the same TUI and persistent daemon in
+**Windows web launcher (alpha).** Download the `butai-windows-web-alpha-<commit>`
+artifact from a `develop` CI run and double-click `butai-web-windows-alpha.exe`.
+It includes the daemon, browser assets and runtime, opens your default browser,
+and keeps the web bridge running in its launcher window.
+
+**Native Windows TUI (experimental alpha).** Frequent crashes have been reported;
+this interface is unsuitable for reliable daily use. You can try the TUI in
 Windows Terminal on Windows 10 1809+ or Windows 11. Build it with Rust and the
 Visual Studio C++ Build Tools:
 
