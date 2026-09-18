@@ -8,7 +8,6 @@
 // "do not read the body to the end".
 
 import type { DaemonRef } from "./roster.ts";
-import { proxyResponse } from "./windows-transport.ts";
 
 /** How long a single API round trip may take. */
 const TIMEOUT_MS = 30_000;
@@ -47,9 +46,7 @@ export async function butaiRequest(
     init.headers = { "Content-Type": ctype };
     init.body = body as BodyInit;
   }
-  const res = process.platform === "win32"
-    ? await proxyResponse(daemon.socket, method, path, body, ctype, init.signal ?? undefined)
-    : await fetch(`http://localhost${path}`, init);
+  const res = await fetch(`http://localhost${path}`, init);
   return { status: res.status, headers: res.headers, body: new Uint8Array(await res.arrayBuffer()) };
 }
 
@@ -60,9 +57,7 @@ export async function butaiStream(daemon: DaemonRef, path: string, signal?: Abor
   // browser goes away, and `signal` is how the second one gets through.
   const init: BunFetchRequestInit = { unix: daemon.socket };
   if (signal) init.signal = signal;
-  return process.platform === "win32"
-    ? proxyResponse(daemon.socket, "GET", path, undefined, "application/json", signal)
-    : fetch(`http://localhost${path}`, init);
+  return fetch(`http://localhost${path}`, init);
 }
 
 /** `butaiRequest`, with the body parsed as JSON. Throws what `fetch` throws. */

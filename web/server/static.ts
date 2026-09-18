@@ -18,11 +18,6 @@ import { dirname, extname, join } from "node:path";
 // — including inside the image, where the CWD is not the source tree.
 const ROOT = dirname(dirname(Bun.fileURLToPath(import.meta.url)));
 const DIST = join(ROOT, "dist");
-let embedded: Record<string, string> | undefined;
-
-export function configureEmbedded(files: Record<string, string>): void {
-  embedded = files;
-}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -58,8 +53,7 @@ const FAVICON =
   "</svg>";
 
 async function file(path: string): Promise<Response | null> {
-  const name = path.slice(DIST.length + 1).replaceAll("\\", "/");
-  const f = Bun.file(embedded ? embedded[name] ?? "/missing-butai-asset" : path);
+  const f = Bun.file(path);
   if (!(await f.exists())) return null;
   const type = TYPES[extname(path)] ?? "application/octet-stream";
   // The bundle's filenames carry a content hash, so they can be cached for a
@@ -87,7 +81,7 @@ export async function serveStatic(path: string): Promise<Response | null> {
       headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" },
     });
   }
-  if (!builtClientPresent()) return null;
+  if (!existsSync(join(DIST, "index.html"))) return null;
 
   const rest = path.replace(/^\/+/, "");
   if (rest) {
@@ -108,5 +102,5 @@ export async function serveStatic(path: string): Promise<Response | null> {
 
 /** Whether there is a built client to serve at all — the banner says so. */
 export function builtClientPresent(): boolean {
-  return embedded ? "index.html" in embedded : existsSync(join(DIST, "index.html"));
+  return existsSync(join(DIST, "index.html"));
 }

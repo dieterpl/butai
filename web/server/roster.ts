@@ -13,7 +13,7 @@
 // the comment says why.
 
 import { realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute } from "node:path";
 
 export const DEFAULT_SOCKET = "/run/butai/butai.sock";
 
@@ -181,9 +181,7 @@ export function checkSocketPath(path: string, allowed: readonly string[]): strin
   // parent — which is the one thing the allowlist depends on. So resolve the
   // parent (which exists) and re-attach the basename, which is what Python
   // computes.
-  const real = process.platform === "win32"
-    ? join(realpathSync(dirname(path)), basename(path))
-    : realpathSync(dirname(path)) + "/" + basename(path);
+  const real = realpathSync(dirname(path)) + "/" + basename(path);
   const parent = dirname(real);
   if (!allowed.includes(parent)) {
     throw new Refused(
@@ -194,9 +192,6 @@ export function checkSocketPath(path: string, allowed: readonly string[]): strin
   }
   // "You have not forwarded it yet" and "that is a regular file" are different
   // mistakes with one symptom, so they stay different answers.
-  // Named-pipe endpoints have an identity path, not an on-disk socket.
-  // The existing dial probe verifies that the daemon answers there.
-  if (process.platform === "win32") return real;
   let st;
   try {
     st = statSync(real);

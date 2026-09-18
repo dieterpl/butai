@@ -7,21 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the Windows web launcher. Native Windows TUI downloads are labelled
+  experimental alpha following reports of frequent crashes; Windows CI and
+  the existing Unix web bridge remain supported.
+
 ### Added
 
-- Self-contained Windows web launcher alpha: starts the daemon and opens the
-  browser interface, with the runtime, web assets and daemon embedded. Windows
-  TUI artifacts are now explicitly labelled experimental alpha after reports
-  of frequent crashes. Native launcher integration tests run in Windows CI.
-
-- **Windows TUI beta (`1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
+- **Windows TUI experimental alpha (build `1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
   background daemon, private named-pipe IPC, Windows shell/agent launchers,
   clipboard and URL support, and SSH connections to Unix hosts. Windows uses
   font-compatible graphical symbols by default; `[ui] glyphs = "unicode"`
   restores the original symbols. Console UTF-8 and deferred wrapping prevent
   encoding and bottom-row scrolling problems. Unix rendering defaults and
   terminal recovery are preserved.
-- Windows builds, native console/ConPTY tests and downloadable beta artifacts
+- Windows builds, native console/ConPTY tests and downloadable Windows alpha artifacts
   in the `develop` CI pipeline; Windows packages in the release matrix.
 
 

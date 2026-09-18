@@ -1,31 +1,15 @@
-# Windows web launcher and experimental TUI alpha
+# Native Windows TUI (experimental alpha)
 
 The `butai.exe` binary runs the same terminal workbench, CLI, and persistent
 background daemon as Linux and macOS. Use Windows Terminal on Windows 10 1809+
 or Windows 11; the pane backend uses Windows ConPTY. Git commands require Git
 for Windows on `PATH`. Install agent CLIs separately as usual.
 
-## Recommended Windows entry point: browser launcher
+The native Windows TUI is experimental alpha. Frequent crashes have been
+reported; it is unsuitable for reliable daily use. Linux and macOS keep their
+existing interface and defaults.
 
-Download `butai-web-windows-alpha.exe` from the `develop` CI artifact named
-`butai-windows-web-alpha-<commit>`. Double-click it to start the daemon and
-open the web interface in your default browser. No Rust, Bun or Node installation
-is required: the launcher embeds the daemon, browser assets and bridge runtime.
-Keep the launcher window open while using the app; closing it stops the web
-bridge while the daemon keeps workspaces running. Run the launcher again to
-reconnect. The bridge listens only on `127.0.0.1` on an automatically chosen port.
-
-This browser launcher is also an alpha: it avoids the Windows TUI renderer,
-but uses the same experimental native daemon and ConPTY backend. Reported TUI
-crashes mean the native Windows TUI is **experimental alpha**, unsuitable for
-reliable daily use. Linux and macOS retain their existing terminal interface.
-
-State remains in `%USERPROFILE%\.butai`. The embedded daemon is extracted to
-`%LOCALAPPDATA%\butai\web-runtime\<checksum>` and checked before starting.
-Existing running daemons are reused; stop an older daemon before switching
-builds if you need the new backend. `BUTAI_HOME` selects a separate state directory.
-
-## Build and run the experimental TUI
+## Build and run
 
 Install Rust 1.88+ and Visual Studio C++ Build Tools (Desktop development with
 C++), then run from the repository root:
@@ -122,8 +106,7 @@ releases instead of betas.
   host picker on Windows.
 - Remote host discovery expects a Unix shell on the SSH server. Native Windows
   SSH servers and Unix socket tools such as `curl --unix-socket` are not covered.
-- The Windows web launcher currently connects to its configured local daemon.
-  Adding further Windows or SSH daemons through the browser is not covered.
+- The browser relay currently expects Unix sockets; this port covers the native TUI.
 
 CI builds and lints the Windows target, tests named-pipe lifecycle and both
 protocols, and exercises ConPTY with a managed process and a batch agent.
@@ -134,19 +117,5 @@ Linux and macOS run the existing workspace regression suite.
 The `develop` CI run builds a native MSVC Windows executable and uploads a
 `butai-windows-tui-alpha-<commit>` artifact after its Windows tests pass. The ZIP
 contains `butai.exe`, `VERSION.txt`, `SHA256SUMS`, the license and this guide.
-The current underlying build version is `1.3.0-dev.3.beta.1`, which sorts after `1.3.0-dev.2` on the
+The underlying build version is `1.3.0-dev.3.beta.1`, which sorts after `1.3.0-dev.2` on the
 development update channel. Tagged releases still build all supported targets.
-
-To build the self-contained browser launcher from source:
-
-```powershell
-cargo build --release -p butai
-cd web
-bun install --frozen-lockfile
-bun run build
-bun scripts/build-desktop.ts ../target/release/butai.exe
-```
-
-The result is `dist/butai-web-windows-alpha.exe` at the repository root.
-CI tests the compiled launcher against real Windows IPC, including embedded
-assets, REST requests, event streams and the pane WebSocket handshake.

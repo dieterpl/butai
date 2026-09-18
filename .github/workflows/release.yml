@@ -149,31 +149,6 @@ jobs:
           case "${{ matrix.target }}" in *-windows-*) executable=butai.exe ;; esac
           ./target/${{ matrix.target }}/release/$executable --version
 
-      - uses: oven-sh/setup-bun@v2
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-      - name: Package Windows web launcher alpha
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: web
-        shell: bash
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          bun run build
-          bun scripts/build-desktop.ts ../target/${{ matrix.target }}/release/butai.exe ../dist/butai-web-windows-alpha.exe
-      - name: Test packaged Windows web launcher
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: web
-        shell: pwsh
-        run: |
-          $env:BUTAI_WEB_EXE = Join-Path $env:GITHUB_WORKSPACE "dist/butai-web-windows-alpha.exe"
-          bun test test/desktop-windows.test.ts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        with:
-          name: windows-web-alpha
-          path: dist/butai-web-windows-alpha.exe
-          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -201,7 +176,7 @@ jobs:
       - name: Checksum
         run: |
           cd dist
-          sha256sum ./*.tar.gz ./*.exe | sed 's| \./| |' > SHA256SUMS
+          sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
       # Which track is this? A prerelease identifier — the `-` in
@@ -295,4 +270,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
             "${flags[@]}" \
-            dist/*.tar.gz dist/*.exe dist/SHA256SUMS
+            dist/*.tar.gz dist/SHA256SUMS

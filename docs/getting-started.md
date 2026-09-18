@@ -25,7 +25,7 @@ butai --version
 ```
 
 Other routes — a release tarball, `cargo install`, pinning a version — are in
-the [README](../README.md#install). For the Windows browser launcher alpha and experimental native TUI,
+the [README](../README.md#install). For the experimental alpha native Windows TUI,
 see [Windows support](windows.md). WSL2 can also use the Linux binary.
 
 > **Nothing happened when you ran it?** If `butai` is not found, the install

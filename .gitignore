@@ -110,6 +110,3 @@ desktop.ini
 *.log
 /log/
 /logs/
-
-# Generated embedding entry for the Windows web launcher.
-web/scripts/desktop.generated.ts

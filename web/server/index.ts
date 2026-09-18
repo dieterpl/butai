@@ -127,12 +127,6 @@ async function addDaemon(body: unknown): Promise<DaemonRef> {
 
 async function handle(req: Request, server: Bun.Server<WsData>): Promise<Response> {
   const url = new URL(req.url);
-  if (Bun.env.BUTAI_WEB_DESKTOP === "1") {
-    const origin = req.headers.get("Origin");
-    if (url.hostname !== "127.0.0.1" || (origin && origin !== url.origin)) {
-      return json(403, { error: "local browser origin required" });
-    }
-  }
   const path = url.pathname;
   // The path *and* its query, which is what the qualified-id resolver reads.
   const full = path + url.search;
@@ -244,7 +238,6 @@ async function proxyToDaemon(req: Request, view: ReturnType<Roster["view"]>, ful
 const port = Number(Bun.env.PORT ?? "8080");
 const server = Bun.serve<WsData>({
   port,
-  ...(Bun.env.BUTAI_WEB_DESKTOP === "1" ? { hostname: "127.0.0.1" } : {}),
   idleTimeout: 0, // an event stream and a pane socket are both meant to sit quiet
   fetch: handle,
   websocket,
@@ -259,7 +252,3 @@ const where = ROSTER.view()
 console.log(
   `butai web bridge on :${server.port}, bridging ${where}` + (builtClientPresent() ? "" : " (no built client — run `bun run build`)"),
 );
-
-if (Bun.env.BUTAI_WEB_DESKTOP === "1" && Bun.env.BUTAI_WEB_NO_OPEN !== "1") {
-  Bun.spawn(["rundll32.exe", "url.dll,FileProtocolHandler", `http://127.0.0.1:${server.port}/`]);
-}
