@@ -682,20 +682,20 @@ everyone's.
 
 ```
 ┌ FLEET (4) ────────────┐┌ claude · local:butai ────────┐┌ COMPUTE ──────────────┐
-│?o? gemini · gpu-box:di││                              ││> local ██   3 RAM  59%│
+│ !  gemini · gpu-box:di││                              ││> local ██   3 RAM  59%│
 │                       ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
 │                       ││    1. Yes  2. No             ││                       │
 │                       ││                              ││                       │
 ├ NEEDS YOU (1) ────────┤│  > _                         ││                       │
 │v local               3││                              ││                       │
 │  v butai    [+ claude]││                              ││                       │
-│    \o/ claude   [open]││                              ││                       │
-│    -o- codex    [open]││                              ││                       │
-│  > caliper     .o' [+]││                              ││                       │
+│     ✓  claude   [open]││                              ││                       │
+│     ·  codex    [open]││                              ││                       │
+│  > caliper     ... [+]││                              ││                       │
 │  v notes no agents [+]││                              ││                       │
 │v gpu-box             1││                              ││                       │
 │  v diffusion       [+]││                              ││                       │
-│    ?o? gemini   [open]││                              ││                       │
+│     !  gemini   [open]││                              ││                       │
 └───────────────────────┘└──────────────────────────────┘└───────────────────────┘
 ```
 
@@ -738,29 +738,30 @@ brought that to 169.) Projects are grouped by *id* rather than by name: two
 machines routinely have a project of the same name open, and one machine may have
 two, so the name is left to the drawing.
 
-Each agent wears a three-cell sprite:
+Each agent has a simple status indicator in a fixed three-cell field:
 
-| sprite | means |
+| indicator | means |
 |---|---|
-| `.o'` `,o.` `'o,` `.o.` | working — fingers on a keyboard, cycling |
-| `?o?` | waiting: the figure throws its hands up |
-| `\o/` | a finished turn |
-| `-o-` | idle |
-| `x_x` | exited |
+| `.` → `..` → `...` | working — loading dots advance every 1.2 seconds |
+| `!` | waiting for you |
+| `✓` | a finished turn |
+| `·` | idle |
+| `x` | exited; a nonzero exit is shown in danger colour |
 
-The head glyph ages with the agent's whole life: `o` under five minutes, `0`
-under twenty, `O` under an hour, `@` after that — so a long-running agent reads
-differently at a glance from one you just started. Every frame is exactly three
-ASCII cells, because a double-width glyph would shear every row below it.
+The markers keep their meaning throughout a session; age does not change them.
+A faint box-drawn spine connects machines to projects and projects to agents,
+with branches ending at the last visible sibling after folding.
 
-The sprite is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
+The status indicator is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
 whatever it wrote into its terminal title, and it is pinned between the sprite
 and the name here exactly as the AGENTS rail pins it, in the tray and in the
 fleet list both. Only the name marquees.
 
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk rows; `tab`, a click, or starting an agent hands it to
-the pane, and everything you type from then on is that agent's. `alt-w` or
+the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet or NEEDS YOU tray
+selects its preview and immediately hands the keyboard to that pane. Clicking
+a machine or project selects it and keeps the keyboard on the fleet. `tab`,
+a click on the pane, or starting an agent also hands it to the pane, and everything you type from then on is that agent's. `alt-w` or
 `alt-esc` takes it back — it has to be one of those, because once the pane has
 the keyboard `esc` and `tab` are the agent's too.
 
@@ -834,9 +835,9 @@ else opens it. A client-side pin keyed by directory would be none of those three
 once**, leaving an index of every machine, every project, and what is running in
 each. They are the DIFF page's fold keys and its marks — `v` open, `>` folded —
 because this workbench already has a fold idiom and a second one for the same
-concept is drift. A folded project draws its agents' sprites where their rows
+concept is drift. A folded project draws its agents' status indicators where their rows
 were, so folding costs you the titles and the buttons and not the states; three
-ASCII cells apiece is what makes that affordable. `z` on an *agent* folds the
+terminal cells apiece is what makes that affordable. `z` on an *agent* folds the
 project it is in and takes the cursor up to that row, which is the only move that
 leaves the cursor on something you can still see.
 
@@ -845,51 +846,27 @@ simply not emitted and the rows around it keep the positions they had. The tray
 is untouched by it — the tray holds copies, so an agent waiting inside a folded
 project is still one click from the top of the page.
 
-**The compute column** is a small block per machine. Its first row is the
-headline — what the machine is, how many agents it is running, and the *worst*
-of its readings, named — and under it comes a row per reading: a three-cell
-label, a meter, and the number, for CPU, RAM, the GPU where there is one, and
-the fullest of the disks the rail is configured to watch, with its mount.
+**The compute column** shows one summary line per collapsed machine: its name,
+agent count, a meter where space allows, and the busiest resource reading.
 
 ```
-> gpu-box       4 ██████░░ CPU 61%
-  CPU ██████░░░░░░  61%
-  RAM ███████░░░░░  19/32G
-  GPU ████░░░░░░░░  34%
-  DSK ███████████░  91% /media/fast
+> local         ███        3 RAM 42%
+> gpu-box       ███████    4 CPU 97%
 ```
 
-The column has been both extremes and neither worked. It drew the SYSTEM rail's
-whole stack per machine first — twelve to twenty rows for a workstation, which
-is right for the rail (it describes the one machine you are working on) and
-wrong here, where the question is which of four machines is in trouble and the
-answer did not fit on screen. Then it was one line each, which answered that
-question in four of the seventy-six rows the column has and left every follow-up
-— *what* is it doing, which disk is that, how much memory is actually left — to
-a stack you had to go and open. The block is the middle: enough to act on, and
-still not the stack. What separates the two is **history**. The block draws
-meters, which say where a machine is this second; the rail draws traces, which
-say where it has been. Choosing a machine and reading one are different jobs.
+Clicking the summary expands the existing SYSTEM gauge stack, including
+history traces, hardware details, interfaces and watched filesystems. Clicking
+that expanded block collapses it again. An away machine shows `away` and never
+expands stale telemetry. The wheel scrolls in machines, and `j`/`k` stay with
+the fleet.
 
-**A press anywhere on a machine's block expands it** into that full stack, drawn
-by the same renderer the rail uses, so the two cannot come to two opinions of
-what 41% means. The `>` on the name is the mark, and the whole block is the
-target — a mark you can see beside a target you have to find is worse than
-either. There is no key for it: `z` is zoom on the stage and the fold key on the
-fleet, and this page has no third meaning to spare. (This paragraph used to say
-`z` expanded a machine. It never did, and the click was drawn but wired to
-nothing, which is what "the compute button does not work" looked like from
-outside.)
-
-A machine that is **away** is its headline alone. Its readings are the last ones
-it sent, and four meters redrawn every tick off a frozen sample is a strong
-claim to be alive.
-
-The column has nothing to select, so the wheel scrolls it and `j`/`k` stay with
-the fleet. It scrolls in **machines, not rows**: every position starts on a
-block boundary, which is the same all-or-none rule the drawing keeps at the
-bottom edge — a block that does not fit is not half-drawn — applied at the top
-edge for free.
+**Double-click a machine or project name in FLEET to fold/unfold its children.**
+A single click selects and previews. Double-click means two nearby presses on
+the same machine/project within 400ms. Keyboard input, scrolling, dragging and
+other controls cancel the pending pair. The chevron and `z` retain their
+single-press folding behavior. Agent names give focus to the preview; `[open]`
+and `enter` still travel to the agent's workspace. Explicit `[+]`, `[x]` and
+`[open]` buttons keep their own actions.
 
 **What the headline names: rates first, and fullness only when it is an
 emergency.** CPU, RAM and GPU are *rates* — what the machine is doing this
@@ -908,13 +885,13 @@ to be full enough to outrank what the machine is actually doing, which is 95%.
 That is well clear of the 85% where the colour ramp starts painting red, because
 85–95 is exactly the band a well-used drive lives in permanently; and it is
 where ext4's 5% root reserve runs out, so it is where ordinary writes start
-failing rather than where they are getting close. Below it nothing is hidden:
-the block's own `DSK` row draws the level unconditionally, with the mount. It is
-merely no longer shouted.
+failing rather than where they are getting close. Below it, expand the machine
+to inspect each watched filesystem and its mount.
 
 A **stale** mount is out of the headline entirely. A filesystem nobody has heard
 from is not news about how full it is, and a hung NFS export reporting 99% from
-an hour ago must not paint a working machine as an emergency. Its `DSK` row still
+an hour ago must not paint a working machine as an emergency. The expanded stack
+still
 prints the number it last saw, faint — the same judgement the SYSTEM rail
 already makes.
 

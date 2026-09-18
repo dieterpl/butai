@@ -2606,6 +2606,7 @@ pub struct View {
     pub booth_sel: usize,
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
+    pub(crate) fleet_clicks: crate::hit::FleetClicks,
     pub zen: bool,
     pub geom: RailGeom,
     /// Which interfaces the SYSTEM rail draws. Read from `[ui] net` and held
@@ -2705,6 +2706,7 @@ impl Default for View {
             changes_sel: 0,
             booth_sel: 0,
             folds: Folds::default(),
+            fleet_clicks: crate::hit::FleetClicks::default(),
             zen: false,
 
             net: NetSelect::default(),
@@ -3172,7 +3174,7 @@ fn changes_label(c: &ChangesDto, width: u16) -> String {
 pub struct Painted {
     /// A row is marquee-scrolling, so the slow clock should keep repainting.
     pub wants_anim: bool,
-    /// A sprite is moving, so the fast clock should too. Gated, so an idle
+    /// Loading dots are moving, so their clock should repaint. Gated, so an idle
     /// panel costs nothing.
     pub wants_fast_anim: bool,
 }
@@ -3739,6 +3741,47 @@ pub fn booth_tray<'a>(all: &'a [AllAgentRow<'a>]) -> Vec<(usize, &'a AllAgentRow
     out
 }
 
+/// Tree connectors share the existing indentation cells, so action spans do
+/// not move. Hidden children never leave dangling branches after folding.
+fn fleet_spines(rows: &[BoothRow<'_>]) -> Vec<&'static str> {
+    let mut spines = vec![""; rows.len()];
+    let mut next_machine = rows.len();
+    let mut next_space = None;
+    for i in (0..rows.len()).rev() {
+        match rows[i] {
+            BoothRow::Machine { .. } => {
+                next_machine = i;
+                next_space = None;
+            }
+            BoothRow::Space { .. } => {
+                let last = next_space.is_none();
+                let end = next_space.unwrap_or(next_machine);
+                spines[i] = if last { "└─" } else { "├─" };
+                for (j, spine) in spines.iter_mut().enumerate().take(end).skip(i + 1) {
+                    *spine = match (last, j + 1 == end) {
+                        (false, false) => "│ ├─",
+                        (false, true) => "│ └─",
+                        (true, false) => "  ├─",
+                        (true, true) => "  └─",
+                    };
+                }
+                next_space = Some(i);
+            }
+            BoothRow::Agent { .. } => {}
+        }
+    }
+    spines
+}
+
+/// Machine-name bounds shared by painting and pointer resolution. The count
+/// (or empty-state text) keeps its cells even when the name has to scroll.
+pub(crate) fn fleet_machine_name_span(area: LRect, agents: usize) -> (u16, u16) {
+    let count_width =
+        if agents == 0 { "nothing open".len() } else { agents.to_string().len() } as u16;
+    let start = area.x + FLEET_INDENT;
+    (start, (area.x + area.width).saturating_sub(count_width + 1).max(start))
+}
+
 /// The per-row jump button on BOOTH's fleet list.
 pub const FLEET_OPEN_LABEL: &str = "[open]";
 
@@ -4012,6 +4055,7 @@ fn draw_booth_page(
     let cols = booth_columns(booth_area(width, geom));
     let focused = view.focus == Focus::AllAgents;
     let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
+    let spines = fleet_spines(&rows);
     let tray = booth_tray(scene.all_agents);
     let preview = booth_preview(&rows, view.booth_sel);
     let mut out = Painted::default();
@@ -4102,7 +4146,6 @@ fn draw_booth_page(
                         let bg = theme.row_bg(cursor);
                         fill_row(buf, area.x, y, bound, bg);
                         let n = agents.to_string();
-                        let nw = n.chars().count() as u16;
                         put_str(
                             buf,
                             area.x,
@@ -4111,21 +4154,11 @@ fn draw_booth_page(
                             bound,
                             Pen::new(theme.faint, bg),
                         );
-                        let name_x = area.x + FLEET_INDENT;
-                        let (text, moving) = marquee(
-                            label,
-                            bound.saturating_sub(name_x + nw + 1) as usize,
-                            view.tick,
-                        );
+                        let (name_x, name_end) = fleet_machine_name_span(area, *agents);
+                        let (text, moving) =
+                            marquee(label, name_end.saturating_sub(name_x) as usize, view.tick);
                         out.wants_anim |= moving;
-                        put_str(
-                            buf,
-                            name_x,
-                            y,
-                            &text,
-                            bound.saturating_sub(nw),
-                            Pen::new(theme.ink, bg),
-                        );
+                        put_str(buf, name_x, y, &text, name_end, Pen::new(theme.ink, bg));
                         // A machine with nothing open says so where its count
                         // goes. It is the machine you most want to know is
                         // there — and a bare `0` reads as a machine that lost
@@ -4140,6 +4173,7 @@ fn draw_booth_page(
                     BoothRow::Space { space, folded, .. } => {
                         let bg = theme.row_bg(cursor);
                         fill_row(buf, area.x, y, bound, bg);
+                        put_str(buf, area.x, y, spines[first + i], bound, Pen::new(theme.rule, bg));
                         let l = space_layout(area, space, *folded, cursor);
                         put_str(
                             buf,
@@ -4203,6 +4237,7 @@ fn draw_booth_page(
                         out.wants_fast_anim |= animating;
                         let bg = theme.row_bg(cursor);
                         fill_row(buf, area.x, y, bound, bg);
+                        put_str(buf, area.x, y, spines[first + i], bound, Pen::new(theme.rule, bg));
                         let x = area.x + FLEET_INDENT * 2;
                         put_str(buf, x, y, &sprite, bound, Pen::new(color, bg));
                         // `[open]` is right-aligned and the title stops short of
@@ -4276,10 +4311,6 @@ fn draw_booth_page(
 /// reading. Below three cells it can no longer say anything a percentage does
 /// not, so that is where it stops.
 ///
-/// The cap is the *summary* row's alone. A sub-row's meter is the whole subject
-/// of the row it is on rather than one field of five, so it takes every cell
-/// the readings beside it did not want — which is how a wide column buys
-/// resolution instead of whitespace.
 const COMPUTE_METER_MAX: u16 = 8;
 const COMPUTE_METER_MIN: u16 = 3;
 
@@ -4287,109 +4318,15 @@ const COMPUTE_METER_MIN: u16 = 3;
 /// dropping the fields to its right instead of squeezing it further.
 const COMPUTE_MIN_NAME: u16 = 6;
 
-/// What a sub-row spends before it has drawn anything: two cells of indent, the
-/// three-cell label, the space after it and the space before the reading.
-const COMPUTE_SUB_FIXED: u16 = 7;
-
-/// One row of a machine's compact block: `RAM ███████░░ 19/32G`.
-///
-/// Built without a [`Theme`] on purpose, so [`compute_machine_h`] can ask the
-/// same function the drawing asks how many of these a machine has. The colour
-/// is a [`Role`] and not a resolved one for the same reason.
-struct SubRow {
-    /// The SYSTEM rail's own word for this reading — `CPU`, `RAM`, `GPU`,
-    /// `DSK`. The rail's and not a second alphabet: the two surfaces are one
-    /// glance apart and a `DSK` here beside a `Disk` there would be two names
-    /// for one thing.
-    label: &'static str,
-    /// What the meter draws. Not always what `value` says — RAM's bar is the
-    /// fraction and its text is the pair.
-    pct: f32,
-    /// The reading in words. RAM says `19/32G` because "how much is left" is
-    /// the question anyone has about memory, and the bar beside it has already
-    /// drawn the fraction.
-    value: String,
-    /// What the reading is *of*, when that is not obvious from the label. Only
-    /// the disk has one, and only because the configured selection can pick a
-    /// mount that is not `/`: a bare `91%` under the shipping `disks = "all"`
-    /// is precisely the ambiguity that made the old headline unreadable.
-    ident: String,
-    /// `None` where the reading is stale, which is drawn faint rather than in
-    /// the colour the number earned — see `draw_system`'s disk arm.
-    role: Option<Role>,
-}
-
-/// The rows of one machine's compact block, in drawing order.
-///
-/// **Empty for a machine that is away.** Its telemetry is the last thing it
-/// sent, and four meters redrawn every tick off a frozen sample is a strong
-/// claim to be alive. The summary keeps saying `away`, and that is the whole
-/// reading.
-///
-/// A GPU row only where there is a GPU. A `DSK` row for the fullest of the
-/// mounts the rail was configured to watch — the same one [`MachineRead`]
-/// handed the headline, so the block and the headline cannot come to two
-/// opinions about which disk is the one to worry about.
-fn compute_sub_rows(m: &MachineRow<'_>, read: &MachineRead) -> Vec<SubRow> {
-    if !m.live {
-        return Vec::new();
-    }
-    let pct_row = |label, pct: f32| SubRow {
-        label,
-        pct,
-        value: format!("{pct:.0}%"),
-        ident: String::new(),
-        role: Some(load_role(pct)),
-    };
-    let mut rows = vec![
-        pct_row("CPU", read.cpu),
-        SubRow {
-            value: cap_pair(m.sys.ram_used_gb, m.sys.ram_total_gb),
-            ..pct_row("RAM", read.ram)
-        },
-    ];
-    rows.extend(read.gpu.map(|pct| pct_row("GPU", pct)));
-    if let Some(d) = read.disk.filter(|d| m.sys.disks.get(d.idx).is_some()) {
-        rows.push(SubRow {
-            ident: m.sys.disks[d.idx].mount.clone(),
-            role: (!d.stale).then(|| load_role(d.pct)),
-            ..pct_row("DSK", d.pct)
-        });
-    }
-    rows
-}
-
-/// Rows one machine takes in COMPUTE.
-///
-/// Its summary, then either its compact block or — once it is expanded — the
-/// whole SYSTEM gauge stack, and a blank under either to keep the next
-/// machine's name off the last row of this one's. The drawing and the hit test
-/// both ask this rather than each doing the arithmetic, which is the same
-/// discipline `draw_system` returning its own row count already keeps.
+/// A collapsed machine occupies exactly its summary row. Expanded machines
+/// reuse the SYSTEM stack and a trailing blank row. Drawing and hit testing
+/// share this height so expansion cannot move a click onto another machine.
 pub fn compute_machine_h(m: &MachineRow<'_>, view: &View) -> u16 {
-    if view.folds.machine_expanded(m.label) {
-        return 1 + system_rows_used(&system_gauges(m.sys, &view.net, &view.disks)) + 1;
+    if view.folds.machine_expanded(m.label) && m.live {
+        1 + system_rows_used(&system_gauges(m.sys, &view.net, &view.disks)) + 1
+    } else {
+        1
     }
-    match compute_sub_rows(m, &machine_read(m.sys, &view.disks)).len() as u16 {
-        // An away machine is its summary and nothing else, so there is nothing
-        // for a blank row to separate.
-        0 => 1,
-        n => 1 + n + 1,
-    }
-}
-
-/// Whether a collapsed machine's readings fit between its summary and the foot
-/// of the column — which is the same question as whether they were drawn at
-/// all, because [`draw_compute`] draws that block whole or not at all.
-///
-/// Written down once because it is asked twice. The drawing asks it to decide
-/// what to paint; the hit test asks it to decide what a press can land on, and
-/// the rows a clip left blank belong to nobody. A hit test that walked
-/// [`compute_machine_h`] regardless answered `Some` for that empty space, so
-/// pressing the foot of a short column folded whichever machine happened to be
-/// last — a fold nothing on screen invited.
-fn compute_block_drawn(rows: usize, top: u16, bottom: u16) -> bool {
-    rows > 0 && bottom.saturating_sub(top.saturating_add(1).min(bottom)) >= rows as u16
 }
 
 /// Which machine's block contains `y`, as an index into `machines`.
@@ -4418,22 +4355,7 @@ pub fn booth_compute_machine_at(
             break;
         }
         let h = compute_machine_h(m, view);
-        // The rows a press can land on, which is the whole height except where
-        // a collapsed block was dropped for want of room — then it is the
-        // summary and nothing else. An expanded stack is not the same case:
-        // `draw_system` clips gauge by gauge and what it drops is off the foot
-        // of the column, where the bounds check above has already said `None`.
-        let hit = if view.folds.machine_expanded(m.label)
-            || compute_block_drawn(
-                compute_sub_rows(m, &machine_read(m.sys, &view.disks)).len(),
-                top,
-                bottom,
-            ) {
-            h
-        } else {
-            1
-        };
-        if y < top + hit {
+        if y < top + h {
             return Some(i);
         }
         // The full height either way, because that is what the drawing
@@ -4444,24 +4366,7 @@ pub fn booth_compute_machine_at(
     None
 }
 
-/// COMPUTE: a block per machine, and the full gauge stack under whichever ones
-/// are open.
-///
-/// The column used to draw the SYSTEM rail's whole stack per machine, which is
-/// twelve to twenty rows for a workstation — right for the rail, which describes
-/// the one machine you are working on, and wrong here, where the question is
-/// which of four machines is in trouble and the answer did not fit on screen.
-///
-/// It then went the whole way the other way, to one line each: the headline and
-/// nothing else. That answered the question in four rows of the seventy-six the
-/// column has, and left every follow-up — *what* is it doing, which disk is
-/// that, how much memory is actually left — to a stack you had to open. So a
-/// machine is a small block now: the headline, then a row per reading, meter
-/// and number. Still not the stack — no history, no network, no per-mount
-/// detail — because the column chooses between machines and the rail describes
-/// one, and [`Folds::toggle_expanded`] is the door between the two.
-///
-/// Returns whether anything is marquee-scrolling.
+/// One summary per machine; expansion reuses the existing SYSTEM renderer.
 fn draw_compute(
     buf: &mut Buffer,
     area: LRect,
@@ -4483,7 +4388,7 @@ fn draw_compute(
 
         // Rows left under the summary for whatever this machine puts there.
         let room = bottom.saturating_sub((y + 1).min(bottom));
-        if expanded {
+        if expanded && m.live {
             // Indented, so the stack visibly belongs to the name above it
             // rather than reading as four more machines. `draw_system` keeps
             // its own all-or-none rule per gauge, which is what stops a label
@@ -4496,104 +4401,12 @@ fn draw_compute(
                 let gs = system_gauges(m.sys, &view.net, &view.disks);
                 draw_system(buf, gauges, m.sys, &gs, theme);
             }
-        } else {
-            let rows = compute_sub_rows(m, &read);
-            // The whole block or none of it — `draw_system`'s discipline, one
-            // level up. Three of a machine's four readings at the foot of the
-            // column reads as a screen that broke rather than one that ran out,
-            // and the summary above it has already said the thing that matters.
-            // Asked of `compute_block_drawn` rather than measured here, because
-            // `booth_compute_machine_at` has to reach the same verdict and the
-            // rows dropped here are the rows it must refuse to name.
-            if compute_block_drawn(rows.len(), y, bottom) {
-                draw_compute_block(buf, area, y + 1, &rows, theme);
-            }
         }
         y += compute_machine_h(m, view);
     }
     anim
 }
 
-/// One machine's compact block, as a small table.
-///
-/// Every meter is one width and every reading starts in one column, both taken
-/// from the widest row before anything is drawn — four rows that each sized
-/// themselves would be four bars you cannot compare, which is the one thing a
-/// column of bars is for.
-///
-/// The mount is the first thing to go, the way [`gauge_head`] drops a gauge's
-/// identity first: a bar too short to read is a bigger loss than a path you can
-/// open the machine to see. It is also drawn past its *own* reading rather than
-/// past the widest one, so it only competes with the meter for cells the
-/// reading column had not already spent.
-fn draw_compute_block(buf: &mut Buffer, area: LRect, top: u16, rows: &[SubRow], theme: &Theme) {
-    let bound = area.x + area.width;
-    let core_w = rows.iter().map(|r| r.value.chars().count() as u16).max().unwrap_or(0);
-    let idents: Vec<String> = rows
-        .iter()
-        .map(|r| match r.ident.is_empty() {
-            true => String::new(),
-            // What the mount may take without pushing the meter under the width
-            // at which it stops saying anything the percentage does not — and
-            // then only if what came back is still a *path*. `fit_path` will
-            // fall through to the bare tail of a segment for the rail, where a
-            // mount is a `DSK` row's only identity and two mounts under one
-            // parent have to be told apart somehow. Here the row already says
-            // `DSK` and the percentage already says the fact: `…/fast` names a
-            // disk, `…ast` names nothing, and three cells are worth more to the
-            // bar than to that.
-            false => {
-                let spent = COMPUTE_SUB_FIXED + COMPUTE_METER_MIN + 1;
-                let room = area.width.saturating_sub(spent + r.value.chars().count() as u16);
-                match fit_path(&r.ident, room) {
-                    cut if cut.contains('/') => cut,
-                    _ => String::new(),
-                }
-            }
-        })
-        .collect();
-    let tail = rows
-        .iter()
-        .zip(&idents)
-        .filter(|(_, id)| !id.is_empty())
-        .map(|(r, id)| (r.value.chars().count() + 1 + id.chars().count()) as u16)
-        .max()
-        .unwrap_or(0);
-    let meter_w = match area.width.saturating_sub(COMPUTE_SUB_FIXED + core_w.max(tail)) {
-        w if w >= COMPUTE_METER_MIN => w,
-        // Gone rather than shrunk to a bar that cannot say anything a number
-        // does not: its cells go to the readings, which never drop.
-        _ => 0,
-    };
-    let meter_x = area.x + 6;
-    let value_x = meter_x + meter_w + u16::from(meter_w > 0);
-
-    for ((i, r), ident) in rows.iter().enumerate().zip(&idents) {
-        let y = top + i as u16;
-        fill_row(buf, area.x, y, bound, theme.ground);
-        let color = r.role.map_or(theme.faint, |role| theme.role(role));
-        put_str(buf, area.x + 2, y, r.label, bound, Pen::new(theme.muted, theme.ground));
-        if meter_w > 0 {
-            draw_meter(buf, meter_x, y, meter_w, r.pct, color, theme);
-        }
-        put_str(buf, value_x, y, &r.value, bound, Pen::new(color, theme.ground));
-        let ident_x = value_x + r.value.chars().count() as u16 + 1;
-        put_str(buf, ident_x, y, ident, bound, Pen::new(theme.faint, theme.ground));
-    }
-}
-
-/// One machine's headline: `v local     4 ███░░░ CPU 41%`.
-///
-/// Laid out from the right, because every field on that side is a reading and
-/// the name is the one thing that can be shortened without losing a fact. When
-/// even that runs out the fields drop outward-in — the meter first, since it is
-/// the percentage drawn twice, then the agent count. The reading itself never
-/// goes: a row that cannot say how loaded a machine is has no reason to exist.
-///
-/// The `>` / `v` at the left edge is the fold mark the whole workbench uses, and
-/// it is a button: a press anywhere on the machine swaps this row's block for
-/// the SYSTEM rail's stack. It spent a release drawn but unwired, which is what
-/// a mark you can press and nothing happens looks like from outside.
 fn draw_compute_summary(
     buf: &mut Buffer,
     area: LRect,
@@ -8679,6 +8492,32 @@ mod tests {
         assert_eq!(shape(&booth_rows(&spaces, &ms, &folds)), index);
     }
 
+    #[test]
+    fn fleet_spines_end_at_visible_siblings_and_survive_folding() {
+        let agents = [
+            agent(1, "claude", AgentState::Idle),
+            agent(2, "codex", AgentState::Working),
+            agent(3, "aider", AgentState::Idle),
+            agent(4, "gemini", AgentState::Waiting),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let machines = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let mut folds = Folds::default();
+        let rows = booth_rows(&spaces, &machines, &folds);
+        assert_eq!(
+            fleet_spines(&rows),
+            ["", "├─", "│ ├─", "│ └─", "├─", "│ └─", "└─", "", "└─", "  └─"]
+        );
+        folds.toggle_space("local", SessionId(1));
+        let rows = booth_rows(&spaces, &machines, &folds);
+        assert_eq!(fleet_spines(&rows), ["", "├─", "├─", "│ └─", "└─", "", "└─", "  └─"]);
+        folds.toggle_machine("local");
+        let rows = booth_rows(&spaces, &machines, &folds);
+        assert_eq!(fleet_spines(&rows), ["", "", "└─", "  └─"]);
+    }
+
     /// A project row previews the agent in it that most needs you, and an empty
     /// one previews nothing.
     ///
@@ -8898,39 +8737,18 @@ mod tests {
         };
         let p = machine_pressure(&cramped, &disks);
         assert_eq!((p.label, p.pct as u32), ("DSK", 97), "the stale mount vetoed the live one");
-        // And the block agrees about *which* mount, which is the whole reason
-        // the headline and the row are read once and passed down together.
-        let m = MachineRow { label: "build", sys: &cramped, agents: 2, live: true };
-        let rows = compute_sub_rows(&m, &machine_read(&cramped, &disks));
-        let dsk = rows.iter().find(|r| r.label == "DSK").expect("the block names the disk");
-        assert_eq!(dsk.ident.as_str(), "/", "the row named a mount the headline is not about");
-
-        // The alarm and the display stay different questions. A machine whose
-        // only mount is stale has nothing live to fall back to, and it still
-        // prints the number it last saw — `role: None`, which is what draws it
-        // faint rather than in the red that 99% earns.
+        // The shared reading selects the live disk, even when a larger stale
+        // mount appears first. Expanded SYSTEM still owns per-mount detail.
+        let read = machine_read(&cramped, &disks);
+        assert_eq!(read.disk.unwrap().idx, 1);
         let nas_only =
             SysDto { disks: vec![disk("/mnt/nas", 3630.0, 3667.0, true)], ..Default::default() };
         assert_eq!(machine_pressure(&nas_only, &disks).label, "CPU");
-        let m = MachineRow { label: "nas", sys: &nas_only, agents: 0, live: true };
-        let rows = compute_sub_rows(&m, &machine_read(&nas_only, &disks));
-        let dsk = rows.iter().find(|r| r.label == "DSK").expect("a stale mount is still drawn");
-        assert_eq!((dsk.value.as_str(), dsk.role), ("99%", None));
 
         // The rates still win when they are worse, which is the strict `>` that
         // stops the label flickering between two equally true readings.
         let busy = SysDto { cpu_pct: 98.0, ..idle(disk("/media/archive", 3520.0, 3667.0, false)) };
         assert_eq!(machine_pressure(&busy, &disks).label, "CPU");
-
-        // The level never stops being *shown*, though — it is only no longer
-        // shouted. The block draws it unconditionally, with the mount, which is
-        // the half of the trade that keeps the original insight.
-        let sys = idle(disk("/media/archive", 3117.0, 3667.0, false));
-        let m = MachineRow { label: "gpu-box", sys: &sys, agents: 1, live: true };
-        let rows = compute_sub_rows(&m, &machine_read(&sys, &disks));
-        let dsk = rows.iter().find(|r| r.label == "DSK").expect("the block names the disk");
-        assert_eq!((dsk.value.as_str(), dsk.ident.as_str()), ("85%", "/media/archive"));
-        assert_eq!(dsk.role, Some(Role::Danger), "the row it is on still says so in red");
     }
 
     /// **Every row of COMPUTE belongs to the machine drawn on it, at every
@@ -9037,161 +8855,27 @@ mod tests {
             }
         }
 
-        // And the same property where it was actually broken. The sweep above
-        // states it and never tests it: once a block clips, `top` is already
-        // past the foot of the column when the walk ends, so that last loop is
-        // empty in exactly the case it was written for.
-        //
-        // A collapsed block is drawn whole or not at all, and `y` advances by
-        // the full height either way — so a machine whose readings ran out of
-        // column left its summary with blank rows under it as far as the floor,
-        // and the hit test went on naming it for every one of them. Shrink the
-        // terminal until the last machine's sub-rows do not fit, press the empty
-        // space under its name, and it folded.
-        // Four blocks of one height as well as the mixed list, so the clip
-        // lands in the middle of the list and not only at the end of it. A
-        // machine *after* a clipped one is the half of the walk that the
-        // drawing's own `break` stands for: nothing below the clip was painted,
-        // so nothing below it may be named either.
-        let dense = [
-            MachineRow { label: "alpha", sys: &workstation, agents: 3, live: true },
-            MachineRow { label: "bravo", sys: &workstation, agents: 1, live: true },
-            MachineRow { label: "charlie", sys: &workstation, agents: 2, live: true },
-            MachineRow { label: "delta", sys: &workstation, agents: 0, live: true },
-        ];
-        let short = View { page: Page::Booth, ..Default::default() };
-        let mut ever_clipped = false;
-        let mut ever_clipped_mid_list = false;
-        for list in [&ms[..], &dense[..]] {
-            for rows_h in 16..40u16 {
-                let geom = page_geom(160, rows_h, &short);
-                let c = booth_columns(booth_area(160, &geom));
-                let area = c.compute_rows;
-                if area.width == 0 || area.height == 0 {
-                    continue;
-                }
-                let bottom = area.y + area.height;
-                let mut b = buf(160, rows_h);
-                draw_compute(&mut b, area, list, &short, &Theme::default());
-                let col = |y: u16| -> String {
-                    (area.x..area.x + area.width)
-                        .filter_map(|x| b.cell((x, y)).map(|cell| cell.symbol().to_string()))
-                        .collect()
-                };
-
-                // Walk the *natural* heights — what the drawing steps by, and
-                // what the hit test used to walk unconditionally — until one
-                // machine's block runs off the end.
-                let mut top = area.y;
-                for (i, m) in list.iter().enumerate() {
-                    if top >= bottom {
-                        break;
-                    }
-                    let n = compute_sub_rows(m, &machine_read(m.sys, &short.disks)).len() as u16;
-                    if n == 0 || bottom.saturating_sub(top + 1) >= n {
-                        top += compute_machine_h(m, &short);
-                        continue;
-                    }
-                    ever_clipped = true;
-                    ever_clipped_mid_list |= i + 1 < list.len();
-                    let head = col(top);
-                    assert!(head.contains(m.label), "{rows_h} rows: {head:?}");
-                    assert_eq!(
-                        booth_compute_machine_at(&c, list, &short, area.x + 1, top),
-                        Some(i),
-                        "{rows_h} rows: the summary that *was* drawn stopped answering"
-                    );
-                    for y in (top + 1)..bottom {
-                        assert_eq!(col(y).trim(), "", "{rows_h} rows: row {y} was drawn after all");
-                        assert_eq!(
-                            booth_compute_machine_at(&c, list, &short, area.x + 1, y),
-                            None,
-                            "{rows_h} rows: blank row {y} still folds `{}`",
-                            m.label
-                        );
-                    }
-                    break;
-                }
+        // A short column clips at a machine boundary; blank space below the
+        // last summary never belongs to that machine.
+        let collapsed = View { page: Page::Booth, ..Default::default() };
+        for machine in &ms {
+            assert_eq!(compute_machine_h(machine, &collapsed), 1);
+        }
+        let mut away = collapsed.clone();
+        away.folds.toggle_expanded("attic");
+        assert_eq!(compute_machine_h(&ms[2], &away), 1, "away telemetry stays hidden");
+        for height in 1..=5 {
+            let area = LRect::new(0, 0, 34, height);
+            let c = BoothColumns { compute_rows: area, ..c };
+            let mut b = buf(34, height);
+            draw_compute(&mut b, area, &ms, &collapsed, &Theme::default());
+            for y in 0..height {
+                assert_eq!(
+                    booth_compute_machine_at(&c, &ms, &collapsed, 1, y),
+                    (y < ms.len() as u16).then_some(y as usize),
+                );
             }
         }
-        assert!(
-            ever_clipped,
-            "no column height in the sweep clipped a block, so nothing was tested"
-        );
-        assert!(
-            ever_clipped_mid_list,
-            "every clip was the last machine, so the walk never had to stop"
-        );
-    }
-
-    /// A machine's block at the narrowest column and at the widest.
-    ///
-    /// The two widths are the whole range: `BOOTH_COMPUTE_MIN_W` is 20, so the
-    /// interior is 18, and the cap is 36 for an interior of 34. Everything the
-    /// block does about width happens between those two numbers.
-    #[test]
-    fn a_compute_block_keeps_its_meter_and_gives_up_the_mount_first() {
-        let sys = SysDto {
-            cpu_pct: 41.0,
-            ram_used_gb: 19.0,
-            ram_total_gb: 32.0,
-            disks: vec![DiskDto {
-                mount: "/media/fast".into(),
-                source: "/dev/sda1".into(),
-                fstype: "ext4".into(),
-                kind: DiskKind::Local,
-                used_gb: 833.0,
-                total_gb: 916.0,
-                stale: false,
-            }],
-            ..Default::default()
-        };
-        let m = MachineRow { label: "gpu-box", sys: &sys, agents: 3, live: true };
-        let view = View::default();
-        let rows = compute_sub_rows(&m, &machine_read(&sys, &view.disks));
-        // No GPU on this machine, so no GPU row — an absent card is not a card
-        // at 0%.
-        assert_eq!(rows.iter().map(|r| r.label).collect::<Vec<_>>(), ["CPU", "RAM", "DSK"]);
-
-        let block = |w: u16| {
-            let mut b = buf(w, rows.len() as u16);
-            draw_compute_block(
-                &mut b,
-                LRect::new(0, 0, w, rows.len() as u16),
-                0,
-                &rows,
-                &Theme::default(),
-            );
-            (0..rows.len() as u16).map(|y| text_of(&b, y)).collect::<Vec<_>>()
-        };
-
-        // Wide: the mount fits, so the meters give up the cells for it — and
-        // every row keeps one meter width and one reading column even so,
-        // because four bars you cannot compare are the one thing a column of
-        // bars is not allowed to be.
-        let wide = block(34);
-        assert_eq!(wide[0], "  CPU █████        41%");
-        assert_eq!(wide[1], "  RAM ███████      19/32G");
-        assert_eq!(wide[2], "  DSK ███████████  91% /media/fast");
-        assert!(wide.iter().all(|r| r.chars().count() <= 34), "{wide:?}");
-
-        // Narrow: the mount goes, which is `gauge_head`'s rule — the identity
-        // drops before the reading does — and the meter takes back the cells
-        // rather than the row shrinking around a fragment of a path.
-        let narrow = block(18);
-        assert_eq!(narrow[0], "  CPU ██    41%");
-        assert_eq!(narrow[1], "  RAM ███   19/32G");
-        assert_eq!(narrow[2], "  DSK █████ 91%");
-        assert!(
-            narrow.iter().all(|r| r.chars().count() <= 18),
-            "nothing may run past the column: {narrow:?}"
-        );
-
-        // An away machine has no block at all: four meters redrawn every tick
-        // off a frozen sample is a strong claim to be alive.
-        let gone = MachineRow { live: false, ..m };
-        assert!(compute_sub_rows(&gone, &machine_read(&sys, &view.disks)).is_empty());
-        assert_eq!(compute_machine_h(&gone, &View { page: Page::Booth, ..view.clone() }), 1);
     }
 
     /// A turn that landed while you were away belongs in the tray; the same turn
@@ -9349,21 +9033,13 @@ mod tests {
         let screen2: String = (0..40).map(|y| text_of(&b2, y)).collect::<Vec<_>>().join("\n");
         assert!(screen2.contains("codex · local:butai"), "{screen2}");
 
-        // COMPUTE gives every machine a compact block: the headline, then a row
-        // per reading.
+        // Collapsed COMPUTE gives each machine one headline and keeps resource
+        // detail in the existing expanded renderer.
         assert!(screen.contains("COMPUTE"), "{screen}");
         assert!(screen.contains("CPU  42%"), "the worst reading, named:\n{screen}");
-        assert!(screen.contains("8/32G"), "the block says what the RAM is doing:\n{screen}");
+        assert!(!screen.contains("8/32G"), "collapsed machines show only a summary:\n{screen}");
 
-        // **The block is not the stack, and this is the line between them.**
-        // The assertion here used to be `!screen.contains("RAM")` — a summary
-        // was one line and anything more was the stack — and a per-resource row
-        // is exactly what it forbade. What separates the two now is *history*:
-        // the block draws meters, which say where a machine is this second, and
-        // the stack draws traces, which say where it has been. That is the
-        // difference between choosing a machine and reading one, which is the
-        // whole reason the column and the rail are two surfaces.
-        assert!(!screen.contains('⣀'), "a block draws meters, not traces:\n{screen}");
+        assert!(!screen.contains('⣀'), "collapsed machines do not draw history:\n{screen}");
 
         // …and a press on a machine puts the whole stack back, through the very
         // renderer the SYSTEM rail uses.
@@ -9919,7 +9595,7 @@ mod tests {
         let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
         let mut b = buf(160, 40);
         let out = draw(&mut b, 160, 40, &busy_booth, &view, &theme);
-        assert!(out.wants_fast_anim, "a working agent's hands are not animating");
+        assert!(out.wants_fast_anim, "a working agent's loading dots are not animating");
         assert!(!out.wants_anim, "a working sprite pinned the slow clock too");
 
         // The same agent on the AGENTS rail is the other way round: no sprite
