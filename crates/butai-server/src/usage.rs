@@ -1382,10 +1382,8 @@ mod tests {
             &gem_msg("m1", "2026-08-11T20:16:00.000Z", 100, 10, 0),
         );
         let now = parse_rfc3339_ms("2026-08-11T21:00:00.000Z").unwrap();
-        // Pinned to a whole second before the first read: `touch` cannot restore
-        // sub-second precision, so a stamp taken from the filesystem could not
-        // be put back exactly and the file would look changed for the wrong
-        // reason.
+        // Use the same explicit timestamp before and after rewriting, so the
+        // file looks unchanged regardless of the filesystem's clock precision.
         let stamp = SystemTime::now() - Duration::from_secs(1);
         filetime_set(&path, stamp);
         let mut c = Counter::default();
@@ -1407,16 +1405,14 @@ mod tests {
         assert_eq!(c.windows(now)[0].used, 110, "a file whose mtime did not move is not reopened");
     }
 
-    /// Push a file's mtime forward. `std::fs` cannot set one, and the crate
-    /// does not depend on `filetime` — touching through the shell is enough for
-    /// a test that only needs the stamp to differ.
+    /// Set fixture timestamps without depending on GNU `touch` syntax.
     fn filetime_set(path: &Path, when: SystemTime) {
-        let secs = when.duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let _ = std::process::Command::new("touch")
-            .arg("-d")
-            .arg(format!("@{secs}"))
-            .arg(path)
-            .status();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
     }
 
     #[test]

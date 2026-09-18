@@ -1635,7 +1635,8 @@ mod tests {
     /// the scan entirely — missing from the rail *and* from every marker, so
     /// `git status` and the workbench disagreed about the count and nothing
     /// said why.
-    #[cfg(unix)]
+    // APFS rejects non-UTF-8 names before git can see them.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_non_utf8_filename_still_reaches_the_rail() {
         use std::os::unix::ffi::OsStrExt;
