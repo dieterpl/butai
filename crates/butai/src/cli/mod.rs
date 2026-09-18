@@ -80,6 +80,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Internal authenticated loopback HTTP adapter for the browser launcher.
+    #[command(hide = true)]
+    WebGateway,
     /// Create a new session and attach to it
     New {
         /// Session name
@@ -213,6 +216,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 update(&socket, &out, check, yes || quiet)
             }
         }
+        Some(Cmd::WebGateway) => crate::web_gateway::run(&socket).map(|_| crate::exit::OK),
         Some(Cmd::Daemon) => butai_server::run_daemon(&socket).map(|_| crate::exit::OK),
         Some(Cmd::Proxy) => crate::proxy::run(&socket).map(|_| crate::exit::OK),
         // Stands alone on purpose: no nesting guard, no daemon, so it works

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Self-contained Windows web launcher alpha: starts the daemon and opens the
+  browser interface, with the runtime, web assets and daemon embedded. Windows
+  TUI artifacts are now explicitly labelled experimental alpha after reports
+  of frequent crashes. Native launcher integration tests run in Windows CI.
+
 - **Windows TUI beta (`1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
   background daemon, private named-pipe IPC, Windows shell/agent launchers,
   clipboard and URL support, and SSH connections to Unix hosts. Windows uses

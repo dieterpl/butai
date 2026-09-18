@@ -117,7 +117,7 @@ jobs:
           } finally {
             & ./target/debug/butai.exe kill-server --clear
           }
-      - name: Build Windows beta artifact
+      - name: Build Windows TUI alpha artifact
         env:
           RUSTFLAGS: '-D warnings -C target-feature=+crt-static'
         shell: pwsh
@@ -126,15 +126,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $version = & ./target/release/butai.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force dist/windows-beta | Out-Null
-          Copy-Item target/release/butai.exe, LICENSE, docs/windows.md dist/windows-beta/
-          $version | Set-Content dist/windows-beta/VERSION.txt
-          $hash = (Get-FileHash dist/windows-beta/butai.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  butai.exe" | Set-Content dist/windows-beta/SHA256SUMS -Encoding ascii
+          New-Item -ItemType Directory -Force dist/windows-tui-alpha | Out-Null
+          Copy-Item target/release/butai.exe, LICENSE, docs/windows.md dist/windows-tui-alpha/
+          $version | Set-Content dist/windows-tui-alpha/VERSION.txt
+          $hash = (Get-FileHash dist/windows-tui-alpha/butai.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  butai.exe" | Set-Content dist/windows-tui-alpha/SHA256SUMS -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: butai-windows-beta-${{ github.sha }}
-          path: dist/windows-beta/
+          name: butai-windows-tui-alpha-${{ github.sha }}
+          path: dist/windows-tui-alpha/
+          if-no-files-found: error
+      - uses: oven-sh/setup-bun@v2
+      - name: Build self-contained Windows web launcher
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun scripts/build-desktop.ts ../target/release/butai.exe ../dist/butai-web-windows-alpha.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test compiled Windows web launcher
+        working-directory: web
+        run: |
+          $env:BUTAI_WEB_EXE = Join-Path $env:GITHUB_WORKSPACE "dist/butai-web-windows-alpha.exe"
+          bun test test/desktop-windows.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: butai-windows-web-alpha-${{ github.sha }}
+          path: dist/butai-web-windows-alpha.exe
           if-no-files-found: error
       # Retain compiled dependencies even when a runtime assertion fails.
       - uses: actions/cache/save@v4

@@ -17,6 +17,8 @@
 
 import type { ServerWebSocket } from "bun";
 import type { DaemonRef } from "./roster.ts";
+import { proxyStream } from "./windows-transport.ts";
+import type { Duplex } from "node:stream";
 
 export interface WsData {
   daemon: DaemonRef;
@@ -38,7 +40,7 @@ const HEADER = 4;
  */
 class Bridge {
   private buf = new Uint8Array(0);
-  private daemon: Bun.Socket<undefined> | null = null;
+  private daemon: Bun.Socket<undefined> | Duplex | null = null;
   private pending: Uint8Array[] = [];
   private closed = false;
 
@@ -46,7 +48,13 @@ class Bridge {
 
   async dial(ref: DaemonRef): Promise<void> {
     try {
-      this.daemon = await Bun.connect({
+      if (process.platform === "win32") {
+        const stream = proxyStream(ref.socket);
+        stream.on("data", (chunk: Buffer) => this.fromDaemon(chunk));
+        stream.on("close", () => this.close());
+        stream.on("error", () => this.close());
+        this.daemon = stream;
+      } else this.daemon = await Bun.connect({
         unix: ref.socket,
         socket: {
           data: (_s, chunk) => this.fromDaemon(chunk),

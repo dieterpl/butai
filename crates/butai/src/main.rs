@@ -25,6 +25,7 @@ mod out;
 mod proxy;
 mod standalone;
 mod target;
+mod web_gateway;
 
 fn main() -> ExitCode {
     let cli = match cli::Cli::try_parse() {
