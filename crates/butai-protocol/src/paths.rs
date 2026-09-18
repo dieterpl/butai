@@ -56,10 +56,7 @@ fn dir_for(overridden: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
     }
     match home {
         Some(home) => home.join(".butai"),
-        None => {
-            let uid = rustix::process::getuid().as_raw();
-            PathBuf::from(format!("/tmp/butai-{uid}"))
-        }
+        None => fallback_dir(),
     }
 }
 
@@ -179,6 +176,20 @@ pub fn panes_dir() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
+fn fallback_dir() -> PathBuf {
+    let uid = rustix::process::getuid().as_raw();
+    PathBuf::from(format!("/tmp/butai-{uid}"))
+}
+#[cfg(windows)]
+fn fallback_dir() -> PathBuf {
+    // LOCALAPPDATA and TEMP are per-user locations on Windows.
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("butai")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +209,7 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/home/me/.butai"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn with_no_home_at_all_it_is_scoped_to_this_user() {
         // Never a shared path another user could have created first.

@@ -21,8 +21,6 @@ crossterm.workspace = true
 # for the same job; editing a file is client work, so the widget follows.
 tui-textarea.workspace = true
 tracing.workspace = true
-rustix.workspace = true
-libc.workspace = true
 dirs.workspace = true
 arboard.workspace = true
 png.workspace = true
@@ -47,3 +45,10 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

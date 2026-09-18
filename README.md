@@ -11,7 +11,7 @@ reattaching from another machine picks up mid-sentence.
 
 [![CI](https://github.com/dieterpl/butai/actions/workflows/ci.yml/badge.svg)](https://github.com/dieterpl/butai/actions/workflows/ci.yml)
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen.svg)](LICENSE)
-[![Platform: Linux | macOS](https://img.shields.io/badge/platform-linux%20%7C%20macos-lightgrey.svg)](#install)
+[![Platform: Linux | macOS | Windows](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](rust-toolchain.toml)
 
 ![The butai workbench: an AGENTS rail listing a Claude Code agent, PROCESSES showing dev ok and test FAIL(2), a staged agent reply, and a CHANGES rail with the git working tree](docs/images/workbench.svg)
@@ -50,7 +50,7 @@ later, or over SSH from another machine, and it's mid-sentence where you left it
 - **Review without leaving.** Git changes live in a permanent rail: stage,
   unstage, diff, and commit right where you're working.
 - **Nothing new to secure.** The daemon never listens on TCP — it binds one
-  `AF_UNIX` socket. Reaching a machine that isn't this one rides the SSH you
+  local endpoint (`AF_UNIX` on Unix, a private named pipe on Windows). Reaching a machine that isn't this one rides the SSH you
   already have: your keys are the authentication, the socket's filesystem
   permissions are the authorisation. No inbound port, no tunnel service, no
   token to leak, and no URL that has to be treated like a root login. There is
@@ -120,6 +120,7 @@ target below.
 | Linux (glibc) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf` |
 | Linux (static, no libc dependency) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
 | macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` |
+| Windows (beta) | `x86_64-pc-windows-msvc` |
 
 The `musl` builds are fully static — they run on Alpine, on a distroless or
 scratch container, and on any glibc too old for the `gnu` builds.
@@ -133,17 +134,30 @@ cargo install --path crates/butai
 ```
 
 **Build the release artifacts yourself.** `scripts/release.sh` produces the
-whole matrix above as tarballs under `dist/`. Linux targets cross-compile via
+Unix matrix above as tarballs under `dist/` (the native target on Windows). Linux targets cross-compile via
 [`cross`](https://github.com/cross-rs/cross) (needs Docker); macOS targets
 build natively. `TARGETS="..." scripts/release.sh` builds a subset.
 
 </details>
 
-> **Windows is not supported natively.** The transport is Unix domain sockets,
-> the client drives the terminal through `termios` and POSIX signals, and the
-> daemon detaches with `setsid`. A port needs a named-pipe or loopback-TCP
-> transport and a Console API backend for the client — not a build target.
-> Under WSL2 butai runs as an ordinary Linux binary today.
+**Native Windows (beta).** Run the same TUI and persistent daemon in
+Windows Terminal on Windows 10 1809+ or Windows 11. Build it with Rust and the
+Visual Studio C++ Build Tools:
+
+```powershell
+cargo build --release -p butai
+.\target\release\butai.exe
+```
+
+Windows release artifacts contain `butai.exe`. Once a release includes the
+Windows target, install it with:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/dieterpl/butai/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+See [Windows support](docs/windows.md) for shell configuration and current limits.
 
 ## Quick start
 
@@ -572,8 +586,6 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 These are decisions, not a to-do list. If one of them is what you need, another
 tool is the better answer and you should use it.
 
-- **Windows.** butai is Unix sockets, `termios` and `setsid` all the way down.
-  There is no port coming. It runs under WSL.
 - **A layout you arrange yourself.** The frame doesn't move — that's the whole
   idea, and it's the wrong idea for some people. No drag-resize, no splits you
   place. If you want to build your own layout, use tmux or zellij.

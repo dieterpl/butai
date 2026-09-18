@@ -21,7 +21,11 @@ env:
 jobs:
   rust:
     name: rust (fmt, clippy, test)
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +70,64 @@ jobs:
             exit 1
           }
 
+  windows:
+    name: Windows native TUI and daemon
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show && rustup component add clippy
+      - name: Build
+        run: cargo build --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features
+      - name: IPC tests
+        run: cargo test -p butai-protocol --all-features
+      - name: Font compatibility and native console rendering
+        run: |
+          cargo test -p butai-client glyphs::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p butai-client --test windows_console
+      - name: ConPTY and daemon smoke test
+        run: cargo test -p butai-server --test e2e_windows
+      - name: Windows executable lookup
+        run: cargo test -p butai-server windows_resolve_tests
+      - name: Native workspace search
+        run: cargo test -p butai-server search::tests
+      - name: Native system telemetry
+        run: cargo test -p butai-server sys::tests::cpu_and_ram_readable -- --exact
+      - name: CLI smoke test
+        shell: pwsh
+        run: |
+          $env:BUTAI_HOME = Join-Path $env:RUNNER_TEMP "butai-smoke"
+          try {
+            & ./target/debug/butai.exe ws create --cwd $env:GITHUB_WORKSPACE
+            if ($LASTEXITCODE -ne 0) { throw "daemon auto-start failed" }
+            & ./target/debug/butai.exe --json ws ls
+            if ($LASTEXITCODE -ne 0) { throw "workspace query failed" }
+          } finally {
+            & ./target/debug/butai.exe kill-server --clear
+          }
+      - name: Build Windows beta artifact
+        env:
+          RUSTFLAGS: '-D warnings -C target-feature=+crt-static'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p butai
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = & ./target/release/butai.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force dist/windows-beta | Out-Null
+          Copy-Item target/release/butai.exe, LICENSE, docs/windows.md dist/windows-beta/
+          $version | Set-Content dist/windows-beta/VERSION.txt
+          $hash = (Get-FileHash dist/windows-beta/butai.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  butai.exe" | Set-Content dist/windows-beta/SHA256SUMS -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: butai-windows-beta-${{ github.sha }}
+          path: dist/windows-beta/
+          if-no-files-found: error
+
   targets:
     # The release matrix rots quietly: a dependency picks up a C library, or a
     # cfg gate assumes glibc, and nobody finds out until a tag is cut. This
@@ -87,13 +149,15 @@ jobs:
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
           - { target: aarch64-apple-darwin, os: macos-14, cross: false }
-          - { target: x86_64-apple-darwin, os: macos-13, cross: false }
+          - { target: x86_64-apple-darwin, os: macos-14, cross: false }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, cross: false }
     steps:
       - uses: actions/checkout@v4
       - run: rustup show && rustup target add ${{ matrix.target }}
       - if: matrix.cross
         run: cargo install cross --locked
       - name: Check
+        shell: bash
         run: |
           builder=cargo
           if [ "${{ matrix.cross }}" = "true" ]; then builder=cross; fi

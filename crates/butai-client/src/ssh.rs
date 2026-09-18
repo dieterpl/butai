@@ -22,7 +22,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::{Child, Command};
+#[cfg(unix)]
+use tokio::process::Child;
+#[cfg(all(test, unix))]
+use tokio::process::Command;
 
 /// How long to wait for `ssh -L` to bind the local socket.
 ///
@@ -30,12 +33,16 @@ use tokio::process::{Child, Command};
 /// passphrase-less agent round trip — so it is sized for a bad link rather than
 /// a LAN. Nothing is blocked meanwhile: the caller awaits this while the rest
 /// of the workbench keeps drawing.
+#[cfg(unix)]
 const BIND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A live `ssh -L` forward. Dropping it kills the ssh child and removes the
 /// socket, so a host that goes away leaves nothing behind.
 pub struct Forward {
+    #[cfg(unix)]
     child: Child,
+    #[cfg(windows)]
+    relay: tokio::task::JoinHandle<()>,
     socket: PathBuf,
 }
 
@@ -60,13 +67,22 @@ impl Forward {
     pub fn is_alive(&mut self) -> bool {
         // An error from `try_wait` means the child is unwaitable, which is not
         // a running ssh either.
-        matches!(self.child.try_wait(), Ok(None))
+        #[cfg(unix)]
+        {
+            matches!(self.child.try_wait(), Ok(None))
+        }
+        #[cfg(windows)]
+        {
+            !self.relay.is_finished()
+        }
     }
 }
 
 impl Drop for Forward {
     fn drop(&mut self) {
         // `kill_on_drop` handles the child; the socket is ours to clean up.
+        #[cfg(windows)]
+        self.relay.abort();
         std::fs::remove_file(&self.socket).ok();
     }
 }
@@ -106,7 +122,7 @@ pub async fn remote_socket(target: &str, args: &[String]) -> Result<String> {
         r#"{}; "$BUTAI" ls >/dev/null 2>&1; exec "$BUTAI" --json whoami"#,
         crate::dial::find_binary()
     );
-    let mut cmd = Command::new("ssh");
+    let mut cmd = butai_protocol::local::background_async_command("ssh");
     // No tty: this is one JSON document, not a session.
     cmd.arg("-T");
     cmd.arg("-o").arg("BatchMode=yes");
@@ -168,6 +184,7 @@ fn socket_from_whoami(stdout: &[u8]) -> Result<String> {
 /// `args` are the arguments the far side was reached with — recovered by the
 /// daemon from the pane's own `ssh` process — so this goes back the same way,
 /// through the same jump hosts, with the same key.
+#[cfg(unix)]
 pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Result<Forward> {
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
@@ -179,7 +196,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
 
-    let mut cmd = Command::new("ssh");
+    let mut cmd = butai_protocol::local::background_async_command("ssh");
     // `-N` runs no command: this connection exists only to carry the forward.
     // `-T` keeps ssh from allocating a tty we would then have to manage.
     cmd.arg("-N").arg("-T");
@@ -207,10 +224,11 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
 ///
 /// Existence is not enough — ssh creates the socket before the connection is
 /// usable — so this connects, which is also what the caller is about to do.
+#[cfg(unix)]
 async fn wait_for_socket(fwd: &mut Forward) -> Result<()> {
     let deadline = tokio::time::Instant::now() + BIND_TIMEOUT;
     loop {
-        if tokio::net::UnixStream::connect(&fwd.socket).await.is_ok() {
+        if butai_protocol::local::LocalStream::connect(&fwd.socket).await.is_ok() {
             return Ok(());
         }
         // A dead ssh will never bind, and its stderr says why (a bad key, an
@@ -228,6 +246,7 @@ async fn wait_for_socket(fwd: &mut Forward) -> Result<()> {
 }
 
 /// Whatever ssh complained about, trimmed to one line for a footer.
+#[cfg(unix)]
 async fn drain_stderr(fwd: &mut Forward) -> String {
     use tokio::io::AsyncReadExt;
     let Some(mut err) = fwd.child.stderr.take() else { return String::new() };
@@ -263,6 +282,49 @@ fn local_socket_path(target: &str) -> PathBuf {
     dir.join(format!("{safe}-{}.sock", std::process::id()))
 }
 
+/// Windows OpenSSH cannot forward Unix sockets. Bridge each local pipe
+/// connection over `ssh ... butai proxy`, which also carries HTTP unchanged.
+#[cfg(windows)]
+pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Result<Forward> {
+    anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
+    anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
+    let socket = local_socket_path(target);
+    let listener = butai_protocol::local::LocalListener::bind(&socket)?;
+    let (target, args, remote_socket) =
+        (target.to_owned(), args.to_vec(), remote_socket.to_owned());
+    let relay = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((mut local, _)) = accepted else { break };
+                    let (target, args, remote_socket) = (target.clone(), args.clone(), remote_socket.clone());
+                    connections.spawn(async move {
+                        let mut cmd = butai_protocol::local::background_async_command("ssh");
+                        cmd.args(["-T", "-o", "BatchMode=yes"]);
+                        for opt in crate::dial::control_master_opts() { cmd.arg("-o").arg(opt); }
+                        cmd.args(args).arg(&target);
+                        let quoted = format!("'{}'", remote_socket.replace('\'', "'\\''"));
+                        cmd.arg(format!("BUTAI_SOCKET={quoted} {}", crate::dial::remote_cmd()));
+                        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+                        let Ok(mut child) = cmd.spawn() else { return };
+                        let (Some(mut input), Some(mut output)) = (child.stdin.take(), child.stdout.take()) else { return };
+                        let (mut read, mut write) = tokio::io::split(&mut local);
+                        use tokio::io::AsyncWriteExt;
+                        // HTTP replies and pane streams can run concurrently;
+                        // dropping this task also terminates its SSH process.
+                        let to_remote = async { let _ = tokio::io::copy(&mut read, &mut input).await; let _ = input.shutdown().await; std::future::pending::<()>().await; };
+                        let to_local = async { let _ = tokio::io::copy(&mut output, &mut write).await; let _ = write.shutdown().await; };
+                        tokio::select! { _ = to_remote => {}, _ = to_local => {} }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    Ok(Forward { relay, socket })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +349,7 @@ mod tests {
     /// The half of "the machine went away" that the event stream cannot see.
     /// A dead ssh and a daemon that is merely restarting produce the same
     /// stream errors; only the child says which one happened.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_forward_knows_when_its_ssh_has_gone() {
         let mut alive = Forward {

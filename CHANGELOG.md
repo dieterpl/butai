@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows TUI beta (`1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
+  background daemon, private named-pipe IPC, Windows shell/agent launchers,
+  clipboard and URL support, and SSH connections to Unix hosts. Windows uses
+  font-compatible graphical symbols by default; `[ui] glyphs = "unicode"`
+  restores the original symbols. Console UTF-8 and deferred wrapping prevent
+  encoding and bottom-row scrolling problems. Unix rendering defaults and
+  terminal recovery are preserved.
+- Windows builds, native console/ConPTY tests and downloadable beta artifacts
+  in the `develop` CI pipeline; Windows packages in the release matrix.
+
+
 - **Each workspace remembers the space it was last on.** The page was a property
   of the *client* — one `view.page`, carried across every tab — so leaving a
   project you were reading the history of for one you were reading the files of

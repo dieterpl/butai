@@ -80,6 +80,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, count: &mut us
 }
 
 /// `grep -rn` content hits as (path, line, text).
+#[cfg(unix)]
 fn grep_content(root: &Path, query: &str) -> Vec<SearchHit> {
     let out = std::process::Command::new("grep")
         .args([
@@ -111,6 +112,40 @@ fn grep_content(root: &Path, query: &str) -> Vec<SearchHit> {
         .collect()
 }
 
+/// Native literal content search; Windows need not install a Unix grep.
+#[cfg(windows)]
+fn grep_content(root: &Path, query: &str) -> Vec<SearchHit> {
+    use std::io::Read;
+    const MAX_CONTENT_BYTES: u64 = 1024 * 1024;
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files, &mut 0);
+    let mut hits = Vec::new();
+    for path in files {
+        let Ok(file) = std::fs::File::open(root.join(&path)) else { continue };
+        let mut bytes = Vec::new();
+        if file.take(MAX_CONTENT_BYTES + 1).read_to_end(&mut bytes).is_err()
+            || bytes.len() as u64 > MAX_CONTENT_BYTES
+            || bytes.contains(&0)
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (line, preview) in
+            text.lines().enumerate().filter(|(_, line)| line.contains(query)).take(2)
+        {
+            hits.push(SearchHit {
+                path: path.clone(),
+                line: Some((line + 1) as u32),
+                preview: preview.trim().chars().take(60).collect(),
+            });
+            if hits.len() == MAX_GREP_HITS {
+                return hits;
+            }
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +165,20 @@ mod tests {
             by_content.iter().any(|h| h.line == Some(1) && h.preview.contains("needle_here")),
             "{by_content:?}"
         );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_search_handles_literal_text_crlf_and_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "literal[.]\r\nliteral[.]\r\nliteral[.]\r\n")
+            .unwrap();
+        std::fs::write(dir.path().join("binary.dat"), b"literal[.]\0").unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/ignored.txt"), "literal[.]").unwrap();
+        let hits = grep_content(dir.path(), "literal[.]");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| h.path == Path::new("a.txt")));
+        assert_eq!(hits[1].line, Some(2));
+        assert_eq!(hits[0].preview, "literal[.]");
     }
 }

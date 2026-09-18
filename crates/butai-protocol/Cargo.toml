@@ -8,6 +8,7 @@ homepage.workspace = true
 description = "Wire protocol types and framing for butai: the client/daemon message set, cell-run frames, and the REST API DTOs."
 
 [dependencies]
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true
@@ -15,7 +16,6 @@ tokio-util.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
-rustix.workspace = true
 crossterm = { workspace = true, optional = true }
 ts-rs = { workspace = true, optional = true }
 
@@ -37,3 +37,14 @@ ts = ["dep:ts-rs"]
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+fs2.workspace = true
+sha2.workspace = true
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

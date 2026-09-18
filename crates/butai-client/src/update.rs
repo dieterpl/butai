@@ -46,7 +46,7 @@ pub async fn stop_daemon(socket: &Path) -> Result<()> {
     // Nothing listening: there is no daemon to stop, and asking would start
     // one, because `control_request` connects-or-spawns like every other
     // client call.
-    if tokio::net::UnixStream::connect(socket).await.is_err() {
+    if butai_protocol::local::LocalStream::connect(socket).await.is_err() {
         return Ok(());
     }
 
@@ -61,7 +61,7 @@ pub async fn stop_daemon(socket: &Path) -> Result<()> {
 
     let deadline = tokio::time::Instant::now() + DAEMON_EXIT_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
-        if tokio::net::UnixStream::connect(socket).await.is_err() {
+        if butai_protocol::local::LocalStream::connect(socket).await.is_err() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

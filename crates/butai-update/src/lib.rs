@@ -300,26 +300,31 @@ pub fn install_path() -> Result<PathBuf> {
 /// stopped is the worst possible moment, and an update offer that cannot be
 /// carried out is worse than no offer at all.
 pub fn writable_install_path() -> Result<PathBuf> {
-    let path = install_path()?;
-    let dir = path.parent().unwrap_or(Path::new("/"));
+    #[cfg(windows)]
+    bail!("in-place updates are not supported on Windows yet — install the new release manually");
+    #[cfg(unix)]
+    {
+        let path = install_path()?;
+        let dir = path.parent().unwrap_or(Path::new("/"));
 
-    if in_cargo_target(&path) {
-        bail!(
-            "{} is a build in a cargo target directory — cargo owns it, so it is not \
+        if in_cargo_target(&path) {
+            bail!(
+                "{} is a build in a cargo target directory — cargo owns it, so it is not \
              replaced from here",
-            path.display()
-        );
-    }
-    // The directory, not the file: the swap is a `rename` into it, which needs
-    // write on the directory and says nothing about the mode of the old file.
-    if rustix::fs::access(dir, rustix::fs::Access::WRITE_OK).is_err() {
-        bail!(
-            "butai is installed at {}, which this user cannot write — re-run \
+                path.display()
+            );
+        }
+        // The directory, not the file: the swap is a `rename` into it, which needs
+        // write on the directory and says nothing about the mode of the old file.
+        if rustix::fs::access(dir, rustix::fs::Access::WRITE_OK).is_err() {
+            bail!(
+                "butai is installed at {}, which this user cannot write — re-run \
              scripts/install.sh, or install somewhere writable with BUTAI_INSTALL_DIR",
-            path.display()
-        );
+                path.display()
+            );
+        }
+        Ok(path)
     }
-    Ok(path)
 }
 
 /// Is this binary a cargo build rather than an installed one?
@@ -334,6 +339,7 @@ pub fn writable_install_path() -> Result<PathBuf> {
 /// how this tree is usually built. What survives the move is the `CACHEDIR.TAG`
 /// cargo writes at the root of a target directory: it is there to keep backup
 /// tools out, and it is the only thing that identifies one wherever it was put.
+#[cfg(any(unix, test))]
 fn in_cargo_target(path: &Path) -> bool {
     let mut parts = path.components().rev().skip(1).map(|c| c.as_os_str());
     let profile = parts.next();
@@ -352,6 +358,7 @@ fn in_cargo_target(path: &Path) -> bool {
 ///
 /// The Cache Directory Tagging Specification's magic string, which cargo writes
 /// verbatim.
+#[cfg(any(unix, test))]
 fn is_cargo_cache_dir(dir: &Path) -> bool {
     const SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
     std::fs::read(dir.join("CACHEDIR.TAG")).is_ok_and(|b| b.starts_with(SIGNATURE))
@@ -556,6 +563,7 @@ fn extract_binary(tarball: &[u8], asset: &str) -> Result<Vec<u8>> {
 /// atomic, and impossible to fail halfway across a filesystem boundary with
 /// the old binary already gone.
 fn stage_beside(install: &Path, binary: &[u8]) -> Result<PathBuf> {
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
     let dir = install.parent().unwrap_or(Path::new("."));
@@ -563,12 +571,11 @@ fn stage_beside(install: &Path, binary: &[u8]) -> Result<PathBuf> {
     // A leftover from a previous run that died between staging and the rename.
     let _ = std::fs::remove_file(&tmp);
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o755)
-        .open(&tmp)
-        .with_context(|| format!("create {}", tmp.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o755);
+    let mut file = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     file.write_all(binary).with_context(|| format!("write {}", tmp.display()))?;
     // Before it is renamed over the program the machine boots into.
     file.sync_all().with_context(|| format!("flush {}", tmp.display()))?;
@@ -601,6 +608,7 @@ pub fn swap(staged: &Staged) -> Result<()> {
 /// invocation's own, so `butai -w foo` restarts as `butai -w foo`, and the path
 /// is the resolved install path rather than `current_exe()`, which by this
 /// point reports the deleted inode of the binary we just replaced.
+#[cfg(unix)]
 pub fn restart(install: &Path) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
 
@@ -637,6 +645,11 @@ fn get_bytes(url: &str) -> Result<Vec<u8>> {
         .limit(MAX_DOWNLOAD)
         .read_to_vec()
         .with_context(|| format!("read {url}"))
+}
+
+#[cfg(windows)]
+pub fn restart(_install: &Path) -> anyhow::Error {
+    anyhow::anyhow!("restart butai manually on Windows")
 }
 
 #[cfg(test)]
@@ -691,6 +704,7 @@ mod tests {
     #[test]
     fn one_dev_build_is_newer_than_the_one_before_it() {
         assert!(newer("1.3.0-dev.2", "1.3.0-dev.1"));
+        assert!(newer("1.3.0-dev.3.beta.1", "1.3.0-dev.2"));
         assert!(!newer("1.3.0-dev.1", "1.3.0-dev.2"));
         assert!(!newer("1.3.0-dev.1", "1.3.0-dev.1"));
         // Numerically, for the same reason `1.0.10` beats `1.0.9` — a string

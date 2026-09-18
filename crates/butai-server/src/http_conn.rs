@@ -25,7 +25,6 @@ use hyper::service::service_fn;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::oneshot;
 use tracing::warn;
@@ -58,7 +57,10 @@ const GZIP_MIN_BYTES: usize = 1024;
 const GZIP_LEVEL: Compression = Compression::new(1);
 
 /// Serve HTTP/1.1 over one already-accepted Unix socket connection.
-pub async fn handle(stream: UnixStream, events: UnboundedSender<Event>) {
+pub async fn handle<S>(stream: S, events: UnboundedSender<Event>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let io = TokioIo::new(stream);
     let service = service_fn(move |req: Request<Incoming>| {
         let events = events.clone();

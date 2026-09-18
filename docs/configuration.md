@@ -306,6 +306,7 @@ layout, not one workspace's.
 | `system_height` | integer | unset = automatic | capped at 19 | Rows for the SYSTEM gauges. Automatic is a separator plus whatever the machine's gauges need, and 0 in zen mode or below 12 rows of rail. |
 | `net` | `"all"`, `"auto"`, or a list | `"all"` | — | Which interfaces get a NET gauge. |
 | `disks` | `"all"`, `"auto"`, or a list | `"all"` | — | Which mounts get a DSK gauge. |
+| `glyphs` | `"unicode"` or `"ascii"` | `"ascii"` on Windows, `"unicode"` elsewhere | — | Display graphical symbols with the original Unicode glyphs or single-column ASCII alternatives for limited terminal fonts. Text encoding and clipboard content are preserved. |
 | `links` | bool | `true` | — | Whether a URL on screen is marked up as an OSC 8 hyperlink for the terminal butai is drawn on, so its pointer can follow one. Off leaves the text alone; the `f` picker works either way, because it never leaves this client. |
 
 Widths **clamp rather than fall back**, so `left_rail = 900` gives you a

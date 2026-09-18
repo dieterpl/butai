@@ -19,11 +19,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use butai_protocol::framing::{decode, encode, length_codec, MAX_CONSECUTIVE_BAD_FRAMES};
+use butai_protocol::local::LocalStream as UnixStream;
 use butai_protocol::{AttachTarget, ClientMsg, Command, Encoding, ServerMsg, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
-use rustix::fs::{flock, FlockOperation};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::Framed;
 
@@ -87,12 +86,12 @@ pub fn spawn_daemon_at(exe: &Path, socket: &Path) -> Result<()> {
     let lock_path = butai_protocol::paths::lock_path_for(socket);
     let lock_file =
         std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
-    if flock(&lock_file, FlockOperation::NonBlockingLockShared).is_err() {
+    if butai_protocol::local::try_lock_shared(&lock_file).is_err() {
         // A daemon holds the exclusive lock; it just isn't accepting yet.
         return Ok(());
     }
     // No daemon alive. Release our probe lock before spawning.
-    let _ = flock(&lock_file, FlockOperation::NonBlockingUnlock);
+    let _ = butai_protocol::local::unlock(&lock_file);
 
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon")
@@ -100,12 +99,19 @@ pub fn spawn_daemon_at(exe: &Path, socket: &Path) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .env("BUTAI_SOCKET", socket);
+    #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
             rustix::process::setsid().map_err(std::io::Error::from)?;
             Ok(())
         });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
     cmd.spawn().context("spawn butai daemon")?;
     Ok(())

@@ -3642,7 +3642,7 @@ impl ServerCore {
     /// operation runner's lock, timeouts or progress. `GIT_OPTIONAL_LOCKS=0`
     /// keeps a listing from taking the index lock and racing a real operation.
     fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
-        let out = std::process::Command::new("git")
+        let out = butai_protocol::local::background_command("git")
             .arg("-C")
             .arg(root)
             .arg("--no-pager")
@@ -3875,7 +3875,7 @@ impl ServerCore {
         // Validate the path stays inside the workspace, but pass the relative
         // form to git (which wants a repo-relative pathspec).
         safe_join(cwd, rel).ok_or_else(|| ApiReply::BadRequest("path escapes workspace".into()))?;
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = butai_protocol::local::background_command("git");
         cmd.arg("-C").arg(cwd).arg("--no-pager").arg("diff");
         if staged {
             cmd.arg("--cached");
@@ -3927,7 +3927,7 @@ impl ServerCore {
     /// once staged — so what the diff view shows is what `s` would stage, and
     /// hunk-staging one of its hunks applies.
     fn untracked_patch(root: &Path, rel: &str) -> String {
-        let mut ls = std::process::Command::new("git");
+        let mut ls = butai_protocol::local::background_command("git");
         ls.arg("-C").arg(root).args(["ls-files", "--others", "--exclude-standard", "-z"]);
         if !rel.is_empty() {
             ls.arg("--").arg(rel);
@@ -3946,7 +3946,7 @@ impl ServerCore {
         }
         let mut patch = String::new();
         for path in paths.iter().take(UNTRACKED_DIFF_LIMIT) {
-            let out = std::process::Command::new("git")
+            let out = butai_protocol::local::background_command("git")
                 .arg("-C")
                 .arg(root)
                 .arg("--no-pager")
@@ -3969,7 +3969,7 @@ impl ServerCore {
     #[allow(clippy::result_large_err)]
     fn build_show(cwd: &Path, id: &str) -> Result<DiffDto, ApiReply> {
         crate::git_op::valid_show_rev(id).map_err(ApiReply::BadRequest)?;
-        let out = std::process::Command::new("git")
+        let out = butai_protocol::local::background_command("git")
             .arg("-C")
             .arg(cwd)
             .arg("--no-pager")

@@ -273,11 +273,7 @@ impl Config {
     }
 
     pub fn shell(&self) -> String {
-        self.general
-            .default_shell
-            .clone()
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/sh".into())
+        self.general.default_shell.clone().or_else(environment_shell).unwrap_or_else(platform_shell)
     }
 
     pub fn agent(&self, name: &str) -> Option<&AgentDef> {
@@ -322,6 +318,24 @@ impl WorkspaceFile {
             Err(_) => (WorkspaceFile::default(), vec![]),
         }
     }
+}
+
+#[cfg(unix)]
+fn environment_shell() -> Option<String> {
+    std::env::var("SHELL").ok()
+}
+#[cfg(windows)]
+fn environment_shell() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn platform_shell() -> String {
+    "/bin/sh".into()
+}
+#[cfg(windows)]
+fn platform_shell() -> String {
+    std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
 }
 
 #[cfg(test)]

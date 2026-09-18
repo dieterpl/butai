@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! End-to-end tests over a real Unix socket: the daemon accept loop, JSON
 //! framing, handshake, detach/reattach, and kill-server — driven exactly
 //! the way a third-party client would.

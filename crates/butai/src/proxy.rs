@@ -13,7 +13,7 @@ pub fn run(socket: &std::path::Path) -> Result<()> {
     let socket = socket.to_path_buf();
     let result = rt.block_on(async move {
         let stream = butai_client::conn::connect_or_spawn(&socket).await?;
-        let (mut sock_read, mut sock_write) = stream.into_split();
+        let (mut sock_read, mut sock_write) = tokio::io::split(stream);
         let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
 

@@ -25,8 +25,8 @@ butai --version
 ```
 
 Other routes — a release tarball, `cargo install`, pinning a version — are in
-the [README](../README.md#install). Linux and macOS only; Windows is a
-documented non-goal, though butai runs under WSL2 as an ordinary Linux binary.
+the [README](../README.md#install). For the beta native Windows TUI,
+see [Windows support](windows.md). WSL2 can also use the Linux binary.
 
 > **Nothing happened when you ran it?** If `butai` is not found, the install
 > directory is not on your `PATH`. See

@@ -18,9 +18,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use butai_protocol::local::LocalListener as UnixListener;
 use butai_protocol::AttachTarget;
 use butai_server::config::Config;
-use tokio::net::UnixListener;
 
 pub fn run(target: AttachTarget) -> Result<()> {
     // No shared socket, so there is no "different daemon" this could

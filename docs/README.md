@@ -81,3 +81,5 @@ A new page is not discoverable until it is listed on this index.
 Other clients — GUI apps, or products embedding the daemon — live in their own
 repositories and speak this same protocol over a socket. Nothing in them is
 required to use butai, and nothing here depends on them.
+
+Native Windows build and current platform limits: [windows.md](windows.md).

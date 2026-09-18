@@ -9,6 +9,7 @@ pub mod conn;
 pub mod daemon;
 pub mod dial;
 pub mod git_menu;
+pub mod glyphs;
 pub mod graph;
 pub mod hit;
 pub mod keymap;
@@ -20,6 +21,10 @@ pub mod selection;
 pub mod ssh;
 pub mod ssh_config;
 pub mod syntax;
+#[cfg(unix)]
+pub mod term;
+#[cfg(windows)]
+#[path = "term_windows.rs"]
 pub mod term;
 pub mod theme;
 pub mod tui;

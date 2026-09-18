@@ -2620,6 +2620,7 @@ pub struct View {
     /// same kind of thing: a configured fact about the chrome that the drawing
     /// has to read on every frame.
     pub links: bool,
+    pub glyphs: crate::glyphs::Glyphs,
     /// Which workspace's tab is active.
     pub tab: usize,
     /// Animation phases: the slow one drives marquees, the fast one sprites.
@@ -2709,6 +2710,7 @@ impl Default for View {
             net: NetSelect::default(),
             disks: DiskSelect::default(),
             links: true,
+            glyphs: crate::glyphs::Glyphs::default(),
             geom: crate::chrome::default_geom(),
             tab: 0,
             tick: 0,

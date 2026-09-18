@@ -29,6 +29,7 @@ const FG_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Cap on a rendered command line, so a pathological argv never becomes a
 /// megabyte-long marquee.
+#[cfg(any(unix, test))]
 const FG_MAX: usize = 512;
 
 /// ...but only once the burst has been *streaming* for at least this long.
@@ -228,6 +229,8 @@ pub struct TerminalPane {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    #[cfg(windows)]
+    _command_script: Option<tempfile::TempPath>,
     /// Present until the child exits.
     exit_status: Option<u32>,
     command_label: String,
@@ -414,21 +417,52 @@ impl TerminalPane {
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .context("openpty")?;
 
+        #[cfg(windows)]
+        let mut command_script = None;
         let (mut cmd, label) = match spec.program {
             None => (CommandBuilder::new(spec.shell), shell_label(spec.shell)),
             Some(prog) if spec.via_shell => {
                 let mut c = CommandBuilder::new(spec.shell);
-                c.arg("-c");
+                shell_command_args(&mut c, spec.shell);
+                #[cfg(unix)]
                 c.arg(prog);
+                #[cfg(windows)]
+                {
+                    let name =
+                        Path::new(spec.shell).file_stem().unwrap_or_default().to_string_lossy();
+                    if name.eq_ignore_ascii_case("cmd") {
+                        // Keep raw shell syntax out of the PTY's CRT quoting.
+                        // A single batch-file path is safe for cmd /C, including
+                        // when the user's TEMP directory contains spaces.
+                        let mut script = tempfile::Builder::new()
+                            .prefix("butai-command-")
+                            .suffix(".cmd")
+                            .tempfile()?;
+                        script.write_all(
+                            format!("@echo off\r\nchcp 65001 >nul\r\n{prog}\r\n").as_bytes(),
+                        )?;
+                        let path = script.into_temp_path();
+                        c.arg(&path);
+                        command_script = Some(path);
+                    } else if name.eq_ignore_ascii_case("powershell")
+                        || name.eq_ignore_ascii_case("pwsh")
+                    {
+                        // EncodedCommand preserves embedded quotes and Unicode.
+                        c = CommandBuilder::new(spec.shell);
+                        c.args(["-NoLogo", "-EncodedCommand"]);
+                        let bytes: Vec<u8> =
+                            prog.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                        c.arg(butai_protocol::b64::encode(&bytes));
+                    } else {
+                        c.arg(prog);
+                    }
+                }
                 // The whole command, not just its first word: a row reading
                 // "sudo" says far less than "sudo apt-get update -y".
                 (c, prog.to_string())
             }
             Some(prog) => {
-                let mut c = CommandBuilder::new(resolve_program(prog));
-                for a in spec.args {
-                    c.arg(a);
-                }
+                let c = program_command(prog, spec.args);
                 // Label with what was asked for, not where it was found: the
                 // rail should say `claude`, not a 60-character nvm path.
                 (c, prog.to_string())
@@ -506,6 +540,8 @@ impl TerminalPane {
             master: pair.master,
             writer,
             killer,
+            #[cfg(windows)]
+            _command_script: command_script,
             exit_status: None,
             command_label: label,
             label_fixed,
@@ -961,6 +997,7 @@ impl TerminalPane {
         // `process_group_leader` yields a `libc::pid_t`, which is `i32` on every
         // target with a `read_argv` body — naming the libc type here would break
         // Linux, where butai-server has no libc dependency.
+        #[cfg(unix)]
         let fresh = self
             .master
             .process_group_leader()
@@ -968,6 +1005,8 @@ impl TerminalPane {
             .and_then(read_argv)
             .filter(|argv| !is_self(argv))
             .and_then(display_argv);
+        #[cfg(windows)]
+        let fresh = None;
         self.fg_cache = Some((std::time::Instant::now(), fresh.clone()));
         fresh
     }
@@ -982,6 +1021,7 @@ impl TerminalPane {
     ///
     /// `None` when the foreground process is not ssh, which is the case worth
     /// falling back for: the announcement carries a `user@host` hint too.
+    #[cfg(unix)]
     pub fn ssh_dial_back(&self) -> Option<(Vec<String>, String)> {
         let argv = self.master.process_group_leader().and_then(read_argv)?;
         let program = std::path::Path::new(argv.first()?).file_name()?.to_str()?;
@@ -1212,6 +1252,7 @@ fn login_bin_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
 ///
 /// Returns an absolute path when the fallback finds one, otherwise `prog`
 /// unchanged so the caller's error names what was asked for.
+#[cfg(unix)]
 pub(crate) fn resolve_program(prog: &str) -> String {
     // A path, relative or absolute, is the user being explicit. Don't second-guess.
     if prog.contains('/') {
@@ -1284,11 +1325,13 @@ pub(crate) fn child_path() -> Option<std::ffi::OsString> {
 }
 
 /// Whether `prog` resolves against the current `PATH`.
+#[cfg(unix)]
 fn which_on_path(prog: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(prog)).find(|p| is_executable_file(p))
 }
 
+#[cfg(unix)]
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     // Follows symlinks, so an nvm shim pointing at a real binary still counts,
@@ -1306,6 +1349,7 @@ fn is_executable_file(p: &Path) -> bool {
 /// under a test harness the kernel's accounting name is the thread's, so the
 /// check missed and the rail showed a thread name. Comparing the group id is
 /// exact and needs no guessing.
+#[cfg(unix)]
 fn is_own_group(pgid: i32) -> bool {
     // `getpgrp` cannot fail and takes no argument on any Unix.
     pgid == rustix::process::getpgrp().as_raw_nonzero().get()
@@ -1320,6 +1364,7 @@ fn is_own_group(pgid: i32) -> bool {
 /// butai's own name, and the [`FG_TTL`] cache then holds that wrong label on
 /// screen for half a second. Matching on the executable's file name catches
 /// both the full-argv read and the short accounting-name fallback.
+#[cfg(unix)]
 fn is_self(argv: &[String]) -> bool {
     static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let exe = EXE.get_or_init(|| {
@@ -1339,6 +1384,7 @@ fn is_self(argv: &[String]) -> bool {
 /// Upper bound on the argv blob read back from the kernel. Linux allows a
 /// cmdline up to ARG_MAX (megabytes); the rail is 28 columns wide, so reading
 /// the whole thing twice a second would be pure waste.
+#[cfg(unix)]
 const ARGV_READ_MAX: usize = 16 * 1024;
 
 /// argv of `pid`, or `None` when the platform will not say. The syscall is kept
@@ -1463,7 +1509,7 @@ fn proc_name(pid: i32) -> Option<String> {
 
 /// Platforms with neither `/proc` nor `KERN_PROCARGS2`: a shell row simply keeps
 /// its configured name.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn read_argv(_pid: i32) -> Option<Vec<String>> {
     None
 }
@@ -1474,6 +1520,7 @@ fn read_argv(_pid: i32) -> Option<Vec<String>> {
 /// Tolerates a tail cut short by [`ARGV_READ_MAX`] — the complete arguments are
 /// kept. Compiled in on every platform so its tests run everywhere.
 #[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = buf.get(4..)?;
@@ -1496,6 +1543,7 @@ fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
 /// the trailing NUL would otherwise produce). Compiled in on every platform so
 /// its tests run everywhere; only the Linux reader uses it.
 #[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 fn split_nul(raw: &[u8]) -> Vec<String> {
     raw.split(|b| *b == 0)
         .filter(|s| !s.is_empty())
@@ -1505,6 +1553,7 @@ fn split_nul(raw: &[u8]) -> Vec<String> {
 
 /// Basenames that mean "a shell sitting at its prompt" rather than a command
 /// worth naming a row after.
+#[cfg(any(unix, test))]
 const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"];
 
 /// Render argv as a rail label, or `None` when it is just the login shell
@@ -1514,6 +1563,7 @@ const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "tcsh", "ks
 /// ("/bin/sh"), so both the dash and the directory are stripped before
 /// matching. Only a shell invoked with nothing but flags counts as idle:
 /// `zsh build.sh` and `sh -c 'make'` are real commands.
+#[cfg(any(unix, test))]
 fn display_argv(argv: Vec<String>) -> Option<String> {
     let arg0 = argv.first()?;
     let base = Path::new(arg0)
@@ -1817,6 +1867,7 @@ fn scan_queries(buf: &[u8]) -> (Vec<(usize, Query)>, usize) {
 
 /// ssh options that consume the next argument. Anything else beginning with
 /// `-` is a flag, and the first argument that is neither is the destination.
+#[cfg(unix)]
 const SSH_VALUE_OPTS: &[char] = &[
     'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l', 'm', 'O', 'o', 'P', 'p', 'Q', 'R', 'S',
     'W', 'w',
@@ -1829,6 +1880,7 @@ const SSH_VALUE_OPTS: &[char] = &[
 /// newline-translate it. `-N` and `-f` say "run no command" and "go to the
 /// background", and we are dialling precisely in order to run one in the
 /// foreground.
+#[cfg(unix)]
 const SSH_DROP_FLAGS: &[char] = &['t', 'T', 'N', 'f'];
 
 /// Split an ssh argument list into (flags, destination), dropping the remote
@@ -1836,6 +1888,7 @@ const SSH_DROP_FLAGS: &[char] = &['t', 'T', 'N', 'f'];
 ///
 /// Separated from [`TerminalPane::ssh_dial_back`] so it can be tested without a
 /// pty: the argument grammar is the fiddly part, not the `/proc` read.
+#[cfg(unix)]
 fn split_ssh_argv(args: &[String]) -> Option<(Vec<String>, String)> {
     let mut flags = Vec::new();
     let mut i = 0;
@@ -2006,6 +2059,119 @@ fn set_carry(carry: &mut Vec<u8>, tail: &[u8]) {
     carry.clear();
     if tail.len() <= 32 {
         carry.extend_from_slice(tail);
+    }
+}
+
+#[cfg(windows)]
+fn is_executable_file(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// Windows executable lookup includes npm's .cmd launchers via PATHEXT.
+#[cfg(windows)]
+pub(crate) fn windows_program(prog: &str) -> Option<PathBuf> {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let program = Path::new(prog);
+    let dirs: Vec<PathBuf> = if program.components().count() > 1 {
+        vec![PathBuf::new()]
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?).collect()
+    };
+    for dir in dirs {
+        let base = dir.join(program);
+        // npm writes an extensionless Unix shim alongside its .cmd wrapper.
+        // Resolve PATHEXT first so Windows never launches the Unix shim.
+        if program.extension().is_none() {
+            for extension in extensions.split(';').filter(|e| !e.is_empty()) {
+                let path = PathBuf::from(format!("{}{}", base.display(), extension));
+                if is_executable_file(&path) {
+                    return Some(path);
+                }
+            }
+        }
+        if is_executable_file(&base) {
+            return Some(base);
+        }
+    }
+    None
+}
+
+fn shell_command_args(command: &mut CommandBuilder, shell: &str) {
+    #[cfg(unix)]
+    {
+        let _ = shell;
+        command.arg("-c");
+    }
+    #[cfg(windows)]
+    {
+        let name = Path::new(shell).file_stem().unwrap_or_default().to_string_lossy();
+        if name.eq_ignore_ascii_case("cmd") {
+            command.args(["/D", "/C"]);
+        } else if name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh") {
+            command.args(["-NoLogo", "-Command"]);
+        } else {
+            command.arg("-c");
+        }
+    }
+}
+#[cfg(windows)]
+impl TerminalPane {
+    pub fn ssh_dial_back(&self) -> Option<(Vec<String>, String)> {
+        None
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn resolve_program(prog: &str) -> String {
+    windows_program(prog).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| prog.into())
+}
+
+#[cfg(unix)]
+fn program_command(prog: &str, args: &[String]) -> CommandBuilder {
+    let mut command = CommandBuilder::new(resolve_program(prog));
+    command.args(args);
+    command
+}
+#[cfg(windows)]
+fn program_command(prog: &str, args: &[String]) -> CommandBuilder {
+    let resolved = resolve_program(prog);
+    let extension = Path::new(&resolved).extension().unwrap_or_default().to_string_lossy();
+    if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+        // CreateProcess cannot execute batch files. PowerShell decodes the
+        // invocation without passing paths or argument quotes through the
+        // portable PTY's CRT command-line quoting a second time.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let script = format!(
+            "& {} {}; exit $LASTEXITCODE",
+            quote(&resolved),
+            args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
+        );
+        let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoLogo", "-NoProfile", "-EncodedCommand"]);
+        command.arg(butai_protocol::b64::encode(&bytes));
+        command
+    } else {
+        let mut command = CommandBuilder::new(resolved);
+        command.args(args);
+        command
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_resolve_tests {
+    use super::*;
+    use crate::testenv::EnvGuard;
+
+    #[test]
+    fn npm_commands_choose_the_windows_wrapper_over_the_unix_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("npm-agent");
+        let wrapper = dir.path().join("npm-agent.cmd");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        std::fs::write(&wrapper, "@echo off\r\n").unwrap();
+        let _guard = EnvGuard::set(&[("PATHEXT", ".EXE;.CMD")]);
+        assert_eq!(windows_program(shim.to_str().unwrap()), Some(wrapper));
     }
 }
 
@@ -2987,7 +3153,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod resolve_tests {
     use super::*;
     use crate::testenv::EnvGuard;

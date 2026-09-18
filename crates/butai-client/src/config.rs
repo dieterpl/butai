@@ -227,6 +227,8 @@ impl Default for General {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
+    /// Font-compatible graphics on Windows; Unicode on Unix.
+    pub glyphs: crate::glyphs::Glyphs,
     /// Width of the left rail (agents/processes/system) in cells.
     pub left_rail: Option<u16>,
     /// Width of the right (changes) rail in cells.
@@ -254,6 +256,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
+            glyphs: crate::glyphs::Glyphs::default(),
             left_rail: None,
             right_rail: None,
             procs_height: None,

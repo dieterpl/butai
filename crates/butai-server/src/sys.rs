@@ -401,13 +401,48 @@ fn sysctl_string(name: &str) -> Option<String> {
 }
 
 /// Platforms without a CPU/RAM sampler: the SYSTEM rail simply reads zero.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_cpu() -> Option<(u64, u64)> {
     None
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_ram_gb() -> Option<(f32, f32)> {
     None
+}
+
+#[cfg(windows)]
+fn read_cpu() -> Option<(u64, u64)> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let (mut idle, mut kernel, mut user): (FILETIME, FILETIME, FILETIME) =
+        unsafe { std::mem::zeroed() };
+    // Windows includes idle time in kernel time. Counters use 100ns units.
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    let total = ticks(kernel).saturating_add(ticks(user));
+    Some((total.saturating_sub(ticks(idle)), total))
+}
+#[cfg(windows)]
+fn read_ram_gb() -> Option<(f32, f32)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } == 0 {
+        return None;
+    }
+    let gib = 1024.0 * 1024.0 * 1024.0;
+    Some((
+        (memory.ullTotalPhys.saturating_sub(memory.ullAvailPhys) as f64 / gib) as f32,
+        (memory.ullTotalPhys as f64 / gib) as f32,
+    ))
+}
+#[cfg(windows)]
+fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
+    let threads =
+        std::thread::available_parallelism().ok().and_then(|n| u16::try_from(n.get()).ok());
+    (std::env::var("PROCESSOR_IDENTIFIER").ok(), None, threads)
 }
 
 /// One interface as the kernel currently reports it: cumulative byte counters
@@ -669,6 +704,7 @@ fn short_gpu_name(full: &str) -> String {
 /// The rail has fourteen cells beside the CPU value at the default width, so
 /// this is aggressive by design: the core count and the clock are already on
 /// screen or not worth the room, and the marketing words never were.
+#[cfg(any(unix, test))]
 fn short_cpu_name(full: &str) -> String {
     // Everything from the clock suffix on is noise: "CPU @ 2.60GHz".
     let head = full.split(" @ ").next().unwrap_or(full);
@@ -736,7 +772,7 @@ fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
     (model, cores, threads)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
     (None, None, None)
 }
@@ -797,6 +833,7 @@ fn read_swap_gb() -> (f32, f32) {
 /// from this list is still dropped further down by [`read_disks`]'s `total > 0`
 /// test. What naming them buys is not making the syscall at all — and on a
 /// systemd machine that is thirty-odd mounts per reading.
+#[cfg(any(unix, test))]
 fn disk_kind(fstype: &str, source: &str) -> Option<DiskKind> {
     const PSEUDO: &[&str] = &[
         "proc",
@@ -864,6 +901,7 @@ fn disk_kind(fstype: &str, source: &str) -> Option<DiskKind> {
 
 /// One `statvfs` result as `(used, total)` GiB, or `None` for a filesystem
 /// with no capacity to report.
+#[cfg(unix)]
 fn vfs_gb(vfs: &rustix::fs::StatVfs) -> Option<(f32, f32)> {
     // `f_frsize` is the fragment size, and the unit `f_blocks` and `f_bavail`
     // are counted in. `f_bsize` is the *preferred I/O* size and is not the same
@@ -904,7 +942,13 @@ async fn statvfs_sweep(mounts: Vec<String>) -> Vec<Option<(f32, f32)>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_blocking(move || {
         for (i, m) in mounts.iter().enumerate() {
+            #[cfg(unix)]
             let cap = rustix::fs::statvfs(m.as_str()).ok().as_ref().and_then(vfs_gb);
+            #[cfg(windows)]
+            let cap = {
+                let _ = m;
+                None
+            };
             // The sampler stopped waiting; nothing left to report to.
             if tx.send((i, cap)).is_err() {
                 return;
@@ -1188,7 +1232,7 @@ async fn read_disks(
 async fn read_gpu_nvidia() -> Vec<GpuReading> {
     let out = tokio::time::timeout(
         Duration::from_secs(1),
-        tokio::process::Command::new("nvidia-smi")
+        butai_protocol::local::background_async_command("nvidia-smi")
             .args([
                 "--query-gpu=utilization.gpu,memory.used,memory.total,name,temperature.gpu,power.draw",
                 "--format=csv,noheader,nounits",
@@ -1262,7 +1306,7 @@ fn amd_hwmon_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 async fn read_docker() -> Option<Vec<Container>> {
     let out = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::process::Command::new("docker")
+        butai_protocol::local::background_async_command("docker")
             .args([
                 "ps",
                 "-a",
@@ -1302,10 +1346,9 @@ async fn read_docker() -> Option<Vec<Container>> {
 mod tests {
     use super::*;
 
-    // Both Linux (procfs) and macOS (mach) have a real sampler; other targets
-    // read zero and are skipped.
+    // Linux (procfs), macOS (Mach) and Windows (Win32) have real samplers.
     #[test]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn cpu_and_ram_readable() {
         let (busy, total) = read_cpu().expect("cpu counters readable");
         assert!(total >= busy);

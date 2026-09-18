@@ -534,6 +534,7 @@ pub async fn run(
     view.net = config.ui.net.clone();
     view.disks = config.ui.disks.clone();
     view.links = config.ui.links;
+    view.glyphs = config.ui.glyphs;
     if !key_warnings.is_empty() {
         // A mistyped binding used to be a log line on the daemon. It is the
         // user's own config and the reason a key does nothing, so it says so.
@@ -10195,7 +10196,7 @@ fn paint(
     // It costs nothing: this is queued with the cells and flushed once, so the
     // terminal sees hide, draw and show as a single write.
     queue!(out, cursor::Hide)?;
-    write_cells(&mut out, &diff, &links, view.links)?;
+    write_cells(&mut out, &diff, &links, view.links, view.glyphs)?;
     // Put it back, or leave it hidden — a pane with no cursor of its own must
     // not leave one of this terminal's parked at the end of the last cell the
     // diff happened to touch.
@@ -10298,6 +10299,7 @@ fn write_cells(
     diff: &[(u16, u16, &ratatui::buffer::Cell)],
     links: &links::ScreenLinks,
     marked_up: bool,
+    glyphs: crate::glyphs::Glyphs,
 ) -> Result<()> {
     // The style the terminal is currently in, so a run of cells that share one
     // costs a single SGR. Restoring it is not an optimisation here — writing
@@ -10331,7 +10333,7 @@ fn write_cells(
         // the row shifts left.
         match cell.symbol() {
             "" => out.write_all(b" ")?,
-            s => out.write_all(s.as_bytes())?,
+            s => out.write_all(glyphs.display(s).as_bytes())?,
         }
     }
     // Never leave one open: the next thing written to this terminal is the
@@ -12613,8 +12615,10 @@ name = \"terminal\"
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("temp dir");
         let sockets: Vec<PathBuf> = (0..6).map(|i| dir.join(format!("{i}.sock"))).collect();
-        let _listeners: Vec<tokio::net::UnixListener> =
-            sockets.iter().map(|s| tokio::net::UnixListener::bind(s).expect("bind")).collect();
+        let _listeners: Vec<butai_protocol::local::LocalListener> = sockets
+            .iter()
+            .map(|s| butai_protocol::local::LocalListener::bind(s).expect("bind"))
+            .collect();
 
         let bound = Duration::from_millis(200);
         let started = Instant::now();
@@ -14009,7 +14013,7 @@ name = \"terminal\"
         let diff = before.diff(&after);
 
         let mut out: Vec<u8> = Vec::new();
-        write_cells(&mut out, &diff, &map, true).expect("write");
+        write_cells(&mut out, &diff, &map, true, crate::glyphs::Glyphs::Unicode).expect("write");
         let bytes = String::from_utf8(out).expect("utf-8");
         let id = format!("{:x}", links::id_of("https://example.com"));
 
@@ -14024,7 +14028,8 @@ name = \"terminal\"
         // `[ui] links = false` writes the same cells and no sequences at all.
         before = Buffer::empty(Rect::new(0, 0, 24, 1));
         let mut plain: Vec<u8> = Vec::new();
-        write_cells(&mut plain, &before.diff(&after), &map, false).expect("write");
+        write_cells(&mut plain, &before.diff(&after), &map, false, crate::glyphs::Glyphs::Unicode)
+            .expect("write");
         let plain = String::from_utf8(plain).expect("utf-8");
         assert!(!plain.contains("\x1b]8"), "{plain:?}");
         assert!(plain.contains("https://example.com".chars().next().unwrap()), "{plain:?}");

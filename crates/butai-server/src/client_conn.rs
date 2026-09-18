@@ -4,9 +4,9 @@
 //! both sides use the encoding the client's Hello negotiated.
 
 use butai_protocol::framing::{decode, encode, length_codec, MAX_CONSECUTIVE_BAD_FRAMES};
+use butai_protocol::local::LocalStream as UnixStream;
 use butai_protocol::{ClientMsg, Encoding, ServerMsg};
 use futures::{SinkExt, StreamExt};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::codec::Framed;
@@ -15,24 +15,37 @@ use tracing::{debug, warn};
 use crate::core::{ClientId, Event};
 
 pub async fn handle_connection(stream: UnixStream, id: ClientId, events: UnboundedSender<Event>) {
-    // Same socket, two protocols: a framed hello always starts with the top
-    // byte of a 4-byte big-endian length prefix (`0x00`), while an HTTP
-    // request starts with an ASCII method letter. Peek one byte without
-    // consuming it (MSG_PEEK — UnixStream has no async peek) to route.
-    let first = loop {
-        if stream.readable().await.is_err() {
-            return;
-        }
-        let mut probe = [0u8; 1];
-        match rustix::net::recv(&stream, &mut probe, rustix::net::RecvFlags::PEEK) {
-            Ok(0) => return, // closed before sending anything
-            Ok(_) => break probe[0],
-            Err(rustix::io::Errno::WOULDBLOCK) | Err(rustix::io::Errno::INTR) => continue,
-            Err(e) => {
-                debug!("client {id}: peek failed: {e}");
+    #[cfg(unix)]
+    let first = {
+        // Same socket, two protocols: a framed hello always starts with the top
+        // byte of a 4-byte big-endian length prefix (`0x00`), while an HTTP
+        // request starts with an ASCII method letter. Peek one byte without
+        // consuming it (MSG_PEEK — UnixStream has no async peek) to route.
+        loop {
+            if stream.readable().await.is_err() {
                 return;
             }
+            let mut probe = [0u8; 1];
+            match rustix::net::recv(&stream, &mut probe, rustix::net::RecvFlags::PEEK) {
+                Ok(0) => return, // closed before sending anything
+                Ok(_) => break probe[0],
+                Err(rustix::io::Errno::WOULDBLOCK) | Err(rustix::io::Errno::INTR) => continue,
+                Err(e) => {
+                    debug!("client {id}: peek failed: {e}");
+                    return;
+                }
+            }
         }
+    };
+    #[cfg(windows)]
+    let (first, stream) = {
+        // Buffer the protocol discriminator and replay it to the selected decoder.
+        // This works for both Unix sockets and Windows named pipes.
+        use tokio::io::AsyncReadExt;
+        let mut stream = stream;
+        let Ok(first) = stream.read_u8().await else { return };
+        let stream = butai_protocol::local::Prefixed::new(first, stream);
+        (first, stream)
     };
     if first != 0 {
         crate::http_conn::handle(stream, events).await;

@@ -446,7 +446,7 @@ fn update_daemon(socket: &std::path::Path, out: &Out, assume_yes: bool) -> Resul
 fn confirm_update() -> Result<bool> {
     use std::io::BufRead;
 
-    if !rustix::termios::isatty(std::io::stdin()) {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         anyhow::bail!("not a terminal — pass --yes to install without asking");
     }
     eprint!("install it? [y/N] ");
@@ -466,7 +466,7 @@ fn confirm_update() -> Result<bool> {
 fn confirm_daemon_update(socket: &std::path::Path) -> Result<bool> {
     use std::io::BufRead;
 
-    if !rustix::termios::isatty(std::io::stdin()) {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         anyhow::bail!("not a terminal — pass --yes to update without asking");
     }
     eprintln!("this updates the daemon on {}, not this binary", socket.display());

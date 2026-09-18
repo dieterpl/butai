@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use anyhow::{Context, Result};
+use butai_protocol::local::LocalListener as UnixListener;
 use butai_protocol::paths;
-use rustix::fs::{flock, FlockOperation};
-use tokio::net::UnixListener;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing::info;
 
@@ -43,7 +42,7 @@ pub fn run(socket_path: &Path) -> Result<()> {
             .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("open {}", lock_path.display()))?;
-        flock(&lock_file, FlockOperation::NonBlockingLockExclusive)
+        butai_protocol::local::try_lock_exclusive(&lock_file)
             .map_err(|_| anyhow::anyhow!("another butai daemon is already running"))?;
 
         // We hold the lock: any existing socket file is stale.
@@ -92,6 +91,7 @@ pub fn run(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn restrict_dir_permissions(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o700);
@@ -167,8 +167,20 @@ pub async fn serve(
 
     // Wait for the core to finish (last session died / kill-server), or for
     // a termination signal, whichever first.
+    #[cfg(unix)]
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let termination = async {
+        #[cfg(unix)]
+        match sigterm.as_mut() {
+            Some(signal) => {
+                signal.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+        #[cfg(windows)]
+        std::future::pending::<()>().await;
+    };
     tokio::pin!(core_task);
     let restart_into = tokio::select! {
         r = &mut core_task => r.ok().flatten(),
@@ -177,7 +189,7 @@ pub async fn serve(
             let _ = event_tx.send(Event::Shutdown);
             core_task.await.ok().flatten()
         }
-        _ = async { match sigterm.as_mut() { Some(s) => { s.recv().await; } None => std::future::pending().await } } => {
+        _ = termination => {
             info!("SIGTERM: shutting down");
             let _ = event_tx.send(Event::Shutdown);
             core_task.await.ok().flatten()
@@ -192,4 +204,9 @@ pub async fn serve(
         tokio::time::sleep(RESTART_GRACE).await;
     }
     restart_into
+}
+
+#[cfg(windows)]
+fn restrict_dir_permissions(_dir: &Path) -> Result<()> {
+    Ok(())
 }
