@@ -54,6 +54,7 @@ async fn windows_daemon_runs_commands_and_batch_agents_over_both_protocols() {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("butai.sock");
     let store = tmp.path().join("session.json");
+    std::fs::write(tmp.path().join("butai-cwd-marker.txt"), "PROJECT_DIRECTORY_OK\r\n").unwrap();
     // A space in the path catches CreateProcess/CRT quoting regressions.
     let agent = tmp.path().join("fake agent.cmd");
     std::fs::write(
@@ -92,11 +93,11 @@ async fn windows_daemon_runs_commands_and_batch_agents_over_both_protocols() {
         &socket,
         "POST",
         &format!("/v1/workspaces/1/panes/{shell}/input"),
-        serde_json::json!({"paste":"echo CWD_%CD%\r"}),
+        serde_json::json!({"paste":"type butai-cwd-marker.txt\r"}),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    output_until(&socket, shell, &format!("CWD_{}", tmp.path().display())).await;
+    output_until(&socket, shell, "PROJECT_DIRECTORY_OK").await;
     let (status, body) =
         http(&socket, "POST", "/v1/workspaces/1/agents", serde_json::json!({"type":"fake"})).await;
     assert_eq!(status, 200, "{body}");

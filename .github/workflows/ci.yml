@@ -77,8 +77,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show && rustup component add clippy
+      - uses: actions/cache/restore@v4
+        id: windows-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-native-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: windows-native-cargo-${{ hashFiles('**/Cargo.lock') }}-
       - name: Build
         run: cargo build --workspace
+      - name: ConPTY and daemon smoke test
+        run: cargo test -p butai-server --test e2e_windows
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features
       - name: IPC tests
@@ -88,8 +99,6 @@ jobs:
           cargo test -p butai-client glyphs::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p butai-client --test windows_console
-      - name: ConPTY and daemon smoke test
-        run: cargo test -p butai-server --test e2e_windows
       - name: Windows executable lookup
         run: cargo test -p butai-server windows_resolve_tests
       - name: Native workspace search
@@ -127,6 +136,15 @@ jobs:
           name: butai-windows-beta-${{ github.sha }}
           path: dist/windows-beta/
           if-no-files-found: error
+      # Retain compiled dependencies even when a runtime assertion fails.
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.windows-cache.outcome == 'success' && steps.windows-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.windows-cache.outputs.cache-primary-key }}
 
   targets:
     # The release matrix rots quietly: a dependency picks up a C library, or a
