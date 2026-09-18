@@ -44,27 +44,9 @@ use crate::selection::{self, Drag};
 
 /// Marquee clock. Slow enough that a scrolling title is readable.
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
-/// Sprite clock, gated on something actually animating.
-const FAST_TICK: std::time::Duration = std::time::Duration::from_millis(120);
-/// The one repaint nothing on screen asked for.
-///
-/// Both clocks above only repaint when the last frame said it had drawn
-/// something that moves, which is right for everything that moves and wrong for
-/// one thing that does not. An agent's sprite wears its age on its head — `o`
-/// under five minutes, then `0`, `O`, `@` — and that glyph is a reading of the
-/// wall clock with nothing animating and no event behind it. It changes three
-/// times in an agent's life and the screen would otherwise not hear about it.
-///
-/// So this is that glyph's clock, and nothing else's. Five seconds against a
-/// five-*minute* threshold: the exact answer is for the renderer to hand back
-/// the deadline of the next change it knows is coming and for the loop to sleep
-/// until then, which is a considerable machine to be a few seconds early with a
-/// lowercase `o`.
-///
-/// **Do not speed this up to cover something new.** Anything that changes
-/// faster than this belongs in [`chrome::Painted`], which is how the marquee,
-/// the sprites, the working spinner and the USAGE page's countdowns all say so
-/// — and how they say it only while they are on screen.
+/// Loading indicator clock, gated on something actually animating.
+const FAST_TICK: std::time::Duration = std::time::Duration::from_millis(1200);
+/// Occasional refresh for time-dependent labels, separate from animation.
 const HEARTBEAT: Duration = Duration::from_secs(5);
 
 /// Which of the three clocks that repaint for the screen's own sake woke the
@@ -2666,23 +2648,8 @@ pub async fn run(
                 view.tick = view.tick.wrapping_add(1);
                 dirty |= repaint_on_tick(last_frame, Clock::Slow);
             }
-            // Sprites were never repainted by this arm at all: it advanced the
-            // phase and set nothing, so the fleet's typing hands were only ever
-            // *drawn* by the 250ms clock and every second frame of the cycle
-            // went past unseen. Animating them at the 120ms they were written
-            // for is the one thing here that paints more often than before, and
-            // the only thing in this change that costs rather than saves.
-            //
-            // It was measured before it was kept, because "correct animation"
-            // is not on its own an argument for doubling a paint rate. One
-            // whole frame — compose, blit, scan the screen for URLs, diff — at
-            // twelve agents over four projects, release build: 152us at 80x24,
-            // 295us at 120x35, 661us at 200x50. At 8.3Hz the widest of those is
-            // 0.55% of one core, against 0.27% at the 4Hz it used to alias down
-            // to, and only while BOOTH is open with an agent actually working.
-            // Half a percent of one core, in an attended state, is not the load
-            // anyone reported; 240 unconditional repaints a minute on every
-            // page, idle, forever, is what was.
+            // Quiet loading dots advance every 1.2 seconds, only repainting
+            // while an animated status is actually visible.
             _ = fast.tick() => {
                 view.fast_tick = view.fast_tick.wrapping_add(1);
                 dirty |= repaint_on_tick(last_frame, Clock::Fast);
@@ -7489,16 +7456,10 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 /// index and resolve `view.booth_sel` when they run, so a click and the act it
 /// asks for cannot come to name two different rows.
 ///
-/// **And every branch leaves the keyboard on the fleet, `[+ claude]` included.**
-/// That press does end with the keyboard in the new agent's pane — but not from
-/// here, and not yet: the pane has no fleet row for a pass or two after the
-/// spawn, and [`follow_new_agent`] hands the focus over at the same instant it
-/// moves the cursor onto that row, because the two are one act. Handing it over
-/// here as well would be this function guessing at an outcome it does not know:
-/// a spawn that fails, or an agent that dies before it is ever listed, would
-/// leave the keyboard pointed at a sibling agent nobody asked for. The fleet
-/// keeps it in the meantime, which is where the click found it.
-fn fleet_click(hit: hit::FleetHit, view: &mut View) -> Flow {
+/// Clicking an agent's text hands its preview the keyboard immediately.
+/// Machine/project selection and explicit controls keep focus on the fleet;
+/// spawning transfers focus only once the new agent has actually arrived.
+fn fleet_click(hit: hit::FleetHit, agent_row: bool, view: &mut View) -> Flow {
     let (row, flow) = match hit {
         hit::FleetHit::Row(row) => (row, Flow::Continue),
         hit::FleetHit::Open(row) => (row, Flow::OpenFleetRow),
@@ -7507,7 +7468,11 @@ fn fleet_click(hit: hit::FleetHit, view: &mut View) -> Flow {
         hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
     };
     view.booth_sel = row;
-    view.focus = Focus::AllAgents;
+    view.focus = if agent_row && matches!(hit, hit::FleetHit::Row(_)) {
+        Focus::Stage
+    } else {
+        Focus::AllAgents
+    };
     flow
 }
 
@@ -8574,6 +8539,17 @@ fn handle_input(
     cols: &mut u16,
     rows: &mut u16,
 ) -> Flow {
+    // A double-click belongs to one uninterrupted mouse gesture. Keyboard
+    // input, scrolling, dragging, modifiers and modal changes cancel it.
+    if view.overlay.is_some()
+        || !matches!(&ev,
+        event::Event::Mouse(m) if m.modifiers.is_empty() && matches!(m.kind,
+            event::MouseEventKind::Down(event::MouseButton::Left)
+            | event::MouseEventKind::Up(event::MouseButton::Left)
+            | event::MouseEventKind::Moved))
+    {
+        view.fleet_clicks.clear();
+    }
     let counts = rail_counts(daemons, hosts, view);
     let tab_count = tab_index(daemons, hosts).len();
     match ev {
@@ -8663,8 +8639,29 @@ fn handle_input(
                         // agent titles and the machines they are on is one of
                         // the more useful ones to be able to quote.
                         drag.press(view, *cols, *rows, m.column, m.row, metrics);
-                        return fleet_click(fleet_hit, view);
+                        let tree = chrome::booth_rows(&fleet_spaces, &fleet_machines, &view.folds);
+                        let key = match fleet_hit {
+                            hit::FleetHit::Row(row) => hit::FleetClickKey::of(tree.get(row)),
+                            _ => None,
+                        };
+                        let double = view.fleet_clicks.press(
+                            key,
+                            (m.column, m.row),
+                            std::time::Instant::now(),
+                        );
+                        let fleet_hit = match fleet_hit {
+                            hit::FleetHit::Row(row) if double => hit::FleetHit::Fold(row),
+                            other => other,
+                        };
+                        let agent_row = match fleet_hit {
+                            hit::FleetHit::Row(row) => {
+                                matches!(tree.get(row), Some(chrome::BoothRow::Agent { .. }))
+                            }
+                            _ => false,
+                        };
+                        return fleet_click(fleet_hit, agent_row, view);
                     }
+                    view.fleet_clicks.clear();
                     // COMPUTE's blocks, on the same terms and for the same
                     // reason: they are per-machine rows assembled from every
                     // daemon, and `hit::at` answers `Nothing` for the whole of
@@ -13334,22 +13331,24 @@ name = \"terminal\"
     #[test]
     fn clicking_a_fleet_row_twice_does_not_leave_the_booth() {
         let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
-        assert!(matches!(fleet_click(hit::FleetHit::Row(2), &mut view), Flow::Continue));
+        assert!(matches!(fleet_click(hit::FleetHit::Row(2), true, &mut view), Flow::Continue));
         assert_eq!(view.booth_sel, 2, "the click must still move the cursor and the preview");
+        assert_eq!(view.focus, Focus::Stage, "clicking a chat hands its pane the keyboard");
         // The second one on the same row is still a look, not a jump — which is
         // also what a double-click is, since a terminal has no such event.
-        assert!(matches!(fleet_click(hit::FleetHit::Row(2), &mut view), Flow::Continue));
+        assert!(matches!(fleet_click(hit::FleetHit::Row(2), true, &mut view), Flow::Continue));
         assert_eq!(view.page, Page::Booth, "a click on a row left BOOTH");
         // And the button is the one thing that travels.
-        assert!(matches!(fleet_click(hit::FleetHit::Open(2), &mut view), Flow::OpenFleetRow));
+        assert!(matches!(fleet_click(hit::FleetHit::Open(2), true, &mut view), Flow::OpenFleetRow));
         assert_eq!(view.booth_sel, 2, "and it aims at the row it was pressed on");
         // A project's name does not travel — it is text, and text on this
         // list looks. Its `[+]` does not travel either, which is the one act a
         // project row adds.
-        assert!(matches!(fleet_click(hit::FleetHit::Row(1), &mut view), Flow::Continue));
+        assert!(matches!(fleet_click(hit::FleetHit::Row(1), false, &mut view), Flow::Continue));
         assert_eq!(view.page, Page::Booth, "a project's name must not leave BOOTH");
+        assert_eq!(view.focus, Focus::AllAgents, "projects keep keyboard navigation on the fleet");
         assert!(matches!(
-            fleet_click(hit::FleetHit::New(1), &mut view),
+            fleet_click(hit::FleetHit::New(1), false, &mut view),
             Flow::NewFleetAgent { pick: false }
         ));
         assert_eq!(view.page, Page::Booth, "starting an agent must not move the page");
@@ -13608,7 +13607,7 @@ name = \"terminal\"
     fn the_fleet_close_button_asks_rather_than_closing() {
         let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
         assert!(matches!(
-            fleet_click(hit::FleetHit::Close(3), &mut view),
+            fleet_click(hit::FleetHit::Close(3), false, &mut view),
             Flow::AskCloseFleetSpace
         ));
         assert_eq!(view.booth_sel, 3, "and it aims at the row it was pressed on");
@@ -15206,7 +15205,7 @@ name = \"terminal\"
 
         // The two are separately gated, and that is the point of there being
         // two: a title scrolling at 250ms must not pull the sprite clock up to
-        // 120ms behind it, and a sprite must not be held down to 250ms by a
+        // 1.2s behind it, and a sprite must not be held down to 250ms by a
         // screen with nothing scrolling on it.
         assert!(repaint_on_tick(scrolling, Clock::Slow));
         assert!(!repaint_on_tick(scrolling, Clock::Fast), "a marquee woke the sprite clock");
@@ -15221,25 +15220,11 @@ name = \"terminal\"
         }
     }
 
-    /// The heartbeat is measured against the only thing it exists for.
-    ///
-    /// It has no animation behind it and nothing on screen asks for it, so the
-    /// pressure on it is entirely one way: the next person to want a repaint
-    /// will reach for this number. What it is actually covering is the age glyph
-    /// on an agent's sprite, whose first threshold is five *minutes* — so it can
-    /// be two orders of magnitude slower than that and still be early, and it
-    /// must never drift back towards being a paint clock.
     #[test]
-    fn the_heartbeat_is_slow_against_the_glyph_it_exists_for() {
-        let first_threshold = Duration::from_secs(chrome::AGE_HEADS[0].0);
-        assert!(
-            HEARTBEAT * 20 <= first_threshold,
-            "{HEARTBEAT:?} is not comfortably inside {first_threshold:?}"
-        );
-        // And is a heartbeat rather than a frame rate: anything at the marquee's
-        // cadence is the unconditional repaint this replaced, wearing a new
-        // name.
-        assert!(HEARTBEAT >= Duration::from_secs(1), "{HEARTBEAT:?} is a paint clock");
+    fn time_label_refresh_is_not_an_animation_clock() {
+        assert!(HEARTBEAT >= Duration::from_secs(1));
+        assert!(HEARTBEAT <= Duration::from_secs(10));
+        assert_eq!(FAST_TICK, Duration::from_millis(1200));
     }
 
     /// A machine that is away costs one repaint a second, and a client with

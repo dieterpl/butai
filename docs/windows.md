@@ -117,5 +117,5 @@ Linux and macOS run the existing workspace regression suite.
 The `develop` CI run builds a native MSVC Windows executable and uploads a
 `butai-windows-tui-alpha-<commit>` artifact after its Windows tests pass. The ZIP
 contains `butai.exe`, `VERSION.txt`, `SHA256SUMS`, the license and this guide.
-The underlying build version is `1.3.0-dev.3.beta.1`, which sorts after `1.3.0-dev.2` on the
+The underlying build version is `1.3.0-dev.3.beta.2`, which sorts after `1.3.0-dev.2` on the
 development update channel. Tagged releases still build all supported targets.

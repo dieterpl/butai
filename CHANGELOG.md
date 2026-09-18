@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BOOTH controls and statuses (`1.3.0-dev.3.beta.2`).** A faint tree spine
+  connects machines, projects and agents. Collapsed COMPUTE machines use one
+  summary line; expanding reuses the SYSTEM gauge stack. Double-click a machine
+  or project name to fold/unfold its children. Clicking an agent chat or tray
+  entry gives its preview keyboard focus. Simple status marks replace the
+  animated figures, with working dots advancing every 1.2 seconds.
+
 - Removed the Windows web launcher. Native Windows TUI downloads are labelled
   experimental alpha following reports of frequent crashes; Windows CI and
   the existing Unix web bridge remain supported.

@@ -192,8 +192,10 @@ folded) and all. It used to be six, and the reason given was that the rest of th
 rails' table is about a project and this page is not in one — which stopped being
 true when its rows became projects.
 
-The NEEDS YOU tray answers the pointer as the fleet does — a click puts the
-cursor on the row the copy stands for. An agent folded away inside its project
+Clicking an agent in FLEET or NEEDS YOU selects its preview and gives the stage
+keyboard focus. Clicking a machine/project keeps focus on the fleet; double-click
+its name within 400ms to fold/unfold it. The chevron and `z` also fold/unfold.
+The NEEDS YOU tray moves the cursor to the row the copy stands for. An agent folded away inside its project
 has no row to move to, so its copy names nothing rather than selecting whatever
 sits at that index; the tray is still the shortest way to it, through unfolding.
 

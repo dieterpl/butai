@@ -368,7 +368,15 @@ pub fn on_fleet(
             }
             Some(FleetHit::Fold(row))
         }
-        chrome::BoothRow::Machine { .. } => Some(FleetHit::Fold(row)),
+        chrome::BoothRow::Machine { label, agents, .. } => {
+            let (start, end) = chrome::fleet_machine_name_span(c.fleet_rows, *agents);
+            let drawn = (label.chars().count() as u16).min(end.saturating_sub(start));
+            Some(if x >= start && x < start + drawn {
+                FleetHit::Row(row)
+            } else {
+                FleetHit::Fold(row)
+            })
+        }
     }
 }
 
@@ -428,6 +436,60 @@ pub enum FleetHit {
     Close(usize),
     /// A machine or project row, off its name and off its button: fold it.
     Fold(usize),
+}
+
+/// Stable identity of a foldable fleet row, independent of scrolling, names
+/// or agent status changes. Workspace ids are qualified by daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FleetClickKey {
+    Machine(usize),
+    Space(usize, butai_protocol::SessionId),
+}
+
+impl FleetClickKey {
+    pub(crate) fn of(row: Option<&chrome::BoothRow<'_>>) -> Option<Self> {
+        match row? {
+            chrome::BoothRow::Machine { daemon, .. } => Some(Self::Machine(*daemon)),
+            chrome::BoothRow::Space { space, .. } => Some(Self::Space(space.daemon, space.id)),
+            chrome::BoothRow::Agent { .. } => None,
+        }
+    }
+}
+
+/// Terminal mouse events have no double-click variant. Pair only two nearby
+/// presses on the same identity within 400ms, then consume the pair.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FleetClicks {
+    previous: Option<(FleetClickKey, (u16, u16), std::time::Instant)>,
+}
+
+impl FleetClicks {
+    pub(crate) fn clear(&mut self) {
+        self.previous = None;
+    }
+
+    pub(crate) fn press(
+        &mut self,
+        key: Option<FleetClickKey>,
+        position: (u16, u16),
+        now: std::time::Instant,
+    ) -> bool {
+        let old = self.previous.take();
+        let Some(key) = key else {
+            return false;
+        };
+        if let Some((previous, (x, y), time)) = old {
+            if key == previous
+                && position.1 == y
+                && position.0.abs_diff(x) <= 2
+                && now.saturating_duration_since(time) <= std::time::Duration::from_millis(400)
+            {
+                return true;
+            }
+        }
+        self.previous = Some((key, position, now));
+        false
+    }
 }
 
 /// Rows inside the CHANGES rail: the list, then the verb row(s) pinned to the
@@ -675,6 +737,35 @@ mod tests {
 
     const COLS: u16 = 120;
     const ROWS: u16 = 40;
+    #[test]
+    fn double_click_requires_same_identity_nearby_position_and_deadline() {
+        use butai_protocol::SessionId;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let a = Some(FleetClickKey::Space(0, SessionId(1)));
+        let b = Some(FleetClickKey::Space(1, SessionId(1)));
+        let mut clicks = FleetClicks::default();
+        assert!(!clicks.press(a, (10, 5), start));
+        assert!(clicks.press(a, (11, 5), start + Duration::from_millis(200)));
+        assert!(!clicks.press(a, (10, 5), start + Duration::from_millis(250)), "consume pairs");
+        assert!(!clicks.press(b, (10, 5), start + Duration::from_millis(300)), "qualify daemon");
+        assert!(
+            !clicks.press(b, (10, 5), start + Duration::from_millis(800)),
+            "slow clicks select"
+        );
+        assert!(!clicks.press(b, (10, 6), start + Duration::from_millis(850)), "row moved");
+        assert!(!clicks.press(b, (15, 6), start + Duration::from_millis(900)), "pointer moved");
+        clicks.clear();
+        assert!(!clicks.press(b, (15, 6), start + Duration::from_millis(950)));
+        assert!(
+            !clicks.press(None, (15, 6), start + Duration::from_millis(1000)),
+            "actions cancel"
+        );
+        assert!(!clicks.press(b, (15, 6), start + Duration::from_millis(1050)));
+        assert!(clicks.press(b, (15, 6), start + Duration::from_millis(1100)));
+        assert_eq!(FleetClickKey::of(None), None);
+    }
+
     /// A wide terminal, where every tab-bar control has room.
     const WIDE: u16 = 200;
 
@@ -796,6 +887,13 @@ mod tests {
         let tabs: [Tab<'_>; 0] = [];
         let geom = chrome::page_geom(WIDE, ROWS, &view);
         let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
+
+        let (name_x, _) = chrome::fleet_machine_name_span(c.fleet_rows, 2);
+        assert_eq!(
+            on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, name_x, c.fleet_rows.y),
+            Some(FleetHit::Row(0)),
+            "machine names must select first, so a double-click folds only once",
+        );
 
         let mut seen = Vec::new();
         for y in c.fleet_rows.y..c.fleet_rows.y + c.fleet_rows.height {
