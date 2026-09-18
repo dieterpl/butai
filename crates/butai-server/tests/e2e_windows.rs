@@ -33,7 +33,15 @@ async fn output_until(socket: &Path, pane: u64, needle: &str) {
         )
         .await;
         assert_eq!(status, 200, "{body}");
-        if body.contains(needle) {
+        let output: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let lines = output["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if lines.contains(needle) {
             return;
         }
         assert!(tokio::time::Instant::now() < deadline, "missing {needle}: {body}");
@@ -74,6 +82,21 @@ async fn windows_daemon_runs_commands_and_batch_agents_over_both_protocols() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
+    // The workspace's initial shell must stay in the project even though the
+    // daemon canonicalizes its directory to a Windows verbatim path.
+    let (_, body) =
+        http(&socket, "GET", "/v1/workspaces/1/processes", serde_json::Value::Null).await;
+    let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let shell = rows[0]["pane"].as_u64().unwrap();
+    let (status, body) = http(
+        &socket,
+        "POST",
+        &format!("/v1/workspaces/1/panes/{shell}/input"),
+        serde_json::json!({"paste":"echo CWD_%CD%\r"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    output_until(&socket, shell, &format!("CWD_{}", tmp.path().display())).await;
     let (status, body) =
         http(&socket, "POST", "/v1/workspaces/1/agents", serde_json::json!({"type":"fake"})).await;
     assert_eq!(status, 200, "{body}");
@@ -97,7 +120,14 @@ async fn windows_daemon_runs_commands_and_batch_agents_over_both_protocols() {
     let (_, body) =
         http(&socket, "GET", "/v1/workspaces/1/processes", serde_json::Value::Null).await;
     let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let process = rows[0]["pane"].as_u64().unwrap();
+    let process = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "smoke")
+        .expect("managed smoke process")["pane"]
+        .as_u64()
+        .unwrap();
     output_until(&socket, process, "MANAGED_PROCESS_OK_日本語").await;
 
     // Framed control shares the endpoint with REST and starts with a zero byte.

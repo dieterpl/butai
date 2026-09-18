@@ -468,7 +468,10 @@ impl TerminalPane {
                 (c, prog.to_string())
             }
         };
+        #[cfg(unix)]
         cmd.cwd(spec.cwd);
+        #[cfg(windows)]
+        cmd.cwd(windows_shell_cwd(spec.cwd).as_os_str());
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // The one thing the daemon's inherited environment routinely gets wrong.
@@ -2158,10 +2161,35 @@ fn program_command(prog: &str, args: &[String]) -> CommandBuilder {
     }
 }
 
+/// `canonicalize` returns a verbatim path on Windows. cmd.exe mistakes its
+/// `\\?\` prefix for a UNC share and silently starts in C:\Windows instead.
+#[cfg(windows)]
+fn windows_shell_cwd(path: &Path) -> std::borrow::Cow<'_, Path> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+    if matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_)))
+    {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        return std::borrow::Cow::Owned(PathBuf::from(std::ffi::OsString::from_wide(&wide[4..])));
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
 #[cfg(all(test, windows))]
 mod windows_resolve_tests {
     use super::*;
     use crate::testenv::EnvGuard;
+
+    #[test]
+    fn canonical_drive_paths_remain_usable_by_cmd() {
+        assert_eq!(
+            windows_shell_cwd(Path::new(r"\\?\C:\Projects\日本語")),
+            Path::new(r"C:\Projects\日本語")
+        );
+        for path in [r"C:\Projects\normal", r"\\server\share\project", r"relative\project"] {
+            assert_eq!(windows_shell_cwd(Path::new(path)), Path::new(path));
+        }
+    }
 
     #[test]
     fn npm_commands_choose_the_windows_wrapper_over_the_unix_shim() {
