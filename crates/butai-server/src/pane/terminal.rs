@@ -2199,7 +2199,10 @@ mod windows_resolve_tests {
         std::fs::write(&shim, "#!/bin/sh\n").unwrap();
         std::fs::write(&wrapper, "@echo off\r\n").unwrap();
         let _guard = EnvGuard::set(&[("PATHEXT", ".EXE;.CMD")]);
-        assert_eq!(windows_program(shim.to_str().unwrap()), Some(wrapper));
+        let resolved = windows_program(shim.to_str().unwrap()).expect("Windows wrapper");
+        // PATHEXT is commonly uppercase; the filesystem treats .CMD and .cmd
+        // as the same file even though Path's string comparison does not.
+        assert_eq!(resolved.canonicalize().unwrap(), wrapper.canonicalize().unwrap());
     }
 }
 
