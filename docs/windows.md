@@ -74,6 +74,23 @@ process per connection; Unix clients continue using socket forwarding and SSH
 multiplexing. Windows needs OpenSSH on `PATH` and a working noninteractive key
 or agent setup for remote workspaces.
 
+To update a connected Unix server from the Windows client, enable the existing
+remote updater in that server's `~/.butai/config.toml`:
+
+```toml
+[update]
+channel = "dev"
+allow_remote = true
+```
+
+Run `:reload-config` on that server's tab, then use `:update` there or select
+the server's update action under SETTINGS → MACHINES. The server downloads
+its own platform's release, verifies its checksum and restarts; connected
+clients detach and saved workspaces return. This works independently of the
+Windows client's local self-update limitation. Only published releases appear
+in the updater; CI artifacts do not. Use `channel = "stable"` to follow stable
+releases instead of betas.
+
 ## Current limits
 
 - Content search skips binary files and files larger than 1 MiB.

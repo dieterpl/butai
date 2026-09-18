@@ -229,11 +229,11 @@ jobs:
               echo "---"
               echo
               echo "**This is a development build, not a stable release.** It is"
-              echo "not offered to anyone by \`butai update\`, and \`install.sh\`"
-              echo "will not find it on its own. To install it deliberately:"
+              echo "offered by the built-in updater when \`[update] channel = \"dev\"\`."
+              echo "Stable-channel installs keep receiving stable releases. To install this build directly:"
               echo
               echo "\`\`\`sh"
-              echo "BUTAI_VERSION=$GITHUB_REF_NAME curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh"
+              echo "curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/scripts/install.sh | BUTAI_VERSION=$GITHUB_REF_NAME sh"
               echo "\`\`\`"
               echo
               echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
