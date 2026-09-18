@@ -37,6 +37,7 @@ export async function launch(binaryAsset: string): Promise<void> {
   Bun.env.BUTAI_WEB_GATEWAY_TOKEN = randomBytes(32).toString("hex");
   const gateway = Bun.spawn([binary, "--socket", Bun.env.BUTAI_SOCKET, "web-gateway"], {
     stdin: "pipe", stdout: "pipe", stderr: "inherit", windowsHide: true,
+    env: { ...process.env, BUTAI_WEB_GATEWAY_TOKEN: Bun.env.BUTAI_WEB_GATEWAY_TOKEN },
   });
   const reader = gateway.stdout.getReader();
   const first = await reader.read();
