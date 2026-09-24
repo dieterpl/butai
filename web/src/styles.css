@@ -43,7 +43,7 @@
      `--accent` is the brand blue, and it lands on `primary`. */
   --color-background: var(--bg);
   --color-foreground: var(--fg);
-  --color-card: var(--panel);
+  --color-card: var(--bg);
   --color-card-foreground: var(--fg);
   --color-popover: var(--panel);
   --color-popover-foreground: var(--fg);
@@ -151,17 +151,10 @@
      Ring utilities are untouched — they run on `--tw-ring-*`, not on this. */
   --shadow-*: initial;
 
-  /* The row scale. **22px**, and this is the first of the two deliberate
-     concessions to the pointer: the terminal's line is 18px at 14px type, and
-     22 rather than 18 is what makes a row comfortably clickable without it
-     reading as a web app's 32px control. Four pixels, spent once, here.
-
-     `row-compact` is 20px for a dense list — a diff, a file tree — and
-     `row-lg` 26px for the app header, which in the TUI is one cell like
-     everything else but has to hold controls in a browser. */
-  --spacing-row: 22px;
-  --spacing-row-compact: 20px;
-  --spacing-row-lg: 26px;
+  /* Every chrome row occupies one terminal line, including the tab bar. */
+  --spacing-row: 18px;
+  --spacing-row-compact: 18px;
+  --spacing-row-lg: 18px;
 
   /* ── Motion ─────────────────────────────────────────────────────────────
      **None.** A terminal repaints; it does not animate. `0s` rather than

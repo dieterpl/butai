@@ -117,7 +117,7 @@ from, and where two mechanisms could name the same thing, this is which wins.
 | Workspace scope for the CLI | `--ws NAME` → `$BUTAI_WORKSPACE` (every pane carries it) |
 | Shell for a pane | `[general] default_shell` → `$SHELL` → `/bin/sh` |
 | Workspace name | `butai new -s NAME` / `butai ws create --name` / `POST /v1/workspaces` `name` → the directory's basename |
-| Agent list | `[[agents]]` if the array exists at all → otherwise the five built-ins |
+| Agent list | `[[agents]]` if the array exists at all → otherwise the six built-ins |
 | Agent argv on a restore | `resume_args` when there is a conversation to reopen → otherwise `args` |
 | A pane's palette | `[theme]` role keys → the named theme's `[colors]` → its `extends` chain → `blueprint-dark` |
 | A key after the prefix | `[keys]` → the shipped prefix table |
@@ -234,15 +234,17 @@ ever fires.
 | `claude` | `--dangerously-skip-permissions --session-id {session_id}` | `--dangerously-skip-permissions --resume {session_id}` |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | — |
 | `gemini` | `--yolo --session-id {session_id}` | `--yolo --resume {session_id}` |
+| `opencode` | —; `OPENCODE_PERMISSION={"*":"allow"}` in its environment | — |
 | `aider` | `--yes-always` | — |
 | `agy` | `--dangerously-skip-permissions` | — |
 
-Each launches with its CLI's auto-approve flag, because agents run unattended in
-rail panes. The empty `resume_args` are deliberate, not gaps: `codex` and `agy`
-assign their own conversation ids and have no way to be told one at launch, and
-`aider`'s history is per directory, so there is nothing per-pane to name. A
-wrong flag here makes the CLI exit on launch, so fill them in yourself only
-after checking against the CLI you actually run.
+Each launches unattended because agents run in rail panes. OpenCode expresses
+that as an inline permission configuration; the other CLIs use auto-approve
+flags. The empty `resume_args` are deliberate, not gaps: `codex`, `opencode`
+and `agy` assign their own conversation ids and have no way to be told one at
+launch, and `aider`'s history is per directory, so there is nothing per-pane to
+name. A wrong flag here makes the CLI exit on launch, so fill them in yourself
+only after checking against the CLI you actually run.
 
 ### `[keys]`
 
@@ -807,7 +809,7 @@ remote_auto_attach = true      # let `butai` over ssh pull its machine into the 
 option_as_alt = true           # macOS: read Option-composed characters as Alt
 
 # ── agents ─────────────────────────────────────────────────────────────────
-# Declaring any block replaces the five built-ins entirely.
+# Declaring any block replaces the six built-ins entirely.
 
 [[agents]]
 name = "claude"

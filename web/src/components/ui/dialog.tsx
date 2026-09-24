@@ -62,6 +62,7 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -86,6 +87,7 @@ function DialogContent({
           "shadow-[inset_0_0_0_1px_var(--color-ring)]",
           className
         )}
+        onKeyDown={e => { onKeyDown?.(e); e.stopPropagation(); }}
         {...props}
       >
         {children}

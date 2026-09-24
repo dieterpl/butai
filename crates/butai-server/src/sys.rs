@@ -1039,12 +1039,13 @@ fn mount_table() -> Vec<(String, String, String, DiskKind)> {
 /// a great deal that does not: `/System/Volumes/VM`, `Preboot`, `Update`,
 /// `xarts`, `iSCPreboot`, `Hardware` and `Data` are all mounted on an ordinary
 /// machine, all `nobrowse`, and all report the boot container's own size.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 struct MacMount {
     source: String,
     mount: String,
     fstype: String,
     nobrowse: bool,
+    readonly: bool,
 }
 
 /// The container behind an APFS volume's device node, or the node unchanged.
@@ -1058,7 +1059,7 @@ struct MacMount {
 /// Only APFS is collapsed this way. `/dev/disk4s1` and `/dev/disk4s2` are two
 /// partitions of one USB stick, each sized on its own, and they share this
 /// prefix while sharing no capacity at all.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn apfs_container(source: &str) -> &str {
     const DEV: &str = "/dev/disk";
     let Some(rest) = source.strip_prefix(DEV) else { return source };
@@ -1076,14 +1077,16 @@ fn apfs_container(source: &str) -> &str {
 /// `/proc`: every decision here is about text and flags, and checked against
 /// the machine's own table an assertion only fires if that host happens to
 /// have the mounts which trigger it.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn select_mounts(rows: Vec<MacMount>) -> Vec<(String, String, String, DiskKind)> {
     let mut out: Vec<(String, String, String, DiskKind)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for m in rows {
         // macOS's own word for "not a disk the user has", and the whole
         // difference between one row for the boot disk and seven.
-        if m.nobrowse {
+        // Installer images have no writable capacity to watch. Keep the sealed
+        // boot volume: its APFS container also holds the writable Data volume.
+        if m.nobrowse || (m.readonly && m.mount != "/") {
             continue;
         }
         let Some(kind) = disk_kind(&m.fstype, &m.source) else { continue };
@@ -1152,6 +1155,7 @@ fn mount_table() -> Vec<(String, String, String, DiskKind)> {
                 mount: c_str_field(&fs.f_mntonname),
                 fstype: c_str_field(&fs.f_fstypename),
                 nobrowse: fs.f_flags & libc::MNT_DONTBROWSE as u32 != 0,
+                readonly: fs.f_flags & libc::MNT_RDONLY as u32 != 0,
             })
             .collect(),
     )
@@ -1548,13 +1552,13 @@ tmpfs /dev/shm tmpfs rw 0 0
         assert!(snaps.iter().all(|(_, _, _, k)| *k == DiskKind::Layer));
     }
 
-    #[cfg(target_os = "macos")]
     fn mac_mount(source: &str, mount: &str, fstype: &str, nobrowse: bool) -> MacMount {
         MacMount {
             source: source.to_string(),
             mount: mount.to_string(),
             fstype: fstype.to_string(),
             nobrowse,
+            readonly: false,
         }
     }
 
@@ -1567,7 +1571,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// is the same reason [`one_disk_is_one_row_however_often_it_is_mounted`]
     /// uses a written-down one.
     #[test]
-    #[cfg(target_os = "macos")]
     fn the_boot_container_is_one_row_and_the_hidden_volumes_are_none() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk3s1s1", "/", "apfs", false),
@@ -1596,7 +1599,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// capacity — collapsing the other would report a 64 GB stick's two halves
     /// as one and lose whichever was listed second.
     #[test]
-    #[cfg(target_os = "macos")]
     fn only_apfs_volumes_collapse_onto_their_container() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk5s1", "/Volumes/Backup", "apfs", false),
@@ -1618,7 +1620,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// is the one the rail prints — `/System/Volumes/Update` standing in for
     /// the boot disk is the same number under a name nobody recognises.
     #[test]
-    #[cfg(target_os = "macos")]
     fn the_root_volume_names_its_container_whenever_it_appears() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk3s4", "/System/Volumes/Update", "apfs", false),
@@ -1630,7 +1631,6 @@ tmpfs /dev/shm tmpfs rw 0 0
 
     /// The volume suffix is cut, the disk number is not.
     #[test]
-    #[cfg(target_os = "macos")]
     fn a_container_is_the_disk_number_not_the_volume() {
         assert_eq!(apfs_container("/dev/disk3s1s1"), "/dev/disk3");
         assert_eq!(apfs_container("/dev/disk10s2"), "/dev/disk10");
@@ -1638,6 +1638,25 @@ tmpfs /dev/shm tmpfs rw 0 0
         assert_eq!(apfs_container("/dev/disk3"), "/dev/disk3");
         assert_eq!(apfs_container("//paul@10.0.0.1/nvme"), "//paul@10.0.0.1/nvme");
         assert_eq!(apfs_container("map auto_home"), "map auto_home");
+    }
+
+    #[test]
+    fn mac_readonly_installer_volumes_do_not_compete_with_storage() {
+        let mut root = mac_mount("/dev/disk3s1s1", "/", "apfs", false);
+        root.readonly = true;
+        let mut installer = mac_mount("/dev/disk6s1", "/Volumes/Installer", "hfs", false);
+        installer.readonly = true;
+        let mut apfs_image = mac_mount("/dev/disk7s1", "/Volumes/App", "apfs", false);
+        apfs_image.readonly = true;
+        let got = select_mounts(vec![
+            installer,
+            root,
+            apfs_image,
+            mac_mount("/dev/disk5s1", "/Volumes/Backup", "apfs", false),
+            mac_mount("//host/share", "/Volumes/share", "smbfs", false),
+        ]);
+        let mounts: Vec<_> = got.iter().map(|(_, mount, _, _)| mount.as_str()).collect();
+        assert_eq!(mounts, ["/", "/Volumes/Backup", "/Volumes/share"]);
     }
 
     /// A mount that does not answer keeps the numbers it had and says so.

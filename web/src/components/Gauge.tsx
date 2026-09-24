@@ -1,10 +1,10 @@
-// Gauge — a labelled `Meter`, with its readout right-aligned in a fixed column.
+// Gauge — a labelled terminal trace, with its readout right-aligned in a fixed column.
 //
 // The other half of the SYSTEM/COMPUTE finding, and the half that was invisible
 // until you measured it: HOME's compute bars ended at 1112px while the numbers
 // they belonged to right-aligned at 1268px, so the bar and its value were two
 // measurements of nothing in particular. Here the label line and the bar share
-// one `px-3` gutter, so the track's right edge *is* the readout's right edge by
+// one `px-1` gutter, so the track's right edge *is* the readout's right edge by
 // construction rather than by both being roughly right.
 //
 // The readout is mono and tabular and lives in a fixed column, so a stack of
@@ -18,11 +18,15 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { Trace } from "@/components/Trace";
 import { Meter, type MeterTone } from "@/components/Meter";
 
 type GaugeProps = Omit<React.ComponentProps<"div">, "children"> & {
   /** What is being measured — `cpu`, `ram`, `gpu0`. Truncates; the number does not. */
   label: string;
+  history?: readonly number[] | undefined;
+  traffic?: { rx: readonly number[]; tx: readonly number[] } | undefined;
+  readingOnly?: boolean | undefined;
   /** The measurement itself, in whatever unit `max` is in. */
   value: number;
   /** Full scale. Percentages are the common case, hence the default. */
@@ -38,7 +42,7 @@ type GaugeProps = Omit<React.ComponentProps<"div">, "children"> & {
   tone?: MeterTone | undefined;
 };
 
-function Gauge({ className, label, value, max = 100, suffix, text, tone, ...props }: GaugeProps) {
+function Gauge({ className, label, value, max = 100, suffix, text, tone, history, traffic, readingOnly, ...props }: GaugeProps) {
   // React's own id, because the bar needs a name and the label is already on
   // screen — a second, invisible copy in an `aria-label` is a second string to
   // keep in step with the first.
@@ -50,7 +54,7 @@ function Gauge({ className, label, value, max = 100, suffix, text, tone, ...prop
           over its own row, which is exactly the shape of the TUI's SYSTEM
           panel. `h-row-compact`, because two of these stacked is one reading
           and it should read as one block rather than as two rows. */}
-      <div className="flex h-row-compact min-w-0 items-center gap-3 px-3 text-13">
+      <div className="flex h-row-compact min-w-0 items-center gap-1 px-1 text-13">
         <span id={id} className="min-w-0 truncate text-dim">
           {label}
         </span>
@@ -64,9 +68,11 @@ function Gauge({ className, label, value, max = 100, suffix, text, tone, ...prop
           {shown}
         </span>
       </div>
-      <div className="px-3 pb-1">
-        <Meter value={value} max={max} tone={tone} aria-labelledby={id} aria-valuetext={shown} />
-      </div>
+      {traffic ? <div className="px-1">
+        <Trace history={traffic.rx} silent prefix="↓" className="text-info" />
+        <Trace history={traffic.tx} silent prefix="↑" className="text-primary" />
+      </div> : history ? <div className="px-1"><Trace history={history} className={tone === "bad" ? "text-bad" : tone === "warn" ? "text-warn" : "text-ok"} /></div>
+      : !readingOnly ? <div className="px-1"><Meter value={value} max={max} tone={tone} aria-labelledby={id} aria-valuetext={shown} /></div> : null}
     </div>
   );
 }

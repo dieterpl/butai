@@ -21,7 +21,7 @@
 // through `on` — which is the half of the glue that never reaches a daemon.
 
 import type React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
@@ -51,21 +51,21 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { Actions, type AskField } from "./actions.ts";
 import { useWorld } from "./world.ts";
-import { storage, storeTheme, storedTheme, useTheme } from "../theme.ts";
-import { load, readPrefixSpelling, termColors } from "../logic/settings.ts";
+import { storage, storeTheme, useTheme } from "../theme.ts";
+import { load, save, readPrefixSpelling, termColors } from "../logic/settings.ts";
 import { api } from "../logic/api.ts";
 import { daemonOf, type Qid, type QualifiedWorkspace } from "../logic/events.ts";
-import { type GitActionId, type MenuCx, groupsFor, itemsFor } from "../logic/git-menu.ts";
+import { type GitActionId, type MenuCx, type GroupId, groupsFor, itemsFor } from "../logic/git-menu.ts";
 import type { StageEvents } from "@/stage/Stage";
 import type { SettingsFacts } from "@/pages/SettingsPage";
+import { VIEWS, cycleView, pageLabel } from "./navigation";
+import { VerbId, altVerb, prefixVerb, keyName, isPrefix } from "../logic/verbs";
 import { PAGE_TABLE } from "./pages.tsx";
 
 /** The pages the shell can show. `work` is where a client opens. */
 export const PAGES = ["work", "home", "git", "files", "docs", "docker", "usage", "settings", "help"] as const;
 export type PageName = (typeof PAGES)[number];
 
-/** A page the tab bar offers. HELP and SETTINGS are reached by key, not by tab. */
-const TABS: PageName[] = ["work", "home", "git", "files", "docker", "usage"];
 
 /**
  * Where the keyboard is, and what it has chosen. None of it reaches a daemon.
@@ -78,6 +78,11 @@ const TABS: PageName[] = ["work", "home", "git", "files", "docker", "usage"];
 export interface ShellView {
   /** `"open"` slides the left rail over the stage — the burger, below `md`. */
   rails: "auto" | "open";
+  zen: boolean;
+  procsHeight: number | null;
+  systemHeight: number | null;
+  leftRail: number;
+  rightRail: number;
   /** The pane on the stage, qualified. Null only when there is nothing to show. */
   pane: Qid | null;
   /** The file CHANGES has open, so its row draws as selected. */
@@ -113,6 +118,7 @@ export interface ShellCallbacks {
   setRails: (open: boolean) => void;
   /** Open the `g` menu. An overlay, so the shell draws it. */
   gitMenu: () => void;
+  closeUtility: () => void;
 }
 
 /** The shell's one question, as `actions.ts` asks it. */
@@ -134,11 +140,19 @@ export function Shell() {
   const [sel, setSel] = useState(0);
   const [folds, setFolds] = useState<Folds>(NO_FOLDS);
   const [topic, setTopic] = useState<string | undefined>(undefined);
+  const [prefsRevision, setPrefsRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [palette, setPalette] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);
+  const [hostsOpen, setHostsOpen] = useState(false);
+  const [zen, setZen] = useState(() => load(storage()).zen);
+  const [layout, setLayout] = useState(false);
+  const [procsHeight, setProcsHeight] = useState<number | null>(null);
+  const [systemHeight, setSystemHeight] = useState<number | null>(null);
+  const [attached, setAttached] = useState(true);
+  const returnPage = useRef<PageName>("work");
+  const prefixPending = useRef(false);
   const [menu, setMenu] = useState(false);
-  const [theme] = useState(storedTheme);
-  const pal = useTheme(theme);
 
   // The two overlays a verb needs and a page must not own, as promises.
   // `actions.ts` asks and awaits; the shell is what has a DOM to ask in. One of
@@ -170,7 +184,8 @@ export function Shell() {
   // would be the tidier answer and there is nothing to subscribe to: the store
   // is a string in `localStorage`, which is exactly why the theme picker in the
   // palette below still reloads.
-  const prefs = useMemo(() => ({ ...load(storage()), prefix: readPrefixSpelling(storage()) }), [page]);
+  const prefs = useMemo(() => ({ ...load(storage()), prefix: readPrefixSpelling(storage()) }), [page, prefsRevision]);
+  const pal = useTheme(prefs.theme);
 
   // The busiest workspace by default: the rails are what is being looked at, and
   // a project with nothing open shows none of them.
@@ -204,25 +219,12 @@ export function Shell() {
     };
   }, [daemonKeys]);
 
-  // ⌘K / ctrl-K, and `?` for help — the two bindings that work from anywhere.
-  // Everything else belongs to `logic/keys.ts` and the page that has focus.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const typing = isTyping(e.target);
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setPalette((v) => !v);
-        return;
-      }
-      if (e.key === "?" && !typing) {
-        e.preventDefault();
-        setPage((p) => (p === "help" ? "work" : "help"));
-        return;
-      }
-      if (e.key === "Escape" && !typing && page === "help") setPage("work");
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  const toggleUtility = useCallback((next: "help" | "settings") => {
+    if (page === next) setPage(returnPage.current);
+    else {
+      if (page !== "help" && page !== "settings") returnPage.current = page;
+      setPage(next);
+    }
   }, [page]);
 
   const term = useMemo(() => (pal ? termColors(pal) : { fg: "#d7dde5", bg: "#0e1116" }), [pal]);
@@ -230,27 +232,40 @@ export function Shell() {
   const on: ShellCallbacks = useMemo(
     () => ({
       setFocus,
-      setPage,
+      setPage: (next: PageName) => {
+        if (next === "help" || next === "settings") {
+          if (page !== "help" && page !== "settings") returnPage.current = page;
+        }
+        setPage(next);
+      },
       setWsId: (id: string) => {
         setWsId(id);
+        if (page === "home") setPage("work");
         // A pane belongs to a project; carrying the selection across would put
         // another project's terminal on this one's stage.
         setPane(null);
         setPath(null);
+        setPatch(null);
       },
-      setPane,
+      setPane: (next: Qid | null) => { setPane(next); setPatch(null); },
       setPath,
       setSel,
       setFolds,
       setTopic,
       setRails: (open: boolean) => setRails(open ? "open" : "auto"),
       gitMenu: () => setMenu(true),
+      closeUtility: () => setPage(returnPage.current),
     }),
-    [],
+    [page],
   );
 
   const view: ShellView = {
     rails,
+    zen,
+    procsHeight,
+    systemHeight,
+    leftRail: prefs.leftRail,
+    rightRail: prefs.rightRail,
     pane: stagePane,
     path,
     pin: prefs.defaultAgent || null,
@@ -282,61 +297,152 @@ export function Shell() {
     [],
   );
 
+  const toggleLayout = () => {
+    if (!layout) { setPage("work"); setZen(false); setFocus("agents"); (document.activeElement as HTMLElement)?.blur(); }
+    setLayout(v => !v);
+  };
+
+  const newWorkspace = async () => {
+    const daemon = (ws ? machineOf(ws) : null) || world.daemons.find(d => d.primary)?.key;
+    if (!daemon) { actions.toast("no host connected"); return; }
+    const values = await askFor("NEW WORKSPACE", [{ label: "Directory" }, { label: "Name" }], "Open");
+    if (!values?.[0]?.trim()) return;
+    const made = await actions.newWorkspace(daemon, values[0].trim(), values[1]?.trim());
+    if (made != null) { on.setWsId(String(made)); setPage("work"); }
+  };
+
+  // Capture the app chords before the terminal's input sink forwards them.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"]')) { prefixPending.current = false; return; }
+      const inStage = !!(e.target as HTMLElement)?.closest('[data-slot="stage"]');
+      const typing = isTyping(e.target) && !inStage;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !inStage) {
+        e.preventDefault(); e.stopImmediatePropagation(); setPalette(v => !v); return;
+      }
+      if (typing) return;
+      const key = keyName(e);
+      if (layout && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (key === "esc" || key === "enter") setLayout(false);
+        else if (key === "tab") setFocus(focus === "agents" ? "procs" : focus === "procs" ? "changes" : "agents");
+        else if (["arrowleft", "arrowright", "h", "l"].includes(key)) {
+          const right = focus === "changes";
+          const rail = document.querySelector<HTMLElement>(right ? '[data-surface="changes"]' : '.work-rails');
+          const width = rail?.getBoundingClientRect().width ?? (right ? 319 : 235);
+          const other = document.querySelector<HTMLElement>(right ? '.work-rails' : '[data-surface="changes"]')?.getBoundingClientRect().width ?? 0;
+          const cap = Math.max(180, Math.min(640, window.innerWidth - other - 168));
+          const next = Math.max(180, Math.min(cap, width + (key === "arrowright" || key === "l" ? 16.8 : -16.8)));
+          save(storage(), { ...prefs, [right ? "rightRail" : "leftRail"]: Math.round(next) });
+          setPrefsRevision(v => v + 1);
+        } else if (["arrowup", "arrowdown", "j", "k"].includes(key) && focus !== "changes") {
+          const delta = key === "arrowup" || key === "k" ? 36 : -36;
+          const proc = document.querySelector<HTMLElement>('[data-surface="procs"]')?.getBoundingClientRect().height ?? 108;
+          const system = document.querySelector<HTMLElement>('[data-surface="system"]')?.getBoundingClientRect().height ?? 18;
+          const height = document.querySelector<HTMLElement>('.work-rails')?.getBoundingClientRect().height ?? 400;
+          if (focus === "agents") setProcsHeight(Math.max(54, Math.min(height - system - 54, proc - delta)));
+          else {
+            const nextSystem = Math.max(18, Math.min(height - 108, system - delta));
+            setSystemHeight(nextSystem);
+            setProcsHeight(Math.max(54, proc + system - nextSystem));
+          }
+        }
+        return;
+      }
+
+      const prefixKey = prefs.prefix.replace(/^C-/, "").toLowerCase();
+      const prefix = isPrefix(e, { ctrl: prefs.prefix.startsWith("C-"), key: prefixKey });
+      if (prefix && !prefixPending.current) {
+        prefixPending.current = true; e.preventDefault(); e.stopImmediatePropagation(); return;
+      }
+      if (prefix && prefixPending.current) { prefixPending.current = false; return; }
+      const pending = prefixPending.current;
+      prefixPending.current = false;
+      const verb = pending ? prefixVerb(key) : e.altKey ? altVerb(key) : null;
+      let handled = true;
+      switch (verb?.id) {
+        case VerbId.SpaceNext: setPage(cycleView(page, 1)); break;
+        case VerbId.SpacePrev: setPage(cycleView(page, -1)); break;
+        case VerbId.SpaceWork: setPage("work"); break;
+        case VerbId.SpaceFiles: setPage(page === "files" ? "work" : "files"); break;
+        case VerbId.SpaceDocs: setPage(page === "docs" ? "work" : "docs"); break;
+        case VerbId.SpaceGit: setPage(page === "git" ? "work" : "git"); break;
+        case VerbId.SpaceDocker: setPage(page === "docker" ? "work" : "docker"); break;
+        case VerbId.SpaceHome: case VerbId.FocusFleet: setPage("home"); setFocus("home"); (document.activeElement as HTMLElement)?.blur(); break;
+        case VerbId.SpaceSettings: toggleUtility("settings"); break;
+        case VerbId.Help: toggleUtility("help"); break;
+        case VerbId.Workspace: { const w = spaces[Number(key) - 1]; if (w) on.setWsId(String(w.id)); break; }
+        case VerbId.WorkspaceNext: case VerbId.WorkspacePrev: {
+          const at = spaces.findIndex(w => String(w.id) === String(ws?.id));
+          const w = spaces[(at + (verb.id === VerbId.WorkspaceNext ? 1 : -1) + spaces.length) % spaces.length];
+          if (w) on.setWsId(String(w.id)); break;
+        }
+        case VerbId.FocusOff:
+          if (page === "home") { setFocus("home"); (document.activeElement as HTMLElement)?.blur(); break; }
+          setFocus("agents"); (document.activeElement as HTMLElement)?.blur(); break;
+        case VerbId.FontBigger: case VerbId.FontSmaller:
+          save(storage(), { ...prefs, fontPx: prefs.fontPx + (verb.id === VerbId.FontBigger ? 1 : -1) });
+          setPrefsRevision(v => v + 1); break;
+        case VerbId.FocusAgents: case VerbId.FocusProcs: case VerbId.FocusChanges:
+          setPage("work"); setFocus(verb.id === VerbId.FocusProcs ? "procs" : verb.id === VerbId.FocusChanges ? "changes" : "agents");
+          (document.activeElement as HTMLElement)?.blur(); break;
+        case VerbId.FocusStage: setFocus("stage"); document.querySelector<HTMLElement>('[data-slot="stage"] textarea, [data-slot="stage"] canvas')?.focus(); break;
+        case VerbId.NewWorkspace: void newWorkspace(); break;
+        case VerbId.CloseWorkspace: if (ws) void actions.closeWorkspace(ws.id, ws.name); break;
+        case VerbId.NewShell: if (ws) void actions.newProc(ws.id); break;
+        case VerbId.PickAgent: if (ws) void actions.spawnPick(ws.id, true, view.pin); break;
+        case VerbId.Layout: toggleLayout(); break;
+        case VerbId.Zen: setZen(v => !v); break;
+        default:
+          if (!inStage && !e.altKey && !e.ctrlKey && !e.metaKey && key === "?") toggleUtility("help");
+          else if (!inStage && key === "esc" && page === "help") setPage(returnPage.current);
+          else handled = pending;
+      }
+      if (handled) { e.preventDefault(); e.stopImmediatePropagation(); }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
+
   const facts: SettingsFacts = { agents: agentTypes, daemonVersion };
 
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
-        <header className="flex h-row-lg shrink-0 items-center gap-2 border-b border-border bg-card px-3 shadow-xs">
-          <span className="text-14 font-semibold tracking-tight">butai</span>
-
-          {/* The tab bar spans machines, exactly as the terminal's does: one row
-              of projects with the machine as a badge, never a machine picker
-              above a project picker. */}
-          <nav className="flex min-w-0 items-center gap-1 overflow-x-auto">
-            {spaces.map((w) => (
-              <Button
-                key={String(w.id)}
-                size="sm"
-                variant={ws && String(w.id) === String(ws.id) ? "secondary" : "ghost"}
-                onClick={() => on.setWsId(String(w.id))}
-              >
-                <span className="truncate">{w.name}</span>
-                {world.daemons.length > 1 && machineOf(w) ? (
-                  <Badge variant="outline" className="ml-1">
-                    {machineOf(w)}
-                  </Badge>
-                ) : null}
-                {unreadOf(w) ? <span className="ml-1 text-primary">•</span> : null}
-              </Button>
-            ))}
+        <header className="flex h-row-lg shrink-0 items-center gap-1 border-b border-border bg-background px-1">
+          <Button size="sm" variant={page === "home" ? "default" : "ghost"} bracket={page === "home"}
+            onClick={() => { setPage("home"); setFocus("home"); }} aria-pressed={page === "home"}>
+            booth{spaces.some(w => workspaceAttention(w) && !world.daemons.find(d => d.key === machineOf(w))?.error) ? " !" : ""}
+          </Button>
+          <span className="text-border" aria-hidden="true">│</span>
+          <nav aria-label="Workspaces" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+            {spaces.map((w, i) => {
+              const active = page !== "home" && String(w.id) === String(ws?.id);
+              const down = !!world.daemons.find(d => d.key === machineOf(w))?.error;
+              return <div key={String(w.id)} className={`flex shrink-0 items-center ${active ? "bg-primary text-primary-foreground" : down ? "text-faint" : workspaceAttention(w) ? "text-bad" : "text-dim"}`}>
+                <button type="button" className="whitespace-nowrap px-1" aria-current={active ? "page" : undefined}
+                  onClick={() => on.setWsId(String(w.id))}>
+                  {active ? "[ " : "  "}{down ? "·" : ""}{i + 1}:{world.daemons.length > 1 ? `${machineOf(w)}:` : ""}{w.name}{workspaceAttention(w) ? " !" : ""}
+                </button>
+                {active ? <><Button size="sm" variant="ghost" className="text-inherit" aria-label={`Close ${w.name}`}
+                  onClick={() => void actions.closeWorkspace(w.id, w.name)}>x</Button><span className="pr-1">]</span></> : null}
+              </div>;
+            })}
           </nav>
-
-          <div className="flex-1" />
-
-          <div className="flex items-center gap-1">
-            {TABS.map((p) => (
-              <Button key={p} size="sm" variant={page === p ? "secondary" : "ghost"} onClick={() => setPage(p)}>
-                {p}
-              </Button>
-            ))}
+          <div className="hidden w-[10ch] shrink-0 justify-end min-[360px]:flex">
+            <Button size="sm" variant="outline" aria-label="Switch view" aria-haspopup="dialog" aria-expanded={viewsOpen}
+              onClick={() => setViewsOpen(true)}>{VIEWS.includes(page) ? pageLabel(page) : "views"} v</Button>
           </div>
-
-          <Button size="sm" variant="ghost" onClick={() => setPalette(true)} title="Command palette (⌘K)">
-            ⌘K
+          <Button size="sm" variant="ghost" className="hidden min-[480px]:inline-flex" onClick={() => setHostsOpen(true)}>
+            {world.daemons.length > 1 ? `${world.daemons.length} hosts` : "+ host"}
           </Button>
-          <Button
-            size="icon-sm"
-            variant={page === "settings" ? "secondary" : "ghost"}
-            aria-label="settings"
-            onClick={() => setPage((p) => (p === "settings" ? "work" : "settings"))}
-          >
-            ⚙
-          </Button>
+          <Button size="sm" variant="ghost" className="hidden min-[480px]:inline-flex" onClick={() => void newWorkspace()}>+ new</Button>
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden">
-          {!world.loaded ? (
+          {!attached ? (
+            <div className="flex h-full items-center justify-center"><Button onClick={() => setAttached(true)}>attach</Button></div>
+          ) : !world.loaded ? (
             <div className="flex h-full items-center justify-center text-13 text-dim">connecting…</div>
           ) : world.error ? (
             <div className="flex h-full items-center justify-center px-8 text-center text-13 text-bad">
@@ -353,10 +459,55 @@ export function Shell() {
               term={term}
               stage={stage}
               facts={facts}
+              patch={page === "work" ? patch : null}
               on={on}
             />
           )}
         </main>
+
+        <footer className="flex h-row shrink-0 items-center gap-1 border-t border-border bg-status-bg px-1 text-status-fg">
+          <span className="min-w-0 flex-1 truncate">{layout ? "LAYOUT · ←/→ width · ↑/↓ height · tab rail · enter done" : page === "home" ? "booth" : ws ? `${ws.name} · ${pageLabel(page)}` : pageLabel(page)}</span>
+          <Button size="sm" variant={layout ? "default" : "secondary"} onClick={toggleLayout} aria-pressed={layout}>layout</Button>
+          <Button size="sm" variant="secondary" onClick={() => setAttached(false)}>detach</Button>
+          <Button size="sm" variant={page === "help" ? "default" : "secondary"} onClick={() => toggleUtility("help")}>help</Button>
+          <Button size="sm" variant={page === "settings" ? "default" : "secondary"} onClick={() => toggleUtility("settings")}>settings</Button>
+        </footer>
+
+        <Dialog open={viewsOpen} onOpenChange={setViewsOpen}>
+          <DialogContent className="sm:max-w-xs">
+            <DialogHeader><DialogTitle>Views</DialogTitle></DialogHeader>
+            <div className="flex flex-col" role="menu" aria-label="Workspace views" onKeyDown={e => {
+              if (!["j", "k", "ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+              e.preventDefault();
+              const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+              const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 :
+                (at + (e.key === "j" || e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+              buttons[next]?.focus();
+            }}>
+              {VIEWS.map(p => <button key={p} type="button" role="menuitemradio" aria-checked={page === p}
+                autoFocus={page === p || (p === "work" && !VIEWS.includes(page))}
+                className={`flex h-row items-center px-2 text-left hover:bg-sel ${page === p ? "bg-sel" : ""}`}
+                onClick={() => { setPage(p); setViewsOpen(false); }}>
+                <span className="w-3">{page === p ? ">" : " "}</span>{pageLabel(p)}
+              </button>)}
+            </div>
+          </DialogContent>
+        </Dialog>
+        <Dialog open={hostsOpen} onOpenChange={setHostsOpen}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Hosts</DialogTitle></DialogHeader>
+            {world.daemons.map(d => <div key={d.key} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate">{d.label} · {d.error ?? "connected"}</span>
+              {!d.primary ? <Button size="sm" variant="destructive" onClick={() => void actions.removeDaemon(d.key)}>remove</Button> : null}
+            </div>)}
+            <Button variant="outline" onClick={async () => {
+              setHostsOpen(false);
+              const values = await askFor("ADD HOST", [{ label: "Socket path" }, { label: "Name" }], "Add");
+              if (values?.[0]?.trim()) void actions.addDaemon(values[0].trim(), values[1]?.trim() || undefined);
+            }}>+ host</Button>
+          </DialogContent>
+        </Dialog>
 
         {/* Everything the shell can do, by name. The palette is how a page's
             verb is reached without knowing its key — which is what makes the
@@ -370,7 +521,7 @@ export function Shell() {
                 <CommandGroup heading="Pages">
                   {PAGES.map((p) => (
                     <CommandItem key={p} value={`page ${p}`} onSelect={() => { setPage(p); setPalette(false); }}>
-                      {p}
+                      {pageLabel(p)}
                     </CommandItem>
                   ))}
                 </CommandGroup>
@@ -387,10 +538,10 @@ export function Shell() {
                   ))}
                 </CommandGroup>
                 <CommandGroup heading="Appearance">
-                  <CommandItem value="theme dark" onSelect={() => { storeTheme("web-dark"); location.reload(); }}>
+                  <CommandItem value="theme dark" onSelect={() => { storeTheme("blueprint-dark"); location.reload(); }}>
                     Dark
                   </CommandItem>
-                  <CommandItem value="theme light" onSelect={() => { storeTheme("web-light"); location.reload(); }}>
+                  <CommandItem value="theme light" onSelect={() => { storeTheme("blueprint-light"); location.reload(); }}>
                     Light
                   </CommandItem>
                 </CommandGroup>
@@ -419,7 +570,7 @@ export function Shell() {
           }}
         />
 
-        <PatchDialog patch={patch} onClose={() => setPatch(null)} />
+        <PatchDialog patch={page === "work" ? null : patch} onClose={() => setPatch(null)} />
 
         <Dialog open={!!ask} onOpenChange={(o) => { if (!o && ask) { ask.resolve(false); setAsk(null); } }}>
           <DialogContent>
@@ -527,49 +678,42 @@ function PatchDialog({ patch, onClose }: { patch: { title: string; text: string 
   );
 }
 
-/**
- * The `g` menu: `git-menu.ts`'s table, drawn.
- *
- * **One deliberate difference from the terminal's.** There the menu is a stack
- * of flat lists — choose a group, the list is replaced — because a terminal list
- * cannot be filtered as you type. Here it is one searchable list with the groups
- * as headings, which is the same table read the same way and reaches `push
- * --force-with-lease` in four keystrokes instead of two navigations. The rows,
- * the grouping and which rows are worth offering mid-sequence are all still
- * `git-menu.ts`'s answer: `groupsFor`/`itemsFor` are what filter, so a row this
- * client offers and the terminal does not is impossible.
- */
-function GitMenu({
-  open,
-  cx,
-  onOpenChange,
-  onPick,
-}: {
+/** The terminal's git menu: choose a group, then an operation; Escape goes up. */
+function GitMenu({ open, cx, onOpenChange, onPick }: {
   open: boolean;
   cx: MenuCx;
   onOpenChange: (open: boolean) => void;
   onPick: (action: GitActionId) => void;
 }) {
+  const [group, setGroup] = useState<GroupId | null>(null);
+  useEffect(() => { if (!open) setGroup(null); }, [open]);
+  const rows = group == null
+    ? groupsFor(cx).map(g => ({ key: g.key, label: g.label, pick: () => setGroup(g.id) }))
+    : [{ key: "", label: "..", pick: () => setGroup(null) }, ...itemsFor(group, cx).map(i => ({
+        key: i.key, label: i.label, pick: () => onPick(i.action),
+      }))];
   return (
-    <CmdDialog open={open} onOpenChange={onOpenChange}>
-      <CmdContent className="p-0">
-        <Command>
-          <CommandInput placeholder="A git operation…" />
-          <CommandList>
-            <CommandEmpty>Nothing matches.</CommandEmpty>
-            {groupsFor(cx).map((g) => (
-              <CommandGroup key={g.id} heading={g.label}>
-                {itemsFor(g.id, cx).map((i) => (
-                  <CommandItem key={i.action} value={`${g.label} ${i.label}`} onSelect={() => onPick(i.action)}>
-                    {i.label}
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            ))}
-          </CommandList>
-        </Command>
-      </CmdContent>
-    </CmdDialog>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm" onEscapeKeyDown={e => {
+        if (group != null) { e.preventDefault(); setGroup(null); }
+      }}>
+        <DialogHeader><DialogTitle>GIT{group ? ` · ${group}` : ""}</DialogTitle></DialogHeader>
+        <div key={group ?? "root"} role="menu" aria-label="Git operations" onKeyDown={e => {
+          const row = rows.find(r => r.key && r.key === e.key);
+          if (row) { e.preventDefault(); row.pick(); return; }
+          if (!["j", "k", "ArrowDown", "ArrowUp"].includes(e.key)) return;
+          e.preventDefault();
+          const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+          const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          buttons[(at + (e.key === "j" || e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+        }}>
+          {rows.map((row, i) => <button key={row.label} type="button" role="menuitem" autoFocus={i === 0}
+            className="flex h-row w-full items-center gap-2 px-1 text-left hover:bg-sel focus:bg-sel focus:outline-none"
+            onClick={row.pick}><span className="w-3 text-faint">{row.key}</span>{row.label}</button>)}
+        </div>
+        <span className="text-faint">j/k move · enter choose · esc {group ? "back" : "close"}</span>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -627,8 +771,9 @@ function machineOf(w: QualifiedWorkspace): string | null {
   return w.daemon ?? daemonOf(w.id);
 }
 
-function unreadOf(w: QualifiedWorkspace): number {
-  return (w as { unread?: number }).unread ?? 0;
+function workspaceAttention(w: QualifiedWorkspace): boolean {
+  const summary = w as QualifiedWorkspace & { waiting?: number; questions?: number };
+  return (summary.waiting ?? 0) > 0 || (summary.questions ?? 0) > 0 || (Array.isArray(w.agents) && w.agents.some(a => (a.question || a.state === "waiting")));
 }
 
 /** Whether this workspace still has that pane. */
@@ -673,6 +818,7 @@ export interface PageProps {
   term: { fg: string; bg: string };
   /** The stage's own events — a bell, a refused pane, a version mismatch. */
   stage: StageEvents;
+  patch: { title: string; text: string } | null;
   /** The two things SETTINGS can only be told. */
   facts: SettingsFacts;
   on: ShellCallbacks;

@@ -67,6 +67,7 @@ export interface StageEvents {
 }
 
 export interface StageProps extends StageEvents {
+  autoFocus?: boolean;
   /** The qualified pane id to stream, or null for the empty state. */
   pane: Qid | null;
   /**
@@ -477,7 +478,7 @@ class StageConn {
   }
 }
 
-export function Stage({ pane, theme, fontPx, className, ref, ...events }: StageProps) {
+export function Stage({ pane, theme, fontPx, className, ref, autoFocus = true, ...events }: StageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const screenRef = useRef<Screen | null>(null);
   const connRef = useRef<StageConn | null>(null);
@@ -495,6 +496,7 @@ export function Stage({ pane, theme, fontPx, className, ref, ...events }: StageP
     const screen = new Screen(canvas, {
       // `connRef` is filled in on the next line; the lookup is deferred to call
       // time because the screen emits its first `resize` 60ms from now.
+      autoFocus,
       onMessage: (msg) => connRef.current?.send(msg),
       getTheme: () => live.current.theme,
       onNotice: (text) => connRef.current?.flash(text, true),
@@ -559,6 +561,7 @@ export function Stage({ pane, theme, fontPx, className, ref, ...events }: StageP
 
   return (
     <div
+      data-slot="stage"
       className={
         "relative h-full bg-term-bg " +
         "focus-within:shadow-[inset_0_0_0_1px_var(--focus)] " +

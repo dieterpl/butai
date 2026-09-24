@@ -1,0 +1,117 @@
+// Run: bun test/navigation.browser.mjs. Uses a fixture bridge and isolated Vite server.
+import { chromium } from "playwright";
+import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import assert from "node:assert/strict";
+const server = spawn("bun", ["run", "dev", "--host", "127.0.0.1", "--port", "5187", "--strictPort"], { stdio: "ignore" });
+let browser;
+const errors = [], writes = [], messages = [];
+const system = { cpu_pct: 24, cpu_temp: 50, cpu_hist: [10, 20, 24], cpu_model: "Test CPU", cpu_cores: 4, cpu_threads: 8,
+  ram_used_gb: 8, ram_total_gb: 32, ram_hist: [20, 22, 25], swap_used_gb: 0, swap_total_gb: 0,
+  gpus: [], net: [{ name: "eth0", kind: "wired", carrier: true, speed_mbps: 1000, rx_bps: 8000, tx_bps: 4000, rx_hist: [0, 8000], tx_hist: [0, 4000] }],
+  disks: [], containers: [], stacks: [] };
+const daemon = { key: "local", label: "local", socket: "/test.sock", primary: true, source: "test", error: null, system };
+const agent = (pane, title) => ({ pane, title, state: "idle", exited: null, question: false, started_ms: 0, unread: false });
+const changes = { branch: "main", ahead: 0, behind: 0, upstream: null, state: "clean", conflicted: [], unstaged: [{ path: "src/main.rs", code: "M", added: 2, deleted: 1 }], staged: [], recent_commits: [] };
+const workspace = (id, name, agents) => ({ id, daemon: "local", name, cwd: `/test/${name}`, agents, processes: [], changes, stage: agents[0]?.pane ?? null });
+const spaces = [workspace("local:1", "alpha", [agent("local:11", "codex"), agent("local:12", "claude")]), workspace("local:2", "beta", [agent("local:21", "gemini")])];
+try {
+  for (let i = 0; i < 100; i++) {
+    try { if ((await fetch("http://127.0.0.1:5187")).ok) break; } catch {}
+    await new Promise(r => setTimeout(r, 100));
+  }
+  browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  page.setDefaultTimeout(5000);
+  page.on("pageerror", e => errors.push(e.message));
+  await page.routeWebSocket("**/ws?*", ws => ws.onMessage(m => messages.push(JSON.parse(m))));
+  await page.route("**/api/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname;
+    if (req.method() !== "GET") writes.push({ path, body: req.postDataJSON() });
+    let body = { ok: true };
+    if (path === "/api/state") body = { daemons: [daemon], workspaces: spaces, system };
+    else if (path === "/api/daemons") body = { daemons: [daemon] };
+    else if (path === "/api/agents") body = ["codex", "claude", "gemini"];
+    else if (path === "/api/events") { await route.fulfill({ status: 200, contentType: "text/event-stream", body: ": fixture\n\n" }); return; }
+    else if (path.endsWith("/branches")) body = { current: "main", branches: ["main"], entries: [] };
+    else if (/\/git\/(tags|stashes|remotes|worktrees)$/.test(path)) body = [];
+    else if (path.endsWith("/git/log")) body = { commits: [], more: false };
+    else if (path.endsWith("/tree")) body = { path: "", entries: [] };
+    else if (path.endsWith("/diff")) body = { path: "src/main.rs", patch: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new" };
+    else if (path === "/api/workspaces" && req.method() === "POST") body = { id: 3 };
+    else if (/\/workspaces\/local:\d+$/.test(path)) body = spaces.find(w => path.endsWith(w.id)) ?? spaces[0];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await page.goto("http://127.0.0.1:5187");
+  const view = async word => { await page.waitForFunction(word => document.querySelector("header")?.textContent.includes(`${word} v`), word); assert.match(await page.locator("header").innerText(), new RegExp(`${word} v`)); };
+  await page.getByRole("button", { name: "Switch view" }).waitFor();
+  await view("agents");
+  await page.locator('[data-surface="system"]').getByText("net eth0", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Switch view" }).click();
+  assert.deepEqual((await page.getByRole("menuitemradio").allTextContents()).map(s => s.trim()), [">agents", "files", "git", "docker", "docs", "usage"]);
+  await page.getByRole("menuitemradio", { name: "docs" }).click();
+  await view("docs");
+  await page.keyboard.press("Alt+."); await view("usage");
+  await page.keyboard.press("Alt+."); await view("agents");
+  await page.keyboard.press("Alt+0"); await view("views");
+  assert.equal(await page.locator('nav [aria-current="page"]').count(), 0);
+  await page.keyboard.press("j"); await page.keyboard.press("Enter"); await view("agents");
+  await page.keyboard.press("Alt+m");
+  await page.locator("footer").getByRole("button", { name: "settings" }).click();
+  await page.locator("footer").getByRole("button", { name: "settings" }).click(); await view("docs");
+  await page.keyboard.press("Alt+m");
+  await page.locator('[data-slot="stage"] canvas').click();
+  const before = messages.length;
+  await page.keyboard.press("Control+b"); await page.keyboard.press("0"); await view("views");
+  assert.ok(!messages.slice(before).some(m => m.input), "navigation leaked to pane");
+  await page.getByRole("button", { name: /1:alpha/ }).click(); await view("agents");
+  await page.locator('[data-surface="changes"]').getByRole("option").filter({ hasText: "src/main.rs" }).click();
+  await page.locator("main").getByText("new", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  await page.locator('[data-surface="agents"]').getByRole("option").filter({ hasText: "claude" }).click();
+  assert.equal(await page.locator('[data-slot="stage"]').count(), 1);
+  await page.keyboard.press("Alt+g");
+  await page.keyboard.press("g");
+  await page.getByRole("menuitem", { name: "b Branch" }).waitFor();
+  await page.keyboard.press("b");
+  await page.getByRole("menuitem", { name: "..", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("menuitem", { name: "b Branch" }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Alt+r");
+  await page.getByRole("listbox", { name: "refs", exact: true }).waitFor();
+  await page.keyboard.press("g");
+  await page.getByRole("menuitem", { name: "b Branch" }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Alt+r");
+  await page.keyboard.press("Alt+g"); await page.keyboard.press("c");
+  await page.getByRole("dialog").waitFor(); await page.keyboard.press("Escape");
+  await page.keyboard.press("Alt+z");
+  assert.equal(await page.locator('[data-surface="agents"]').isVisible(), false);
+  await page.keyboard.press("Alt+z");
+  assert.equal(await page.locator('[data-surface="agents"]').isVisible(), true);
+  await page.locator("footer").getByRole("button", { name: "layout" }).click();
+  const railWidth = await page.locator('.work-rails').evaluate(el => el.clientWidth);
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(width => document.querySelector('.work-rails').clientWidth > width, railWidth);
+  await page.keyboard.press("Enter");
+  await page.locator("footer").getByRole("button", { name: "detach" }).click();
+  assert.equal(await page.locator('[data-slot="stage"]').count(), 0);
+  await page.getByRole("button", { name: "attach", exact: true }).click();
+  await page.getByRole("button", { name: "+ new", exact: true }).click();
+  await page.getByRole("textbox", { name: "Directory", exact: true }).fill("/test/new-project");
+  await page.getByRole("textbox", { name: "Name", exact: true }).fill("new-project");
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await page.waitForTimeout(100);
+  assert.ok(writes.some(w => w.path === "/api/workspaces" && w.body.path === "/test/new-project"));
+  await mkdir("/var/tmp/butai-web-parity", { recursive: true });
+  await page.screenshot({ path: "/var/tmp/butai-web-parity/agents.png" });
+  await page.keyboard.press("Alt+0");
+  await page.screenshot({ path: "/var/tmp/butai-web-parity/booth.png" });
+  await page.setViewportSize({ width: 800, height: 600 });
+  assert.ok(await page.locator("header").evaluate(el => el.scrollWidth <= innerWidth));
+  await page.setViewportSize({ width: 320, height: 600 });
+  assert.ok(await page.locator("header").evaluate(el => el.scrollWidth <= innerWidth));
+  assert.deepEqual(errors, []);
+  console.log("PASS: views, Booth, workspaces, utility return, terminal chords, stage diff, rail keys, layout, detach and workspace creation");
+} finally { await browser?.close(); server.kill(); }

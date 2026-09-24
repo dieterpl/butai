@@ -578,7 +578,7 @@ use `[!] [~] [ ]` marks and plain text.
    [ ] deepseek          idle             <- dim
    [x] gemini [exited 0] exited           <- gray; exited, show exit code
 
-   [ + Spawn agent ]   (claude, codex, gemini, aider, agy)
+   [ + Spawn agent ]   (claude, codex, gemini, opencode, aider, agy)
 ```
 
 - Row click → open that agent's terminal on the stage (Frame 6, framed protocol)

@@ -265,6 +265,17 @@ export class Actions {
     return this.run(`end ${what}`, `kill:${pane}`, () => api.killPane(q(ws), q(pane)));
   };
 
+  /** Open a workspace on the chosen host and return its qualified tab id. */
+  newWorkspace = async (daemon: string, path: string, name?: string): Promise<Qid | null> => {
+    let id: Qid | null = null;
+    await this.run("open workspace", "workspace:new", async (): Promise<Reply> => {
+      const made = await api.newWorkspace(daemon, name || base(path), path);
+      id = qid(daemon, made.id);
+      return { ok: true, summary: name || base(path) };
+    });
+    return id;
+  };
+
   /**
    * Close a workspace, and everything running in it.
    *

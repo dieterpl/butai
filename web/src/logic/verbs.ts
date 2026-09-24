@@ -107,7 +107,7 @@ export const VerbId = Object.freeze(ids([
   // Overlays.
   "Accept", "Cancel", "Clear", "ClearAll", "NewFolder",
   // The rest of the workbench.
-  "Zen", "Help", "Alerts", "PasteImage", "FontBigger", "FontSmaller",
+  "Layout", "Zen", "Help", "Alerts", "PasteImage", "FontBigger", "FontSmaller",
 ]));
 
 /// One verb's name. The union of [`VerbId`]'s values, read off the table so the
@@ -263,7 +263,7 @@ function g(id: VerbId, label: string, spell: Spell, note?: string, claim?: strin
 export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   // -- spaces --------------------------------------------------------------
   g(VerbId.SpaceFiles, "files", { alt: "o", prefix: "o" },
-    "press it again for work — every space key toggles back"),
+    "press it again for agents — every space key toggles back"),
   g(VerbId.SpaceDocker, "docker", { alt: "c", prefix: "c" },
     "alt-d is the browser's address bar, so containers take c — the same letter the TUI gives them, for its own reason"),
   g(VerbId.SpaceGit, "git", { alt: "r", prefix: "r" },
@@ -271,17 +271,17 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.SpaceDocs, "docs", { alt: "m", prefix: "m" },
     "the files page filtered to a project's writing — and where this reference lives, "
     + "as a `reference` folder at the top of the rail"),
-  g(VerbId.SpaceWork, "work", { prefix: "w" }, "the stage, the rails, the terminal"),
+  g(VerbId.SpaceWork, "agents", { prefix: "w" }, "the stage, the rails, the terminal"),
   g(VerbId.SpaceNext, "next space", { alt: ".", prefix: "." }),
   g(VerbId.SpacePrev, "prev space", { alt: ",", prefix: "," }),
   // -- the one page that spans machines ------------------------------------
   // Beside the numbered projects because that is where its chip is: HOME is a
   // peer of the workspaces, not a view of one, so `alt-,` / `alt-.` walk the
   // spaces *past* it and this key and the chip are how you reach it.
-  g(VerbId.SpaceHome, "home", { alt: "0", prefix: "0" },
+  g(VerbId.SpaceHome, "booth", { alt: "0", prefix: "0" },
     "every agent on every machine — a peer of the project chips, so the space keys walk past it. "
     + "The browsers that take alt-1..alt-9 do not document alt-0, but C-b 0 is here for the ones that do"),
-  g(VerbId.FocusFleet, "the fleet (HOME)", { alt: "w", prefix: "W" },
+  g(VerbId.FocusFleet, "the fleet (BOOTH)", { alt: "w", prefix: "W" },
     "goes to HOME and puts the cursor in the list; also the way back out of the preview, "
     + "because once the preview has the keyboard every unmodified key is the agent's"),
   // -- the page that is about this client rather than a project -------------
@@ -314,6 +314,7 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.NewShell, "a new shell", { alt: "t", prefix: "t" }, "",
     "Firefox opens its Tools menu on Alt+T when the menu bar is on"),
   // -- the rest ------------------------------------------------------------
+  g(VerbId.Layout, "resize the rails", { alt: "l", prefix: "l" }),
   g(VerbId.Zen, "collapse the rails", { alt: "z", prefix: "z" }),
   g(VerbId.Alerts, "who needs you", { alt: "u", prefix: "u" },
     "the [! n] badge — a web affordance with no TUI counterpart, so it takes a letter the TUI leaves free"),

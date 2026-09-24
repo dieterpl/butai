@@ -93,11 +93,9 @@ const grps = groups({}, facts);
 // make an untouched browser look different after this stage, and that is a bug
 // rather than a feature.
 describe("the defaults", () => {
-  test("settings/default-is-system", () => {
-    // `system` means *follow the OS*, which is what index.html's
-    // prefers-color-scheme block already did — so an untouched browser must
-    // draw exactly what it drew before this page existed.
-    expect(DEFAULTS.theme).toBe("system");
+  test("settings/default-matches-terminal", () => {
+    expect(DEFAULTS.theme).toBe("blueprint-dark");
+    expect(DEFAULTS.fontPx).toBe(14);
   });
 
   test("settings/defaults-are-absences", () => {
@@ -206,7 +204,7 @@ describe("the palettes against the stylesheet", () => {
       resolveTheme("system", false).name,
       resolveTheme("nonsense", true).name,
       resolveTheme("gruvbox-dark", false).name,
-    ]).toEqual(["web-dark", "web-light", "web-dark", "gruvbox-dark"]);
+    ]).toEqual(["blueprint-dark", "blueprint-light", "blueprint-dark", "gruvbox-dark"]);
   });
 
   test("settings/term-colours", () => {
@@ -254,7 +252,7 @@ describe("the store", () => {
       defaultAgent: 12,
     })));
     expect(absurd).toEqual({
-      theme: "system", fontPx: 40, leftRail: 640, rightRail: 180, zen: true, defaultAgent: "",
+      theme: "blueprint-dark", fontPx: 40, leftRail: 640, rightRail: 180, zen: true, defaultAgent: "",
     });
   });
 
@@ -376,7 +374,7 @@ describe("the clamps", () => {
       fontAuto: stepSize(RowId.Font, 30, 0),
     }).toEqual({
       railUp: 400, railDownFromAuto: 260, railFloor: 180, railCeil: 640, railAuto: 0,
-      fontUp: 16, fontFloor: 8, fontCeil: 40, fontAuto: 15,
+      fontUp: 16, fontFloor: 8, fontCeil: 40, fontAuto: 14,
     });
   });
 

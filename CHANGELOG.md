@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OpenCode is a built-in agent.** It now appears in the agent picker without
+  configuration and launches with an unattended permission override. Its CLI
+  cannot name a session on first launch, so daemon restart restore repaints its
+  saved terminal output and starts a fresh conversation, as Codex does.
+
 - **Windows TUI experimental alpha (build `1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
   background daemon, private named-pipe IPC, Windows shell/agent launchers,
   clipboard and URL support, and SSH connections to Unix hosts. Windows uses

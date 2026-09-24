@@ -23,14 +23,12 @@
 // Restarting whatever your cursor happens to be resting on, while the logs on
 // screen are a different container's, is the accident that shape prevents.
 //
-// Two rows in one list therefore have to be told apart, and this is exactly
-// where the vanilla page grew a second selection style — a band for the followed
-// row, an outline for the cursor. They are not the same kind of thing, so they
-// do not both want a `Row` state: **the followed row is `selected`, and the
-// cursor is focus.** `Row` already draws a keyboard focus ring and already takes
-// `Enter`, so moving the cursor moves the browser's own focus, which also
-// scrolls the row into view and tells a screen reader where it is. One band, one
-// ring, and neither of them invented here.
+// Two rows in one list therefore have to be told apart. The cursor is the
+// persistent selection band; the followed row gets a narrow accent rule. Using
+// browser focus as the cursor made the highlight disappear whenever focus moved
+// to the stage or browser chrome, even though the keyboard cursor had not moved.
+// Focus still follows keyboard walks for scrolling and accessibility, but it is
+// no longer the only visible record of where the cursor is.
 //
 // The one thing that is not the vanilla's: with nothing followed yet, the action
 // verbs act on the cursor's row rather than doing nothing at all. The bar is
@@ -258,8 +256,12 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
   const stacks = stacksFor(world, ws);
   const rows = useMemo(() => listRows(stacks, cwd), [stacks, cwd]);
   const [sel, setSel] = useState<string | null>(null);
-  const [cursor, setCursor] = useState(0);
-  const at = Math.max(0, Math.min(rows.length - 1, cursor));
+  // Keep the cursor by row identity rather than array offset. Docker telemetry
+  // can add/remove a container between pushes; an integer cursor then appears
+  // to jump to its neighbour even though the user did not move it.
+  const [cursor, setCursor] = useState<string | null>(null);
+  const found = cursor == null ? -1 : rows.findIndex((r) => r.key === cursor);
+  const at = found >= 0 ? found : 0;
   const bar = rows.find((r) => r.key === sel) ?? null;
   /** The row a verb acts on: the bar's, or the cursor's while nothing is followed yet. */
   const target = bar ?? rows[at] ?? null;
@@ -270,9 +272,9 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
   const verbs = dockerVerbs(rows[at]?.kind ?? DockerRow.None);
   const total = stacks.reduce((n, s) => n + s.total, 0);
 
-  // The cursor is focus, so moving it moves the browser's. Only after the
-  // keyboard has actually been used: stealing focus on load would scroll a page
-  // the reader has not asked to move.
+  // Keyboard walks also move browser focus, for scrolling and accessibility.
+  // Only after the keyboard has actually been used: stealing focus on load
+  // would scroll a page the reader has not asked to move.
   const listEl = useRef<HTMLDivElement | null>(null);
   const walked = useRef(false);
   useEffect(() => {
@@ -304,7 +306,7 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
 
   const select = useCallback(
     (i: number) => {
-      setCursor(i);
+      setCursor(rows[i]?.key ?? null);
       follow(rows[i]);
     },
     [rows, follow],
@@ -339,12 +341,14 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
     (id: VerbId): boolean => {
       if (id === VerbId.Down) {
         walked.current = true;
-        setCursor(Math.min(rows.length - 1, at + 1));
+        const next = rows[Math.min(rows.length - 1, at + 1)];
+        if (next) setCursor(next.key);
         return true;
       }
       if (id === VerbId.Up) {
         walked.current = true;
-        setCursor(Math.max(0, at - 1));
+        const next = rows[Math.max(0, at - 1)];
+        if (next) setCursor(next.key);
         return true;
       }
       if (id === VerbId.DockerLogs) {
@@ -424,7 +428,8 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
                     line={r}
                     index={i}
                     cwd={cwd}
-                    selected={r.key === sel}
+                    selected={i === at}
+                    followed={r.key === sel}
                     onSelect={() => select(i)}
                   />
                 ))}
@@ -526,15 +531,18 @@ interface DockerListRowProps {
   index: number;
   cwd: string;
   selected: boolean;
+  followed: boolean;
   onSelect: () => void;
 }
 
-function DockerListRow({ line, index, cwd, selected, onSelect }: DockerListRowProps) {
+function DockerListRow({ line, index, cwd, selected, followed, onSelect }: DockerListRowProps) {
   const c = line.container;
   const running = up(c);
   return (
     <Row
       selected={selected}
+      data-followed={followed ? "" : undefined}
+      className={followed ? "border-l border-primary" : "border-l border-transparent"}
       onSelect={onSelect}
       data-row={index}
       title={c ? `${c.name} (${c.state})` : line.stack.project ? `compose: ${line.stack.project}` : line.stack.label}

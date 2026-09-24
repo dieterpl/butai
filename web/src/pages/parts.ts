@@ -71,7 +71,7 @@ export interface BadgeLook {
 export const MARK_TONE: Readonly<Record<MarkTone, string>> = Object.freeze({
   needs: "text-bad",
   work: "text-primary",
-  done: "text-ok",
+  done: "text-info",
   idle: "text-dim",
   dead: "text-dim",
 });
@@ -85,21 +85,6 @@ export const MARK_BADGE: Readonly<Record<MarkTone, BadgeLook>> = Object.freeze({
   done: { variant: "outline", className: "border-ok/40 bg-ok/10 text-ok" },
   idle: { variant: "outline" },
   dead: { variant: "outline" },
-});
-
-/// The badge's word, where `AGENT_MARK`'s is a sentence.
-///
-/// "done — your turn" is sixteen characters in a rail that is 240 wide, and it
-/// spends them saying what the `[v]` beside it already said — so the row it
-/// belongs to has nothing left to print the agent's name in, which is the only
-/// part that is not already on screen twice. The long form is not lost: it is
-/// the row's `title`, where a sentence is free.
-const MARK_LABEL: Readonly<Record<MarkTone, string>> = Object.freeze({
-  needs: "needs you",
-  work: "working",
-  done: "done",
-  idle: "idle",
-  dead: "exited",
 });
 
 /// Glyph, tone, word and sentence for an agent, exited or otherwise.
@@ -117,16 +102,21 @@ export interface Mark {
 /// The `exited` arm is the caller's job in the vanilla client and is done twice
 /// there, once per page. It is one thing: an agent with an `exited` code is dead
 /// whatever its last known state said, and the code is worth printing.
-export function agentMark(agent: QualifiedAgent | AgentDto | null | undefined): Mark {
+export function agentMark(agent: QualifiedAgent | AgentDto | null | undefined, now = Date.now()): Mark {
+  const unread = agent?.unread ? "•" : "";
   if (agent && agent.exited != null) {
-    const said = "exited " + agent.exited;
-    return { glyph: "[x]", tone: "dead", short: said, label: said };
+    const short = (agent.exited === 0 ? "exit" : `exit ${agent.exited}`) + unread;
+    return { glyph: " x ", tone: agent.exited === 0 ? "dead" : "needs", short, label: short };
   }
-  // The `??` is unreachable through the types and deliberate anyway: the state
-  // arrives off a wire, and a daemon that grows a sixth one must draw a row
-  // rather than a blank.
   const [glyph, tone, label] = (agent && AGENT_MARK[agent.state]) ?? AGENT_MARK.idle;
-  return { glyph, tone, short: MARK_LABEL[tone], label };
+  if (agent?.state === "working") {
+    const secs = agent.working_since_ms > 0 ? Math.max(0, Math.floor((now - agent.working_since_ms) / 1000)) : null;
+    const elapsed = secs == null ? "" : secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+    const tick = Math.floor(now / 200);
+    return { glyph: [".  ", ".. ", "..."][tick % 3]!, tone, short: `${"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[tick % 10]}${elapsed ? ` ${elapsed}` : ""}`, label };
+  }
+  const short = agent?.state === "waiting" ? "WAIT" : agent?.state === "finished" ? `done${unread}` : agent?.state === "exited" ? `exit${unread}` : "idle";
+  return { glyph, tone: agent?.state === "finished" && !agent.unread ? "idle" : tone, short, label };
 }
 
 const OUTLINE: BadgeLook = Object.freeze({ variant: "outline" });
@@ -151,6 +141,9 @@ export function procBadge(status: string): BadgeLook {
 
 /// One row of a machine's telemetry, as a [`Gauge`] takes it.
 export interface GaugeSpec {
+  history?: readonly number[];
+  traffic?: { rx: readonly number[]; tx: readonly number[] };
+  readingOnly?: boolean;
   key: string;
   label: string;
   /// Where the bar sits, 0..100 — a percentage in every case, including RAM,
@@ -229,14 +222,16 @@ export function sysGauges(sys: SysDto | null | undefined): GaugeSpec[] {
   const out: GaugeSpec[] = [
     {
       key: "cpu",
-      label: "cpu",
+      label: "cpu" + (sys.cpu_model ? ` ${sys.cpu_model}` : ""),
+      history: sys.cpu_hist ?? [],
       value: sys.cpu_pct,
       tone: loadTone(sys.cpu_pct),
       text: num(sys.cpu_pct) + "%" + (sys.cpu_temp != null ? " " + num(sys.cpu_temp) + "°" : ""),
     },
     {
       key: "ram",
-      label: "ram",
+      label: "ram" + (sys.swap_total_gb ? ` swap ${num(sys.swap_used_gb)}/${num(sys.swap_total_gb)}G` : ""),
+      history: sys.ram_hist ?? [],
       value: ram,
       tone: loadTone(ram),
       text: fmtGb(sys.ram_used_gb) + "/" + num(sys.ram_total_gb) + "G",
@@ -245,11 +240,20 @@ export function sysGauges(sys: SysDto | null | undefined): GaugeSpec[] {
   (sys.gpus || []).forEach((g, i) => {
     out.push({
       key: "gpu" + i,
-      label: "gpu" + i,
+      label: "gpu" + i + (g.name ? ` ${g.name}` : ""),
+      history: g.hist ?? [],
       value: g.pct,
       tone: loadTone(g.pct),
       text: num(g.pct) + "% " + fmtGb(g.mem_used_gb) + "/" + num(g.mem_total_gb) + "G",
     });
+  });
+  const rate = (bps: number) => bps >= 1e9 ? `${(bps / 1e9).toFixed(1)}G` : bps >= 1e6 ? `${(bps / 1e6).toFixed(1)}M` : bps >= 1e3 ? `${Math.round(bps / 1e3)}k` : `${Math.round(bps)}B`;
+  (sys.net ?? []).filter(n => n.carrier && !["loopback", "bridge", "veth"].includes(n.kind)).slice(0, 2).forEach(n => {
+    const peak = Math.max(64 * 1024, ...n.rx_hist, ...n.tx_hist);
+    const scale = (v: number) => v < 4 * 1024 ? 0 : Math.min(100, v / peak * 100);
+    out.push({ key: `net:${n.name}`, label: `net ${n.name}`, value: 0, tone: "accent",
+      text: `↓${rate(n.rx_bps)} ↑${rate(n.tx_bps)}`,
+      traffic: { rx: n.rx_hist.map(scale), tx: n.tx_hist.map(scale) } });
   });
   // Disks last, below the things that move: they are the slowest reading here,
   // so they are what the eye passes on the way somewhere else. The mount is in
@@ -259,6 +263,7 @@ export function sysGauges(sys: SysDto | null | undefined): GaugeSpec[] {
     const pct = d.total_gb ? (100 * d.used_gb) / d.total_gb : 0;
     out.push({
       key: "disk:" + d.mount,
+      readingOnly: true,
       // A mount that missed the daemon's sweep says so rather than going
       // quiet: the row is still its last good reading, and a row that vanished
       // would read as a filesystem somebody unmounted.

@@ -32,7 +32,7 @@ actually run: start agents, watch your server and tests, read the diff, commit.
 Each project is a tab. Nothing splits and nothing rearranges, so after the first
 day you stop looking for things and start glancing at them.
 
-It runs `claude`, `codex`, `gemini`, `aider` and `agy` out of the box, and
+It runs `claude`, `codex`, `gemini`, `opencode`, `aider` and `agy` out of the box, and
 anything else you name in an `[[agents]]` block — all of them in one rail, on
 one keymap. **The workbench outlives all of them:** harnesses come and go, and
 this is the frame they run inside.
@@ -326,9 +326,10 @@ with no picker in between. `A` (or `:agent`) still opens the list when you want
 a different one, `d` again unpins, and `:agent-default` clears it outright — the
 pin is stored as `default_agent` under `[general]`.
 
-Built-ins (Claude Code, Codex, Gemini CLI, aider, Antigravity, …) launch with
-their auto-approve flags. Define an `[[agents]]` block to override that, or to
-add your own.
+Built-ins (Claude Code, Codex, Gemini CLI, OpenCode, aider, Antigravity, …)
+launch unattended. OpenCode gets the equivalent permission override through
+`OPENCODE_PERMISSION`; the others use their auto-approve flags. Define an
+`[[agents]]` block to override that, or to add your own.
 
 ### USAGE — which account stops you first
 

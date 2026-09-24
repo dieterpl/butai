@@ -46,6 +46,7 @@ import {
   changesHelpVerbs,
   homeVerbs,
   procsVerbs,
+  keyName,
   type Verb,
 } from "../logic/verbs.ts";
 import type { UsageDto } from "../protocol/generated/protocol.ts";
@@ -183,6 +184,25 @@ function pressWork(p: PageProps, act: WorkActions, surface: string, key: string)
   }
 }
 
+// The two live-terminal pages share the same rule: bare keys belong to the
+// program while its input sink is focused, and to the selected rail otherwise.
+function useRailKeys(run: (key: string) => boolean) {
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey ||
+          document.querySelector('[role="dialog"]') ||
+          target?.closest('[data-slot="stage"], input, textarea, select, [contenteditable="true"]')) return;
+      if (run(keyName(e))) { e.preventDefault(); e.stopPropagation(); }
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  });
+}
+function focusTerminal() {
+  document.querySelector<HTMLElement>('[data-slot="stage"] textarea, [data-slot="stage"] canvas')?.focus();
+}
+
 // ---------------------------------------------------------------------------
 // USAGE
 // ---------------------------------------------------------------------------
@@ -263,11 +283,47 @@ function Work(p: PageProps) {
       // daemon was asked. A page that took them as two gestures would be a page
       // that can show a diff for a row it has not selected.
       p.on.setPath(what.path);
+      p.on.setFocus("changes");
       withWs(p, (w) => p.actions.openDiff(w, what));
     },
     showCommit: (id) => withWs(p, (w) => p.actions.showCommit(w, id)),
-    press: (surface, key) => pressWork(p, act, surface, key),
+    press: (surface, key) => { if (key === "g" && surface === "changes") p.on.gitMenu(); else pressWork(p, act, surface, key); },
   };
+
+  useRailKeys(key => {
+    const surface = p.focus;
+    if (key === "tab") {
+      const surfaces = ["agents", "procs", "changes"];
+      p.on.setFocus(surfaces[(surfaces.indexOf(surface) + 1) % surfaces.length]!);
+      return true;
+    }
+    if (key === "esc") { p.on.setFocus("agents"); return true; }
+    if (key === "j" || key === "k" || key === "arrowdown" || key === "arrowup") {
+      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+      if (surface === "agents" || surface === "procs") {
+        const rows = surface === "agents" ? p.ws?.agents ?? [] : (p.ws?.processes ?? []).filter(x => !x.name.startsWith("logs:"));
+        const at = rows.findIndex(x => x.pane === p.view.pane);
+        const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
+        if (next) p.on.setPane(next.pane);
+      } else if (surface === "changes") {
+        const ch = p.ws?.changes;
+        const rows = ch ? [...ch.conflicted, ...ch.unstaged, ...ch.staged] : [];
+        const at = rows.findIndex(x => x.path === p.view.path);
+        const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
+        if (next) p.on.setPath(next.path);
+      } else return false;
+      return true;
+    }
+    if (key === "enter" && (surface === "agents" || surface === "procs" || surface === "stage")) {
+      p.on.setFocus("stage"); focusTerminal(); return true;
+    }
+    if (key === "enter" && surface === "changes") {
+      pressWork(p, act, surface, "d"); return true;
+    }
+    if (key === "g" && surface === "changes") { p.on.gitMenu(); return true; }
+    if (!verbFor(surface, key, p.view.pin)) return false;
+    pressWork(p, act, surface, key); return true;
+  });
 
   const row = changesRowOf(p.ws, p.view.path);
   const view: WorkView = {
@@ -276,6 +332,11 @@ function Work(p: PageProps) {
     pin: p.view.pin,
     busy: p.view.busy,
     rails: p.view.rails,
+    zen: p.view.zen,
+    procsHeight: p.view.procsHeight,
+    systemHeight: p.view.systemHeight,
+    leftRail: p.view.leftRail,
+    rightRail: p.view.rightRail,
     ...(row ? { changesRow: row } : {}),
   };
 
@@ -285,11 +346,12 @@ function Work(p: PageProps) {
       ws={p.ws}
       actions={act}
       focus={p.focus}
-      on={{ selectPane: (pane) => p.on.setPane(pane), rails: (open) => p.on.setRails(open) }}
+      on={{ selectPane: (pane) => { p.on.setPane(pane); p.on.setFocus(p.ws?.agents.some(a => a.pane === pane) ? "agents" : "procs"); }, rails: (open) => p.on.setRails(open) }}
       view={view}
       theme={p.term}
       fontPx={p.view.fontPx}
       stage={p.stage}
+      patch={p.patch}
     />
   );
 }
@@ -330,10 +392,13 @@ function Home(p: PageProps) {
     fold: (folds) => p.on.setFolds(folds),
     // Starting an agent leaves you on HOME: the new row appears in the fleet
     // and the preview points at it, which is the whole of what you wanted to
-    // see. A button that started something *and* threw the page onto another
-    // machine is the bug that made agent rows two-step.
+    // see. A named `[+ claude]` is already the answer to "which agent?", so it
+    // goes straight to spawn just like the terminal BOOTH does. Sending it
+    // through `spawnPick` first made this button depend on a second roster
+    // request and could replace the promised one-click action with a picker.
     start: (space) => {
-      void p.actions.spawnPick(space.ws, false, space.preferred);
+      if (space.preferred) void p.actions.spawn(space.ws, space.preferred);
+      else void p.actions.spawnPick(space.ws, false, null);
     },
     close: (space) => {
       void p.actions.closeWorkspace(space.ws, space.name);
@@ -395,6 +460,21 @@ function Home(p: PageProps) {
       p.actions.toast(verb ? `${verb.label} is the keyboard's, not a button` : `${key} is not bound on ${surface}`);
     },
   };
+
+  useRailKeys(key => {
+    if (["j", "k", "arrowdown", "arrowup"].includes(key)) {
+      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+      p.on.setSel(Math.max(0, Math.min(list.length - 1, at + delta)));
+      return true;
+    }
+    if (key === "tab") { focusTerminal(); return true; }
+    if (key === "enter" && row?.kind === HomeRowKind.Machine) {
+      on.fold({ ...p.view.folds, machines: toggleFold(p.view.folds.machines, row.label ?? "") });
+      return true;
+    }
+    if (!verbFor("home", key, p.view.pin)) return false;
+    act.press("home", key); return true;
+  });
 
   return (
     <HomePage
@@ -577,7 +657,7 @@ function Settings(p: PageProps) {
     <SettingsPage
       world={p.world}
       actions={p.actions}
-      on={{ close: () => p.on.setPage("work") }}
+      on={{ close: () => p.on.closeUtility() }}
       facts={p.facts}
       ws={p.ws}
       focus={p.focus}
@@ -591,7 +671,7 @@ function Help(p: PageProps) {
       prefix={p.view.prefix}
       topic={p.view.topic}
       onTopic={(slug) => p.on.setTopic(slug)}
-      onClose={() => p.on.setPage("work")}
+      onClose={() => p.on.closeUtility()}
     />
   );
 }

@@ -1,58 +1,17 @@
-// HOME — the one page that spans daemons.
-//
-// The port of `web/ui/home.js`, which is itself the port of `Page::Home` and
-// `draw_home_page`. Three columns, and the middle one is a **real pane**:
-//
-//   FLEET                 STAGE                     COMPUTE
-//   every agent on        the selected agent's      what each machine is
-//   every machine         live screen               doing to itself
-//
-// The row model is `logic/fleet.ts` — `allAgentRows`, `machineRows`, `homeRows`,
-// `homeTray` — imported, not reimplemented. It is pure, `test/fleet.test.ts`
-// runs the lot against hand-written multi-daemon state whose ids collide on
-// purpose, and it is the only reason a page that merges four machines can be
-// trusted to keep them apart.
-//
-// ## The three things the audit found here, and where each went
-//
-// **The hint bar spanned the left column.** `enter open` sat under the fleet
-// list, which says the key belongs to the list; it belongs to the page.
-// `HintBar` is full-width and there is one, at the bottom, under all three
-// columns.
-//
-// **The column had two header styles in it** — FLEET's own, and a full-width
-// `CLEAR` band that was a header in everything but name. Both are `SectionTitle`
-// now, and the band's two states are what its right-hand `action` says: a red
-// count when something is waiting, `clear` when nothing is.
-//
-// **The compute meters ended at 1112px while their values right-aligned at
-// 1268px.** `Gauge` puts the bar and the number in one gutter, so the two line
-// up by construction rather than by both being roughly right.
-//
-// ## Projects are rows, not a second kind of header
-//
-// `homeRows` emits machine, project and agent rows in one sequence. The machine
-// is a `SectionTitle`; the project is a `Row` carrying a dim label, because a
-// second *header* style — indented, smaller, its own colour — is exactly the
-// drift this rewrite exists to remove, and a subordinate row says "these belong
-// to the line above" just as well. The agents under it are `Row`s you can
-// select; the project above them is one you cannot.
-//
-// ## The pane id is the whole safety property
-//
-// A fleet row's `pane` is `<daemon>:<n>`, so pointing the stage at it dials
-// *that machine's* socket and attaches that machine's pane. Every daemon has a
-// pane 5; on this page two of them are one row apart. That is why the stage's
-// title carries the machine as well as the agent, and why nothing here ever
-// hands a bare integer to anything.
+// BOOTH — every workspace across every connected machine. The fleet cursor
+// selects the live preview; streaming never takes focus away from the list.
+// Fleet, stage and compute share the terminal's three-column geometry. The pure
+// logic/fleet model owns grouping, attention ranking, folding and qualified ids.
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
+import { AgentStatus } from "@/components/AgentStatus";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Empty } from "@/components/Empty";
+import { Meter } from "@/components/Meter";
 import { Gauge } from "@/components/Gauge";
 import { HintBar } from "@/components/HintBar";
 import { Row } from "@/components/Row";
@@ -84,7 +43,7 @@ import {
 import type { TermTheme } from "@/logic/palette.ts";
 import { homeVerbs } from "@/logic/verbs.ts";
 
-import { MARK_BADGE, MARK_TONE, SCROLLER, agentMark, hints, loadTone, num, sysGauges } from "./parts.ts";
+import { MARK_TONE, SCROLLER, agentMark, hints, loadTone, num, sysGauges } from "./parts.ts";
 
 // ---------------------------------------------------------------------------
 // What the page is handed
@@ -184,16 +143,9 @@ function Tray({
   const tray = homeTray(rows);
   return (
     <>
-      <SectionTitle
-        action={
-          tray.length ? <Badge variant="destructive">{tray.length}</Badge> : <Badge variant="outline">clear</Badge>
-        }
-      >
-        needs you
-      </SectionTitle>
-      {!tray.length ? <Empty>nothing waiting</Empty> : null}
-      <div role="listbox" aria-label="needs you">
-        {tray.map(({ row, sel: at }) => {
+      <div role="listbox" aria-label="needs you" className="h-[4lh] shrink-0 overflow-hidden">
+        {!tray.length ? <Empty>nothing needs you</Empty> : null}
+        {tray.slice(0, 4).map(({ row, sel: at }) => {
           // The mark, not a hard-coded `[?]`. The tray ranks three states —
           // blocked, then an unread crash, then an unread turn — and the old
           // page drew the waiting glyph for all three, which is a third
@@ -216,13 +168,20 @@ function Tray({
               }}
               title={`${row.agent.title} — ${m.label} · ${where(row)}`}
             >
-              <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}>{m.glyph}</span>
+              <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={row.agent} sprite /></span>
               <span className="min-w-0 flex-1 truncate">{row.agent.title}</span>
               <span className="shrink-0 truncate text-11 text-dim">{where(row)}</span>
             </Row>
           );
         })}
       </div>
+      <SectionTitle
+        action={
+          tray.length ? <Badge variant="destructive">{tray.length}</Badge> : <Badge variant="outline">clear</Badge>
+        }
+      >
+        needs you
+      </SectionTitle>
     </>
   );
 }
@@ -249,16 +208,20 @@ function FleetList({
           // The whole row folds. A machine has no workspace to open and no pane
           // to preview, so there is nothing else pressing it could mean.
           return (
-            <SectionTitle
+            <Row
               key={`m${r.daemon}${i}`}
-              action={
-                <Badge variant="outline">{r.agents === 0 ? "nothing open" : r.agents}</Badge>
-              }
-              onClick={() => on.fold({ ...folds, machines: toggleFold(folds.machines, r.label ?? "") })}
+              compact
+              selected={i === sel}
+              data-home-row={i}
+              onSelect={() => {
+                on.walk(i);
+                on.fold({ ...folds, machines: toggleFold(folds.machines, r.label ?? "") });
+              }}
             >
-              <span className="mr-1 font-mono text-dim">{r.folded ? ">" : "v"}</span>
-              {r.label ?? ""}
-            </SectionTitle>
+              <span className="shrink-0 font-mono text-dim">{r.folded ? ">" : "v"}</span>
+              <span className="min-w-0 flex-1 truncate">{r.label ?? ""}</span>
+              <Badge variant="outline">{r.agents === 0 ? "nothing open" : r.agents}</Badge>
+            </Row>
           );
         }
         if (r.kind === HomeRowKind.Space) {
@@ -268,13 +231,14 @@ function FleetList({
               key={`s${space.ws}${i}`}
               compact
               selected={i === sel}
+              data-home-row={i}
               // Off the name and off the button, a project row folds.
               onSelect={() => {
                 on.walk(i);
                 on.fold({ ...folds, spaces: toggleFold(folds.spaces, space.ws) });
               }}
             >
-              <span className="shrink-0 pl-2 font-mono text-dim">{r.folded ? ">" : "v"}</span>
+              <span className="shrink-0 pl-1 font-mono text-dim">└─ {r.folded ? ">" : "v"}</span>
               {/* The name, and only the name, travels. */}
               <button
                 type="button"
@@ -295,7 +259,7 @@ function FleetList({
                     const m = agentMark(a.agent);
                     return (
                       <span key={a.pane} className={cn("font-mono", MARK_TONE[m.tone])} title={a.agent.title}>
-                        {m.glyph}
+                        <AgentStatus agent={a.agent} sprite />
                       </span>
                     );
                   })}
@@ -340,19 +304,17 @@ function FleetList({
           );
         }
         const m = agentMark(r.row.agent);
-        const badge = MARK_BADGE[m.tone];
         return (
           <Row
             key={r.row.pane}
             selected={i === sel}
+            data-home-row={i}
             onSelect={() => on.walk(i)}
             title={`${r.row.agent.title} — ${m.label} · ${where(r.row)}`}
           >
-            <span className={cn("shrink-0 pl-4 font-mono", MARK_TONE[m.tone])}>{m.glyph}</span>
+            <span className="shrink-0 pl-2 text-dim">{list[i + 1]?.kind === HomeRowKind.Agent ? "├─" : "└─"}</span>
+            <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={r.row.agent} sprite /></span>
             <span className="min-w-0 flex-1 truncate">{r.row.agent.title}</span>
-            <Badge variant={badge.variant} className={badge.className}>
-              {m.short}
-            </Badge>
             <Button
               size="sm"
               variant="ghost"
@@ -399,6 +361,13 @@ function Machine({ m, open, onToggle }: { m: MachineRow; open: boolean; onToggle
   const conts = sys?.containers.length ?? 0;
   const stacks = sys?.stacks.length ?? 0;
   const p = machinePressure(sys);
+  if (!open) return <Row compact onSelect={onToggle} title={down ? m.error ?? "host is away" : `${p.label} ${num(p.pct)}%`}>
+    <span className="text-dim">&gt;</span><span className="min-w-0 truncate">{m.label}</span>
+    {!down && sys ? <Meter value={p.pct} tone={loadTone(p.pct)} className="w-auto flex-1" /> : <span className="flex-1" />}
+    <span className="text-dim">{m.agents}</span>
+    <span className={down ? "text-bad" : p.pct >= 85 ? "text-bad" : "text-dim"}>{down ? "away" : sys ? `${p.label} ${num(p.pct)}%` : "—"}</span>
+  </Row>;
+
   return (
     // `py-0 gap-0`: shadcn's `Card` is 24px of padding and a 24px gap between
     // its children, which is a card on a marketing page. This is a rail block
@@ -426,7 +395,7 @@ function Machine({ m, open, onToggle }: { m: MachineRow; open: boolean; onToggle
           <Gauge label={p.label.toLowerCase()} value={p.pct} tone={loadTone(p.pct)} text={num(p.pct) + "%"} />
         ) : null}
         {gauges.map((g) => (
-          <Gauge key={g.key} label={g.label} value={g.value} tone={g.tone} text={g.text} />
+          <Gauge key={g.key} label={g.label} value={g.value} tone={g.tone} text={g.text} history={g.history} traffic={g.traffic} readingOnly={g.readingOnly} />
         ))}
         {!down && open && (conts || stacks) ? (
           <>
@@ -450,7 +419,6 @@ export function HomePage({
   sel = 0,
   folds = NO_FOLDS,
   pin = null,
-  pane,
   theme,
   fontPx,
   stage,
@@ -475,8 +443,21 @@ export function HomePage({
   // the fleet is a fly-over of each project's screen — see `homePreview`.
   const previewed = homePreview(list, at);
   const cursor = previewed == null ? null : (rows[previewed] ?? null);
-  const shown = pane ?? (cursor ? cursor.pane : null);
+  const shown = cursor ? cursor.pane : null;
   const title = cursor ? `${cursor.agent.title} · ${where(cursor)}` : "stage";
+
+  // The cursor belongs to the fleet model, not to whichever DOM node happened
+  // to receive the last click. Follow it after keyboard/tray moves so an old
+  // focus ring cannot remain on one row while the selection band moves to
+  // another. Skip the initial render: BOOTH must not steal focus on entry.
+  const fleet = useRef<HTMLDivElement | null>(null);
+  const previous = useRef(at);
+  useEffect(() => {
+    if (previous.current === at) return;
+    previous.current = at;
+    const el = fleet.current?.querySelector<HTMLElement>(`[data-home-row="${at}"]`);
+    if (el && el !== document.activeElement) el.focus();
+  }, [at]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
@@ -484,23 +465,23 @@ export function HomePage({
         className={cn(
           "grid min-h-0 flex-1",
           "[grid-template-columns:1fr]",
-          "md:[grid-template-columns:minmax(220px,26%)_1fr]",
-          "xl:[grid-template-columns:minmax(220px,26%)_1fr_minmax(200px,20%)]",
+          "md:[grid-template-columns:clamp(22ch,25%,40ch)_1fr_clamp(20ch,25%,36ch)]",
         )}
       >
         <section className="hidden min-h-0 min-w-0 flex-col border-r border-border bg-card md:flex">
-          <SectionTitle action={<Badge variant="outline">{rows.length}</Badge>}>fleet</SectionTitle>
+          <SectionTitle>fleet ({rows.length})</SectionTitle>
           <Tray rows={rows} list={list} previewed={previewed} on={on} />
           <ScrollArea className={cn("min-h-0 flex-1 border-t border-border", SCROLLER)}>
-            <div className="pb-1">
+            <div className="pb-1" ref={fleet} role="listbox" aria-label="fleet">
               <FleetList list={list} sel={at} folds={folds} on={on} />
             </div>
           </ScrollArea>
         </section>
 
-        <section className="flex min-h-0 min-w-0 flex-col">
+        <section className="flex min-h-0 min-w-0 flex-col shadow-[inset_0_0_0_1px_var(--color-border)]">
           <SectionTitle>{title}</SectionTitle>
           <Stage
+            autoFocus={false}
             pane={shown}
             theme={theme}
             className="min-h-0 flex-1"
@@ -509,7 +490,7 @@ export function HomePage({
           />
         </section>
 
-        <section className="hidden min-h-0 min-w-0 flex-col border-l border-border bg-card xl:flex">
+        <section className="hidden min-h-0 min-w-0 flex-col border-l border-border bg-card md:flex">
           <SectionTitle>compute</SectionTitle>
           <ScrollArea className={cn("min-h-0 flex-1", SCROLLER)}>
             <div className="flex flex-col gap-2 p-2">

@@ -56,15 +56,10 @@ export interface SettingsStorage {
   setItem(key: string, value: string): void;
 }
 
-/// Every setting this client has, and what it is when nobody has said.
-///
-/// `theme: "system"` is not a fallback, it is a palette: it means *follow the
-/// OS*, which is exactly what `index.html`'s `prefers-color-scheme` block has
-/// always done. So an untouched browser draws precisely what it drew before
-/// this page existed, and choosing anything else is the only way to change it.
+/// Defaults match the terminal client; explicit browser preferences still win.
 export const DEFAULTS: Readonly<Settings> = Object.freeze({
-  theme: "system",
-  fontPx: 15,
+  theme: "blueprint-dark",
+  fontPx: 14,
   /// 0 is `auto`: the CSS keeps its own `minmax()` and the rail breathes with
   /// the window. A number pins it, the way `[ui] left_rail` pins cells.
   leftRail: 0,
@@ -214,14 +209,14 @@ export const THEMES: readonly Theme[] = Object.freeze([
   theme("blueprint-dark", "blueprint dark", "dark", {
     ground: "#151a23", surface: "#1b2230", sunken: "#10151d", selection: "#1f2535",
     ink: "#dde4ef", muted: "#8d9aae", faint: "#66738a", rule: "#2b3547",
-    rule_focus: "#7aa2f7", on_accent: "#151a23", accent: "#7aa2f7", info: "#7aa2f7",
+    rule_focus: "#7aa2f7", on_accent: "#151a23", accent: "#7aa2f7", info: "#7dcfff",
     ok: "#9ece6a", attention: "#e0af68", danger: "#f7768e",
     status_bg: "#1b2230", status_fg: "#8d9aae",
   }),
   theme("blueprint-light", "blueprint light", "light", {
     ground: "#e9edf3", surface: "#f7f9fc", sunken: "#dfe5ee", selection: "#dbe2ee",
     ink: "#1b2331", muted: "#5c6980", faint: "#8a95a8", rule: "#c6cfdd",
-    rule_focus: "#2f56b8", on_accent: "#f7f9fc", accent: "#2f56b8", info: "#2f56b8",
+    rule_focus: "#2f56b8", on_accent: "#f7f9fc", accent: "#2f56b8", info: "#0e7490",
     ok: "#4a7c2a", attention: "#9c6407", danger: "#b3261e",
     status_bg: "#dfe5ee", status_fg: "#5c6980",
   }),
@@ -255,7 +250,7 @@ export const THEMES: readonly Theme[] = Object.freeze([
   }),
 ]);
 
-/// `system` first, because it is the default and because it is the only entry
+/// `system` first, because it is the only entry
 /// that is not a palette — it is the instruction to keep following the OS.
 export const SYSTEM = "system";
 
@@ -275,11 +270,11 @@ export function themeByName(name: string): Theme | null {
 /// one.
 ///
 /// Which is also why this answers a `Theme` and never `null`: the two `!`s are
-/// `web-light` and `web-dark` being in `THEMES` above, and the second is the
+/// `blueprint-light` and `blueprint-dark` being in `THEMES` above, and the second is the
 /// `themeByName(name)` the branch above just proved.
 export function resolveTheme(name: string, prefersDark?: boolean): Theme {
   if (name === SYSTEM || !themeByName(name)) {
-    return themeByName(prefersDark === false ? "web-light" : "web-dark")!;
+    return themeByName(prefersDark === false ? "blueprint-light" : "blueprint-dark")!;
   }
   return themeByName(name)!;
 }

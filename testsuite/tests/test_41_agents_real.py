@@ -19,12 +19,13 @@ from suite.daemon import Config
 from suite.runner import test
 from tests.test_40_agents import spawn, state_within
 
-# (agent, binary, the auto-approve flag butai ships for it, credential env var)
+# (agent, binary, argv, built-in environment, credential env var)
 REAL_AGENTS = [
-    ("claude", "claude", ["--dangerously-skip-permissions"], "ANTHROPIC_API_KEY"),
-    ("codex", "codex", ["--dangerously-bypass-approvals-and-sandbox"], "OPENAI_API_KEY"),
-    ("gemini", "gemini", ["--yolo"], "GEMINI_API_KEY"),
-    ("aider", "aider", ["--yes-always"], "OPENAI_API_KEY"),
+    ("claude", "claude", ["--dangerously-skip-permissions"], {}, "ANTHROPIC_API_KEY"),
+    ("codex", "codex", ["--dangerously-bypass-approvals-and-sandbox"], {}, "OPENAI_API_KEY"),
+    ("gemini", "gemini", ["--yolo"], {}, "GEMINI_API_KEY"),
+    ("opencode", "opencode", [], {"OPENCODE_PERMISSION": '{"*":"allow"}'}, "OPENAI_API_KEY"),
+    ("aider", "aider", ["--yes-always"], {}, "OPENAI_API_KEY"),
 ]
 
 # Long enough to observe a turn, cheap enough to run on every CI night.
@@ -36,7 +37,7 @@ def _installed():
 
 
 def _credentialled():
-    return [spec for spec in _installed() if os.environ.get(spec[3])]
+    return [spec for spec in _installed() if os.environ.get(spec[4])]
 
 
 @test(profile="standard", tags=("agents", "real"), timeout=600)
@@ -50,8 +51,8 @@ def the_real_agent_clis_launch_and_draw(ctx):
     installed = _installed()
     ctx.require(installed, "no real agent CLIs installed (build with --real-agents)")
 
-    for name, binary, args, _ in installed:
-        d = ctx.daemon(config=Config().agent(name, binary, args), name=f"real-{name}")
+    for name, binary, args, env, _ in installed:
+        d = ctx.daemon(config=Config().agent(name, binary, args, env=env), name=f"real-{name}")
         ws = d.http.new_workspace(path=d.work)
         pane = spawn(d, ws, name)
 
@@ -74,15 +75,15 @@ def the_real_agent_clis_launch_and_draw(ctx):
 
 @test(profile="standard", tags=("agents", "real"))
 def the_shipped_auto_approve_flags_are_still_accepted(ctx):
-    """butai launches each built-in agent with that CLI's auto-approve flag. A
-    renamed flag means the agent dies the instant it spawns, which reads to a
-    user as butai being broken."""
+    """butai launches each built-in agent in unattended mode. A renamed flag or
+    rejected permission override means the agent dies the instant it spawns,
+    which reads to a user as butai being broken."""
     installed = _installed()
     ctx.require(installed, "no real agent CLIs installed (build with --real-agents)")
 
     rejected = []
-    for name, binary, args, _ in installed:
-        d = ctx.daemon(config=Config().agent(name, binary, args), name=f"flag-{name}")
+    for name, binary, args, env, _ in installed:
+        d = ctx.daemon(config=Config().agent(name, binary, args, env=env), name=f"flag-{name}")
         ws = d.http.new_workspace(path=d.work)
         pane = spawn(d, ws, name)
         time.sleep(8)
@@ -91,11 +92,11 @@ def the_shipped_auto_approve_flags_are_still_accepted(ctx):
         ctx.row(
             "auto-approve flags",
             agent=name,
-            flag=" ".join(args) or "(none)",
+            flag=" ".join(args) or "OPENCODE_PERMISSION",
             accepted="no" if died else "ok",
         )
         if died:
-            rejected.append(f"{name} ({' '.join(args)})")
+            rejected.append(f"{name} ({' '.join(args) or 'OPENCODE_PERMISSION'})")
         d.stop()
 
     assert not rejected, (
@@ -117,13 +118,13 @@ def the_real_agents_status_lines_still_match(ctx):
     ctx.require(
         available,
         "no agent credentials in the environment (set one of "
-        + ", ".join(sorted({s[3] for s in REAL_AGENTS}))
+        + ", ".join(sorted({s[4] for s in REAL_AGENTS}))
         + ")",
     )
 
     misses = []
-    for name, binary, args, cred in available:
-        secret = {cred: os.environ[cred]}
+    for name, binary, args, builtin_env, cred in available:
+        secret = {cred: os.environ[cred], **builtin_env}
         d = ctx.daemon(
             config=Config().agent(name, binary, args, env=secret),
             name=f"turn-{name}",

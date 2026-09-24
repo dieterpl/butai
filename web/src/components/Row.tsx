@@ -98,10 +98,8 @@ function Row({
           : undefined
       }
       className={cn(
-        // 22px, and no transition: the terminal's line is 18px at 14px type,
-        // and 22 rather than 18 is the one deliberate concession to the
-        // pointer — enough to click at, short of a web app's 32px control.
-        "group flex min-w-0 shrink-0 items-center gap-2 px-3 text-foreground",
+        // One terminal line; the selection band spans the panel interior.
+        "group flex min-w-0 shrink-0 items-center gap-1 px-1 text-foreground",
         compact ? "h-row-compact" : "h-row",
         interactive && "cursor-pointer",
         // Hover stays a *fainter* plane than the band. A terminal has no
@@ -120,6 +118,7 @@ function Row({
       {/* The one place geometry is inline rather than a class: depth is a
           number at runtime, and Tailwind cannot generate a class for a width it
           never sees in the source. */}
+      {interactive ? <span aria-hidden="true" className="w-[1ch] shrink-0">{selected ? ">" : " "}</span> : null}
       {indent ? <span aria-hidden="true" className="shrink-0" style={{ width: indent * INDENT_STEP }} /> : null}
       {children}
     </div>

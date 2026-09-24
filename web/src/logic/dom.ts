@@ -47,11 +47,11 @@ type Mark = readonly [glyph: string, cls: string, label: string];
 // daemon actually has (crates/butai-protocol/src/api.rs) — no more, no less,
 // which `satisfies Record<AgentState, …>` now holds up rather than the comment.
 export const AGENT_MARK = {
-  waiting: ["[?]", "needs", "waiting on you"],
-  working: ["[~]", "work", "working"],
-  finished: ["[v]", "done", "done — your turn"],
-  idle: ["[ ]", "idle", "idle"],
-  exited: ["[x]", "dead", "exited"],
+  waiting: [" ! ", "needs", "waiting on you"],
+  working: ["...", "work", "working"],
+  finished: [" ✓ ", "done", "done — your turn"],
+  idle: [" · ", "idle", "idle"],
+  exited: [" x ", "dead", "exited"],
 } as const satisfies Record<AgentState, Mark>;
 
 // The mark on a status word whose turn has not been read — the web spelling of
