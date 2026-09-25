@@ -1309,7 +1309,7 @@ fn macos_app_program(prog: &str) -> Option<PathBuf> {
     macos_app_program_in(&home, &[PathBuf::from("/Applications"), home.join("Applications")], prog)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn macos_app_program_in(home: &Path, applications: &[PathBuf], prog: &str) -> Option<PathBuf> {
     if prog == "codex" || prog == "opencode" {
         for root in applications {
