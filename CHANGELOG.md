@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Agent launch discovery across desktop environments.** A daemon started by
+  a macOS app no longer needs the interactive shell's `PATH` to spawn Claude,
+  Codex or OpenCode: it recognizes their standalone installer directories and
+  the CLI binaries bundled by their desktop apps. OpenCode discovery covers
+  its native and desktop layouts on Windows too, as well as `~/.opencode/bin`
+  on Unix and WSL. Other common user bin directories (Cargo, pnpm, Volta,
+  asdf, mise and npm-global) are repaired into pane environments, and a failed
+  PTY spawn now reports the effective repaired `PATH` it actually searched.
+
 - **BOOTH controls and statuses (`1.3.0-dev.3.beta.2`).** A faint tree spine
   connects machines, projects and agents. Collapsed COMPUTE machines use one
   summary line; expanding reuses the SYSTEM gauge stack. Double-click a machine

@@ -224,7 +224,8 @@ impl Config {
             // deliberately — a wrong flag makes the CLI exit on launch. Fill
             // them in via `[[agents]]` once checked against the CLI you
             // actually run.
-            let builtins: [(&str, &[&str], &[&str], &[(&str, &str)]); 6] = [
+            type Builtin<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
+            let builtins: [Builtin<'_>; 6] = [
                 (
                     "claude",
                     &["--dangerously-skip-permissions", "--session-id", "{session_id}"],

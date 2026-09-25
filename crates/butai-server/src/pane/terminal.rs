@@ -479,7 +479,8 @@ impl TerminalPane {
         // *child's* lookups that fail: the interpreter behind an agent's
         // launcher, and every command in a `$SHELL -c` process, which reads no
         // rc file. `None` when there is nothing to add — see [`child_path`].
-        if let Some(path) = child_path() {
+        let repaired_path = child_path();
+        if let Some(path) = &repaired_path {
             cmd.env("PATH", path);
         }
         // Marker so a butai client launched inside a pane can detect the nesting
@@ -518,10 +519,13 @@ impl TerminalPane {
             // from whatever started it, which is rarely the login shell the
             // user installed the agent from — so "not found in PATH" without
             // saying *which* PATH sends people hunting in the wrong shell.
-            format!(
-                "spawn in pty (PATH={})",
-                std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
-            )
+            let path = match &repaired_path {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => std::env::var_os("PATH")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<unset>".into()),
+            };
+            format!("spawn {label} in pty (PATH={path})")
         })?;
         drop(pair.slave);
 
@@ -1211,9 +1215,10 @@ impl Drop for TerminalPane {
 /// The daemon inherits its environment from whatever started it — a desktop
 /// session, a systemd unit, an ssh command, the first client to auto-spawn it.
 /// That is rarely the login shell the user installed their tools from, and the
-/// most common install locations are invisible without one: `cargo
-/// install`/pipx land in `~/.local/bin`, and an npm-installed `claude` lands
-/// under whichever `~/.nvm/versions/node/*/bin` nvm's shell hook selects.
+/// most common install locations are invisible without one: pipx and native
+/// installers land in `~/.local/bin`, Cargo uses `~/.cargo/bin`, and an
+/// npm-installed `claude` lands under whichever
+/// `~/.nvm/versions/node/*/bin` nvm's shell hook selects.
 ///
 /// Returned in two groups because nvm is not like the others: it keeps one
 /// directory per installed node version and a `PATH` may name only one of them,
@@ -1224,7 +1229,19 @@ fn login_bin_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return (Vec::new(), Vec::new());
     };
-    let user = vec![home.join(".local/bin"), home.join(".bun/bin"), home.join("bin")];
+    let user = vec![
+        home.join(".local/bin"),
+        home.join(".opencode/bin"),
+        home.join(".cargo/bin"),
+        home.join(".bun/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".local/share/pnpm"),
+        home.join("Library/pnpm"),
+        home.join(".volta/bin"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/mise/shims"),
+        home.join("bin"),
+    ];
     let mut nvm = Vec::new();
     if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
         let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -1271,7 +1288,78 @@ pub(crate) fn resolve_program(prog: &str) -> String {
             return candidate.to_string_lossy().into_owned();
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Some(candidate) = macos_app_program(prog) {
+        return candidate.to_string_lossy().into_owned();
+    }
     prog.to_string()
+}
+
+/// A CLI bundled by a macOS desktop app.
+///
+/// Codex.app (and recent ChatGPT.app builds) ship a directly executable
+/// `Resources/codex`. Claude Desktop keeps versioned Claude Code bundles in
+/// Application Support, and OpenCode.app carries an `opencode-cli` sidecar.
+/// None of the containing directories belongs on PATH: in particular the Codex
+/// resources directory also contains a private `node` which must not shadow
+/// the user's runtime. Resolve just the requested executable instead.
+#[cfg(target_os = "macos")]
+fn macos_app_program(prog: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    macos_app_program_in(&home, &[PathBuf::from("/Applications"), home.join("Applications")], prog)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_app_program_in(home: &Path, applications: &[PathBuf], prog: &str) -> Option<PathBuf> {
+    if prog == "codex" || prog == "opencode" {
+        for root in applications {
+            let candidates: &[(&str, &str)] = if prog == "codex" {
+                &[
+                    ("Codex.app", "Contents/Resources/codex"),
+                    ("ChatGPT.app", "Contents/Resources/codex"),
+                ]
+            } else {
+                &[("OpenCode.app", "Contents/MacOS/opencode-cli")]
+            };
+            for (app, executable) in candidates {
+                let candidate = root.join(app).join(executable);
+                if is_executable_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        return None;
+    }
+    if prog != "claude" {
+        return None;
+    }
+
+    let root = home.join("Library/Application Support/Claude/claude-code");
+    let mut versions: Vec<_> = std::fs::read_dir(root).ok()?.flatten().collect();
+    // Versions are dotted decimal today. Numeric components keep 2.1.100
+    // newer than 2.1.99; the name is a deterministic fallback for a future
+    // non-numeric channel directory.
+    versions.sort_by(|a, b| {
+        let key = |entry: &std::fs::DirEntry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let numeric = name
+                .split('.')
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_default();
+            (numeric, name)
+        };
+        key(a).cmp(&key(b))
+    });
+    for version in versions.into_iter().rev() {
+        for relative in ["claude", "claude.app/Contents/MacOS/claude"] {
+            let candidate = version.path().join(relative);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// The `PATH` a pane's child is given, or `None` to pass the daemon's own along
@@ -2099,6 +2187,29 @@ pub(crate) fn windows_program(prog: &str) -> Option<PathBuf> {
     None
 }
 
+/// OpenCode's Windows installers do not necessarily expose their executable
+/// on the daemon's inherited PATH. The shell installer uses the same
+/// `~/.opencode/bin` layout as Unix, while the desktop installer keeps its CLI
+/// sidecar beside the app under LocalAppData.
+#[cfg(windows)]
+fn windows_opencode_program() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    windows_opencode_program_in(home.as_deref(), local.as_deref())
+}
+
+#[cfg(any(windows, test))]
+fn windows_opencode_program_in(
+    home: Option<&Path>,
+    local_appdata: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = [
+        home.map(|h| h.join(".opencode/bin/opencode.exe")),
+        local_appdata.map(|d| d.join("OpenCode/opencode-cli.exe")),
+    ];
+    candidates.into_iter().flatten().find(|p| is_executable_file(p))
+}
+
 fn shell_command_args(command: &mut CommandBuilder, shell: &str) {
     #[cfg(unix)]
     {
@@ -2126,7 +2237,12 @@ impl TerminalPane {
 
 #[cfg(windows)]
 pub(crate) fn resolve_program(prog: &str) -> String {
-    windows_program(prog).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| prog.into())
+    let fallback =
+        || (prog.eq_ignore_ascii_case("opencode")).then(windows_opencode_program).flatten();
+    windows_program(prog)
+        .or_else(fallback)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| prog.into())
 }
 
 #[cfg(unix)]
@@ -3189,6 +3305,17 @@ mod resolve_tests {
     use super::*;
     use crate::testenv::EnvGuard;
 
+    fn executable(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
     /// A path the user wrote out is honoured as-is, found or not — second-
     /// guessing an explicit path would silently run a different binary.
     #[test]
@@ -3243,6 +3370,72 @@ mod resolve_tests {
         std::fs::write(bin.join("not-exec-xyz"), "data").unwrap();
         let _guard = EnvGuard::set(&[("HOME", tmp.path().to_str().unwrap())]);
         assert_eq!(resolve_program("not-exec-xyz"), "not-exec-xyz");
+    }
+
+    #[test]
+    fn desktop_bundles_are_last_resort_clis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Applications");
+        let codex = apps.join("Codex.app/Contents/Resources/codex");
+        let opencode = apps.join("OpenCode.app/Contents/MacOS/opencode-cli");
+        executable(&codex);
+        executable(&opencode);
+
+        assert_eq!(
+            macos_app_program_in(tmp.path(), std::slice::from_ref(&apps), "codex"),
+            Some(codex),
+            "only the codex executable is selected, not the app's Resources directory"
+        );
+        assert_eq!(
+            macos_app_program_in(tmp.path(), &[apps], "opencode"),
+            Some(opencode),
+            "the OpenCode sidecar is also a usable CLI"
+        );
+        assert_eq!(macos_app_program_in(tmp.path(), &[], "gemini"), None);
+    }
+
+    #[test]
+    fn the_opencode_installer_directory_is_added_to_a_short_path() {
+        let tmp = fake_home(&[".opencode/bin"]);
+        let _g =
+            EnvGuard::set(&[("HOME", tmp.path().to_str().unwrap()), ("PATH", "/usr/bin:/bin")]);
+        let got = child_path().expect("OpenCode's native installer directory must be added");
+        assert_eq!(entries(&got).first(), Some(&tmp.path().join(".opencode/bin")));
+    }
+
+    #[test]
+    fn windows_opencode_installers_have_a_path_independent_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let local = tmp.path().join("local-app-data");
+        let desktop = local.join("OpenCode/opencode-cli.exe");
+        executable(&desktop);
+
+        assert_eq!(
+            windows_opencode_program_in(Some(&home), Some(&local)),
+            Some(desktop),
+            "the desktop sidecar is usable when the native install is absent"
+        );
+
+        let native = home.join(".opencode/bin/opencode.exe");
+        executable(&native);
+        assert_eq!(
+            windows_opencode_program_in(Some(&home), Some(&local)),
+            Some(native),
+            "the explicit CLI install takes precedence over the desktop sidecar"
+        );
+    }
+
+    #[test]
+    fn the_newest_claude_desktop_bundle_is_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Library/Application Support/Claude/claude-code");
+        let old = root.join("2.1.99/claude");
+        let current = root.join("2.1.100/claude.app/Contents/MacOS/claude");
+        executable(&old);
+        executable(&current);
+
+        assert_eq!(macos_app_program_in(tmp.path(), &[], "claude"), Some(current));
     }
 
     /// A fake home with the given directories under it, and the environment
