@@ -163,7 +163,7 @@ pub struct SpaceRow<'a> {
     pub daemon: usize,
     /// This project's agents, as a window onto the fleet list.
     ///
-    /// A slice rather than a count, because a folded row draws their sprites.
+    /// A slice rather than a count because project previews rank these agents.
     /// `all_agent_rows` walks daemons and then tabs in the order this list is
     /// built in, so one project's agents are contiguous in it and this borrows
     /// rather than copies.
@@ -206,7 +206,7 @@ pub enum BoothRow<'a> {
         /// The machine it is on, so a fold key and a route can be built from
         /// the row without going back to the machine list for the label.
         machine: &'a str,
-        /// Its agents are hidden, and it draws their sprites instead.
+        /// Its agent rows are hidden.
         folded: bool,
     },
     /// `sel` is the row's index in the *fleet list* — what [`booth_tray`]'s
@@ -313,8 +313,8 @@ pub enum Page {
     /// show is run from: you watch the whole stage from it, the standby board
     /// tells you which department is holding for a go, and you can key into any
     /// one channel without being in the scene. That is this page's three
-    /// columns — [`booth_rows`]'s fleet, [`booth_tray`]'s waiting agents, and a
-    /// live pane in the middle you can type into.
+    /// columns — [`booth_rows`]'s fleet, a live pane you can type into, and the
+    /// machines' compute summaries.
     ///
     /// It was `home`, which named a position rather than a thing and named the
     /// wrong one: [`Page::Agents`] is `Default`, nothing falls back here, and
@@ -3461,14 +3461,9 @@ fn draw_right_zen(buf: &mut Buffer, geom: &Geom, ws: Option<&WorkspaceDetail>, t
 
 // ---- BOOTH -----------------------------------------------------------------
 
-/// Rows the attention tray reserves, separator included.
-///
-/// **Fixed, and that is the whole point.** A tray that grew with its contents
-/// would push the fleet list down every time an agent started waiting, which is
-/// the moving list the fixed order exists to prevent. It reserves its space
-/// whether it holds three agents or none — and an empty tray is doing real work,
-/// since "nothing needs you" is the state this page is in most of the day and it
-/// should be an answer rather than an absence.
+/// Maximum number of attention-ranked agents returned by [`booth_tray`].
+/// BOOTH no longer renders the duplicate tray, but the pure ranking remains
+/// useful to clients and tests that consume the shared model.
 pub const BOOTH_TRAY_H: u16 = 4;
 /// Narrower than [`tree_width`]: BOOTH's middle column is a live pane, and a
 /// terminal squeezed under ~60 columns is worse than a short list.
@@ -3525,10 +3520,6 @@ pub fn page_geom(cols: u16, rows: u16, view: &View) -> Geom {
 /// The BOOTH page's three columns, carved out of the band it is given.
 pub struct BoothColumns {
     pub fleet_box: LRect,
-    /// Fixed-height tray at the top of the fleet column, under its box border.
-    pub tray_rows: LRect,
-    /// Separator row between the tray and the fleet list.
-    pub fleet_sep: u16,
     pub fleet_rows: LRect,
     pub stage_box: LRect,
     pub stage_inner: LRect,
@@ -3562,20 +3553,15 @@ pub fn booth_columns(stage_box: LRect) -> BoothColumns {
     let compute_box =
         LRect::new(stage_box.x + fleet_w + stage_w, stage_box.y, compute_w, stage_box.height);
 
-    // Fleet interior: tray on top, separator, then the list.
+    // The fleet uses the whole interior. Attention is already visible on each
+    // agent row (and in the BOOTH tab), so copying those rows into a fixed tray
+    // only duplicated status marks and pushed the actual work down.
     let inner_h = fleet_box.height.saturating_sub(2);
     let inner_w = fleet_w.saturating_sub(2);
-    // The tray yields rather than eating a list that would have nothing left.
-    let tray_h = if inner_h >= BOOTH_TRAY_H + 3 { BOOTH_TRAY_H } else { 0 };
-    let tray_rows = LRect::new(fleet_box.x + 1, fleet_box.y + 1, inner_w, tray_h);
-    let fleet_sep = fleet_box.y + 1 + tray_h;
-    let fleet_rows =
-        LRect::new(fleet_box.x + 1, fleet_sep + 1, inner_w, inner_h.saturating_sub(tray_h + 1));
+    let fleet_rows = LRect::new(fleet_box.x + 1, fleet_box.y + 1, inner_w, inner_h);
 
     BoothColumns {
         fleet_box,
-        tray_rows,
-        fleet_sep,
         fleet_rows,
         stage_inner: LRect::new(
             stage_box_.x + 1,
@@ -3605,8 +3591,8 @@ pub fn booth_columns(stage_box: LRect) -> BoothColumns {
 /// The alternative was measured and rejected. A list re-sorted by urgency on
 /// the daemon's ~2s sampler tick travels ~174 positions per ten ticks at 24
 /// agents, and banding plus hysteresis only brought that to 169, because
-/// damping changes *when* a row moves and not *how far*. Attention
-/// is surfaced by [`booth_tray`] copying rows upward instead.
+/// damping changes *when* a row moves and not *how far*. Attention stays on
+/// each stable row and is also summarized by the BOOTH tab's marker.
 ///
 /// **Driven by the machine and project lists, not by the agents.** Walking the
 /// agents emitted a header only where one existed to sit above, so a machine
@@ -3829,17 +3815,13 @@ pub const FLEET_NO_AGENTS: &str = "no agents";
 pub struct SpaceLayout {
     /// The fold mark, `v` or `>`.
     pub mark_x: u16,
-    /// The name — the span that goes to that workspace.
+    /// The name — the span that selects and previews this workspace.
     pub name: (u16, u16),
-    /// What is in the project, in the cells its agent rows would have used:
-    /// their sprites when it is folded, `no agents` when there are none.
-    ///
-    /// One span for both because they answer one question, and a row that had
-    /// somewhere to put a word but not a sprite would be answering it twice.
+    /// The `no agents` label, when this project has no child rows.
     pub content: Option<(u16, u16)>,
-    /// How many sprites `content` has room for — `None` when it holds a word
-    /// instead. Always whole ones: half a sprite is a figure with no head.
-    pub sprites: Option<u16>,
+    /// Travel to this workspace. Kept separate from selection and folding so
+    /// the row never changes structure when the user meant to open it.
+    pub open: Option<(u16, u16)>,
     /// The start button and what it says.
     pub add: Option<((u16, u16), String)>,
     /// The close button, on the cursor's row only.
@@ -3878,14 +3860,10 @@ pub fn fleet_cursor_row(view: &View, row: usize) -> bool {
 /// Right to left, because everything on the right is a control and the name is
 /// the only thing that can be shortened without losing one.
 ///
-/// **The button gives up its name before the strip gives up a sprite.** The
-/// strip is what folding is *for* — a folded project that cannot say what is in
-/// it is a row you have to unfold to read — and `[+]` starts exactly the agent
-/// `[+ claude]` would. Naming it at all is the AGENTS rail's rule and its
-/// reason: a button that spawns on a single click with nothing in between is
-/// the only place you can see what that click is about to do.
-pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: bool) -> SpaceLayout {
-    const CELL: u16 = SPRITE_W as u16 + 1;
+/// The start control gives up its agent name before disappearing, while the
+/// explicit `[open]` control is kept whenever the row can afford both. `[+]`
+/// starts exactly the agent `[+ claude]` would.
+pub fn space_layout(area: LRect, space: &SpaceRow<'_>, _folded: bool, cursor: bool) -> SpaceLayout {
     let mark_x = area.x + FLEET_INDENT;
     let name_x = mark_x + 2;
 
@@ -3895,12 +3873,10 @@ pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: boo
     let reserve = (space.name.chars().count() as u16).min(FLEET_MIN_NAME);
     let room = (area.x + area.width).saturating_sub(name_x + reserve);
 
-    // What the project has in it, in the cells its agent rows would have used.
-    let (want, sprites) = match (folded, space.agents.len() as u16) {
-        (_, 0) => (FLEET_NO_AGENTS.chars().count() as u16, None),
-        (true, n) => (n * CELL - 1, Some(n)),
-        (false, _) => (0, None),
-    };
+    // An empty project still says why it has no child rows. A folded project
+    // does not copy its agents' status sprites onto this header: those checks
+    // were a second, ambiguous rendering of the chats immediately below it.
+    let want = if space.agents.is_empty() { FLEET_NO_AGENTS.chars().count() as u16 } else { 0 };
 
     // Every field costs itself plus the gap in front of it, and one arithmetic
     // for both halves of this function: deciding what fits and placing it. They
@@ -3912,25 +3888,25 @@ pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: boo
     let short = FLEET_ADD_LABEL.to_string();
     let len = |l: &String| l.chars().count() as u16;
 
-    // In preference order, best first. Two rules decide it. **A control keeps
-    // its place before any control is spelled out** — `[+]` starts exactly the
-    // agent `[+ claude]` would, and `[x]` has no shorter form at all. And **the
-    // strip outranks both labels**, because a folded project that cannot say
-    // what is in it is a row you have to unfold to read, which is the thing
-    // folding exists to avoid.
+    // In preference order, best first. Keep open and start controls before
+    // spelling out the agent name. The contextual close button and empty-state
+    // label can give way when the column is narrow.
     let shut_w = if cursor { close_w } else { 0 };
-    let fits =
-        |label: u16, content: u16, close: u16| cost(label) + cost(content) + cost(close) <= room;
+    let open_w = FLEET_OPEN_LABEL.len() as u16;
+    let fits = |label: u16, content: u16, open: u16, close: u16| {
+        cost(label) + cost(content) + cost(open) + cost(close) <= room
+    };
     let (label, shut) = match &named {
-        Some(l) if fits(len(l), want, shut_w) => (Some(l.clone()), cursor),
-        _ if fits(len(&short), want, shut_w) => (Some(short.clone()), cursor),
-        Some(l) if fits(len(l), want, 0) => (Some(l.clone()), false),
-        _ if fits(len(&short), want, 0) => (Some(short.clone()), false),
-        // Nothing fits beside the whole strip. The controls keep their places
-        // and the strip is cut to whole sprites below — or dropped, if it is a
-        // word, since half of `no agents` is not a shorter answer.
-        _ if fits(len(&short), 0, shut_w) => (Some(short.clone()), cursor),
-        _ if fits(len(&short), 0, 0) => (Some(short), false),
+        Some(l) if fits(len(l), want, open_w, shut_w) => (Some(l.clone()), cursor),
+        _ if fits(len(&short), want, open_w, shut_w) => (Some(short.clone()), cursor),
+        Some(l) if fits(len(l), want, open_w, 0) => (Some(l.clone()), false),
+        _ if fits(len(&short), want, open_w, 0) => (Some(short.clone()), false),
+        Some(l) if fits(len(l), 0, open_w, 0) => (Some(l.clone()), false),
+        _ if fits(len(&short), 0, open_w, 0) => (Some(short.clone()), false),
+        // Nothing fits beside the whole label. Controls keep their places and
+        // `no agents` is dropped rather than cut into a misleading fragment.
+        _ if fits(len(&short), 0, 0, shut_w) => (Some(short.clone()), cursor),
+        _ if fits(len(&short), 0, 0, 0) => (Some(short), false),
         _ => (None, false),
     };
 
@@ -3949,17 +3925,18 @@ pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: boo
         cur -= 1;
         span
     });
+    let open = (cur.saturating_sub(name_x + reserve) >= cost(open_w)).then(|| {
+        cur -= open_w;
+        let span = (cur, cur + open_w);
+        cur -= 1;
+        span
+    });
 
     // Whatever the strip asked for, capped by what is left above the name.
     let avail = cur.saturating_sub(name_x + reserve);
-    let width = match sprites {
-        Some(n) => ((avail + 1) / CELL).min(n) * CELL,
-        // `want > 0` matters: an unfolded project with agents asks for nothing
-        // here, and `0 <= avail` would have given it a one-cell span of gap.
-        None if want > 0 && want <= avail => want + 1,
-        None => 0,
-    };
-    let sprites = sprites.map(|_| width / CELL).filter(|n| *n > 0);
+    // `want > 0` matters: a project with agents asks for nothing here, and
+    // `0 <= avail` would otherwise give it a one-cell span of gap.
+    let width = if want > 0 && want <= avail { want + 1 } else { 0 };
     let content = (width > 0).then(|| {
         cur -= width - 1;
         let span = (cur, cur + width - 1);
@@ -3968,7 +3945,7 @@ pub fn space_layout(area: LRect, space: &SpaceRow<'_>, folded: bool, cursor: boo
     });
 
     let name_end = cur.max(name_x);
-    SpaceLayout { mark_x, name: (name_x, name_end), content, sprites, add, close }
+    SpaceLayout { mark_x, name: (name_x, name_end), content, open, add, close }
 }
 
 /// Which fleet row is at `y`, as an index into `rows`.
@@ -3996,35 +3973,6 @@ pub fn booth_fleet_row_at(
     let first = scroll_for(sel, area.height as usize, rows.len());
     let i = first + (y - area.y) as usize;
     (i < rows.len()).then_some(i)
-}
-
-/// Which agent the tray row at `y` is a copy *of* — an index into `all`, the
-/// same number [`booth_fleet_row_at`] returns.
-///
-/// The tray is the answer to "what needs me", so the rows in it are the rows
-/// worth reaching first, and until this existed they were the only rows on the
-/// page you could not point at: the pointer resolved the list underneath and
-/// nothing else. It returns the *original's* index rather than a position in
-/// the tray, because the tray holds copies and the page has one cursor — see
-/// [`booth_tray`].
-///
-/// Scrolled with the same [`scroll_for`] the drawing uses, from a fixed top:
-/// the tray does not follow the cursor, so a row that is off the bottom of four
-/// is not clickable, exactly as it is not visible.
-pub fn booth_tray_row_at(
-    cols: &BoothColumns,
-    all: &[AllAgentRow<'_>],
-    x: u16,
-    y: u16,
-) -> Option<usize> {
-    let area = cols.tray_rows;
-    if area.height == 0 || !area.contains(x, y) {
-        return None;
-    }
-    let tray = booth_tray(all);
-    let visible = area.height as usize;
-    let first = scroll_for(0, visible, tray.len());
-    tray.get(first + (y - area.y) as usize).map(|(sel, _)| *sel)
 }
 
 /// Scroll offset that keeps `sel` inside a window of `height` rows.
@@ -4056,7 +4004,6 @@ fn draw_booth_page(
     let focused = view.focus == Focus::AllAgents;
     let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
     let spines = fleet_spines(&rows);
-    let tray = booth_tray(scene.all_agents);
     let preview = booth_preview(&rows, view.booth_sel);
     let mut out = Painted::default();
 
@@ -4069,67 +4016,6 @@ fn draw_booth_page(
             theme.border(focused),
             theme.ground,
         );
-
-        // The tray: a fixed region, whether or not anything is in it.
-        if cols.tray_rows.height > 0 {
-            let area = cols.tray_rows;
-            let bound = area.x + area.width;
-            if tray.is_empty() {
-                put_str(
-                    buf,
-                    area.x,
-                    area.y,
-                    // Short enough to survive a narrow fleet column: at 160
-                    // columns the column is 21 cells and a longer sentence
-                    // ellipsizes into nonsense.
-                    &ellipsize("nothing needs you", area.width as usize),
-                    bound,
-                    Pen::new(theme.faint, theme.ground),
-                );
-            } else {
-                let visible = area.height as usize;
-                let first = scroll_for(0, visible, tray.len());
-                for (i, (idx, row)) in tray.iter().skip(first).take(visible).enumerate() {
-                    let y = area.y + i as u16;
-                    let (sprite, color, animating) = sprite_for(row.agent, view.fast_tick, theme);
-                    out.wants_fast_anim |= animating;
-                    // The tray holds copies, so it highlights the *selected
-                    // agent's* copy rather than owning a cursor of its own —
-                    // otherwise every waiting agent is two things you can select.
-                    let bg = theme.row_bg(Some(*idx) == preview && focused);
-                    fill_row(buf, area.x, y, bound, bg);
-                    put_str(buf, area.x, y, &sprite, bound, Pen::new(color, bg));
-                    let where_ = match row.host {
-                        Some(h) => format!("{h}:{}", row.workspace),
-                        None => row.workspace.to_string(),
-                    };
-                    // The agent's own spinner is pinned beside the sprite for
-                    // the reason the rail pins it: it says where the agent is,
-                    // and a marker that has to be chased across the row says it
-                    // to nobody.
-                    let (glyph, title) = split_status_glyph(&row.agent.title);
-                    let mut x = area.x + SPRITE_W as u16 + 1;
-                    if !glyph.is_empty() {
-                        put_str(buf, x, y, glyph, bound, Pen::new(color, bg));
-                        x += glyph.chars().count() as u16 + 1;
-                    }
-                    let (text, moving) = marquee(
-                        &format!("{title} · {where_}"),
-                        bound.saturating_sub(x) as usize,
-                        view.tick,
-                    );
-                    out.wants_anim |= moving;
-                    put_str(buf, x, y, &text, bound, Pen::new(theme.ink, bg));
-                }
-            }
-            let label = if tray.is_empty() {
-                " CLEAR ".to_string()
-            } else {
-                format!(" NEEDS YOU ({}) ", tray.len())
-            };
-            let color = if tray.is_empty() { theme.rule } else { theme.danger };
-            draw_section_sep(buf, cols.fleet_box, cols.fleet_sep, &label, color, theme.ground);
-        }
 
         // The fleet list, scrolled to keep the cursor in view. The cursor is an
         // index into this list, folds included, so there is nothing to map.
@@ -4191,31 +4077,10 @@ fn draw_booth_page(
                         // because it is now the thing you press to go there.
                         put_str(buf, nx, y, &text, ne, Pen::new(theme.ink, bg));
                         // What is in the project, where its agent rows were:
-                        // their sprites folded, `no agents` when there are
-                        // none. Never a fragment of either — the span is sized
-                        // in whole sprites and the word is dropped rather than
-                        // cut, because half of it reads as a row still loading.
+                        // Empty projects say why they have no child rows. The
+                        // word is dropped rather than cut when it cannot fit.
                         if let Some((cx, ce)) = l.content {
-                            match l.sprites {
-                                Some(n) => {
-                                    let mut x = cx;
-                                    for a in space.agents.iter().take(n as usize) {
-                                        let (sprite, color, animating) =
-                                            sprite_for(a.agent, view.fast_tick, theme);
-                                        out.wants_fast_anim |= animating;
-                                        put_str(buf, x, y, &sprite, ce, Pen::new(color, bg));
-                                        x += SPRITE_W as u16 + 1;
-                                    }
-                                }
-                                None => put_str(
-                                    buf,
-                                    cx,
-                                    y,
-                                    FLEET_NO_AGENTS,
-                                    ce,
-                                    Pen::new(theme.faint, bg),
-                                ),
-                            }
+                            put_str(buf, cx, y, FLEET_NO_AGENTS, ce, Pen::new(theme.faint, bg));
                         }
                         if let Some(((ax, ae), label)) = &l.add {
                             // Brighter on the row the cursor is on, for the
@@ -4224,6 +4089,9 @@ fn draw_booth_page(
                             let ink = if cursor { theme.accent } else { theme.faint };
                             put_str(buf, *ax, y, label, *ae, Pen::new(ink, bg));
                         }
+                        if let Some((ox, oe)) = l.open {
+                            put_str(buf, ox, y, FLEET_OPEN_LABEL, oe, Pen::new(theme.faint, bg));
+                        }
                         // In `danger`, and it is the only thing on this column
                         // drawn that way: it is the one press here that takes
                         // something away rather than adding or moving.
@@ -4231,11 +4099,14 @@ fn draw_booth_page(
                             put_str(buf, cx, y, FLEET_CLOSE_LABEL, ce, Pen::new(theme.danger, bg));
                         }
                     }
-                    BoothRow::Agent { row, .. } => {
+                    BoothRow::Agent { row, sel } => {
                         let (sprite, color, animating) =
                             sprite_for(row.agent, view.fast_tick, theme);
                         out.wants_fast_anim |= animating;
-                        let bg = theme.row_bg(cursor);
+                        // This is the chat actually shown on the middle stage.
+                        // Keep it highlighted while the cursor is on its
+                        // project header or the keyboard is inside the stage.
+                        let bg = theme.row_bg(cursor || Some(*sel) == preview);
                         fill_row(buf, area.x, y, bound, bg);
                         put_str(buf, area.x, y, spines[first + i], bound, Pen::new(theme.rule, bg));
                         let x = area.x + FLEET_INDENT * 2;
@@ -8285,14 +8156,9 @@ mod tests {
         assert_eq!(seats, vec![0, 1, 2, 3], "a copied agent left its seat");
     }
 
-    /// A folded project keeps its sprites and the button gives up its name.
-    ///
-    /// The strip is what folding is *for* — a folded project that cannot say
-    /// what is in it is a row you have to unfold to read — and `[+]` starts
-    /// exactly the agent `[+ claude]` would. Both were the other way round
-    /// first, and a two-agent project drew one sprite.
+    /// A project header does not duplicate the status marks of its chat rows.
     #[test]
-    fn a_folded_row_spends_its_cells_on_states_before_labels() {
+    fn a_folded_row_keeps_controls_instead_of_copying_chat_statuses() {
         let agents = [
             agent(1, "claude", AgentState::Finished),
             agent(2, "codex", AgentState::Idle),
@@ -8304,29 +8170,15 @@ mod tests {
         let butai = spaces[0]; // two agents, prefers `claude`
         let notes = spaces[2]; // none, prefers `codex`
 
-        // 28 cells: `  > butai` + two sprites + `[+ claude]` is exactly 28, so
-        // the wide case keeps both.
         let wide = LRect::new(0, 0, 28, 1);
         let l = space_layout(wide, &butai, true, false);
-        assert_eq!(l.sprites, Some(2), "both agents' states survive the fold");
-        assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+ claude]"));
-
-        // Take four cells away and the *label* is what goes, not a sprite.
-        let l = space_layout(LRect::new(0, 0, 24, 1), &butai, true, false);
-        assert_eq!(l.sprites, Some(2), "a sprite was dropped before the label was");
-        assert_eq!(l.add.as_ref().map(|(_, s)| s.as_str()), Some("[+]"));
-
-        // Narrow enough and the strip gives up whole sprites, never halves.
-        let l = space_layout(LRect::new(0, 0, 18, 1), &butai, true, false);
-        assert!(matches!(l.sprites, None | Some(1)), "half a sprite: {:?}", l.sprites);
-        if let Some((x, e)) = l.content {
-            assert_eq!((e - x) % (SPRITE_W as u16 + 1), SPRITE_W as u16 % (SPRITE_W as u16 + 1));
-        }
+        assert_eq!(l.content, None, "chat status leaked onto the project header");
+        assert!(l.open.is_some(), "a folded workspace still needs an open button");
+        assert!(l.add.is_some(), "a folded workspace still needs an add button");
 
         // An empty project says so in the same cells, and the word is dropped
         // whole rather than cut — half of it reads as a row still loading.
-        let l = space_layout(wide, &notes, false, false);
-        assert_eq!(l.sprites, None);
+        let l = space_layout(LRect::new(0, 0, 40, 1), &notes, false, false);
         let (x, e) = l.content.expect("`no agents` fits at 28");
         assert_eq!(e - x, FLEET_NO_AGENTS.len() as u16);
         let l = space_layout(LRect::new(0, 0, 16, 1), &notes, false, false);
@@ -8364,12 +8216,8 @@ mod tests {
         // only when there is no room for both.
         assert_eq!(on.add.as_ref().map(|(_, s)| s.as_str()), Some("[+ claude]"));
         let tight = space_layout(LRect::new(0, 0, 23, 1), &butai, false, true);
-        assert!(tight.close.is_some(), "the control keeps its place");
-        assert_eq!(
-            tight.add.as_ref().map(|(_, s)| s.as_str()),
-            Some("[+]"),
-            "the label is what gives way, because `[+]` starts the same agent"
-        );
+        assert!(tight.open.is_some(), "opening must survive before the contextual close button");
+        assert!(tight.add.is_some(), "starting an agent is what this page is for");
 
         // Narrow enough that only one of them fits, and it is the one you can
         // still reach every other way that goes.
@@ -8377,11 +8225,10 @@ mod tests {
         assert_eq!(cramped.close, None);
         assert!(cramped.add.is_some(), "starting an agent is what this page is for");
 
-        // And it never costs the strip a sprite: `caliper` folded keeps its
-        // agent's state whether or not the cursor is on it.
+        // Project headers never copy a child chat's state.
         let caliper = booth_spaces(&all)[1];
         for cursor in [false, true] {
-            assert_eq!(space_layout(wide, &caliper, true, cursor).sprites, Some(1), "{cursor}");
+            assert_eq!(space_layout(wide, &caliper, true, cursor).content, None, "{cursor}");
         }
     }
 
@@ -8965,10 +8812,8 @@ mod tests {
             "the columns must tile the band exactly"
         );
         assert_eq!(c.compute_box.right(), band.right());
-        // The tray reserves its rows above the list, separator included.
-        assert_eq!(c.tray_rows.height, BOOTH_TRAY_H);
-        assert_eq!(c.fleet_sep, c.tray_rows.y + c.tray_rows.height);
-        assert_eq!(c.fleet_rows.y, c.fleet_sep + 1);
+        // The fleet gets the whole column; status is not copied into a tray.
+        assert_eq!(c.fleet_rows.y, c.fleet_box.y + 1);
 
         // The pane is measured to the middle column, not the whole stage.
         let view = View { page: Page::Booth, ..Default::default() };
@@ -9018,8 +8863,7 @@ mod tests {
         // A project with nothing in it says so, and still offers to start one.
         assert!(screen.contains("no agents"), "{screen}");
         assert!(screen.contains("[+ codex]"), "notes names its own agent:\n{screen}");
-        // The tray counts what is waiting, and says so where a count belongs.
-        assert!(screen.contains("NEEDS YOU (2)"), "{screen}");
+        assert!(!screen.contains("NEEDS YOU"), "attention rows must not be duplicated:\n{screen}");
         // The stage names the previewed agent *and* its machine, because two
         // machines may run an agent of the same name one row apart.
         //
@@ -9032,6 +8876,12 @@ mod tests {
         draw(&mut b2, 160, 40, &scene, &on_project, &Theme::default());
         let screen2: String = (0..40).map(|y| text_of(&b2, y)).collect::<Vec<_>>().join("\n");
         assert!(screen2.contains("codex · local:butai"), "{screen2}");
+        let c = booth_columns(booth_area(160, &page_geom(160, 40, &on_project)));
+        assert_eq!(
+            b2.cell((c.fleet_rows.x, c.fleet_rows.y + 3)).map(|cell| cell.bg),
+            Some(Theme::default().selection),
+            "the codex chat shown on stage is not highlighted"
+        );
 
         // Collapsed COMPUTE gives each machine one headline and keeps resource
         // detail in the existing expanded renderer.
@@ -9684,14 +9534,10 @@ mod tests {
         assert!(seen.contains("mod.rs"), "the path's tail never scrolled into view");
     }
 
-    /// BOOTH pins the agent's own spinner too — both in the fleet list and in
-    /// the tray, which draw the same agent through two different code paths.
-    ///
-    /// The sprite says the same thing more loudly, so the glyph is kept rather
-    /// than dropped only because it is the agent's word for its own state and
-    /// the sprite is ours; what it must not do is march through the row.
+    /// BOOTH pins the agent's own spinner beside its status sprite; it must not
+    /// march through the row with a long scrolling title.
     #[test]
-    fn booth_pins_an_agents_own_spinner_in_both_columns() {
+    fn booth_pins_an_agents_own_spinner_on_its_chat_row() {
         let sys = SysDto::default();
         let agents = [
             agent(1, "✳ Wire the export watcher up to the daemon", AgentState::Waiting),
@@ -9711,9 +9557,8 @@ mod tests {
         let fleet_w =
             booth_columns(booth_area(160, &page_geom(160, 40, &view))).fleet_box.width as usize;
 
-        // Every column the glyph lands on, over enough ticks for the name to
-        // have scrolled and wrapped: two rows draw this agent (the tray copy
-        // and the fleet row) and both must hold still.
+        // The glyph lands once, on the chat row, and holds still while the
+        // title scrolls beside it.
         let mut columns: BTreeSet<Vec<usize>> = BTreeSet::new();
         let mut moved = false;
         for tick in 0..80 {
@@ -9724,7 +9569,7 @@ mod tests {
                 (0..40).map(|y| text_of(&b, y).chars().take(fleet_w).collect::<String>()).collect();
             let at: Vec<usize> =
                 rows.iter().filter_map(|r| r.chars().position(|c| c == '✳')).collect();
-            assert_eq!(at.len(), 2, "tray copy and fleet row, tick {tick}:\n{}", rows.join("\n"));
+            assert_eq!(at.len(), 1, "chat row, tick {tick}:\n{}", rows.join("\n"));
             moved |= !rows.iter().any(|r| r.contains("Wire the export"));
             columns.insert(at);
         }
@@ -9732,15 +9577,9 @@ mod tests {
         assert!(moved, "the name never scrolled, so this proves nothing about the glyph");
     }
 
-    /// With nothing waiting the tray still holds its rows, and says so — and
-    /// the fleet list below starts on the same screen row either way.
-    ///
-    /// This is the fixed-tray promise measured on the painted buffer rather
-    /// than asserted about the geometry: shrink the tray to its contents and
-    /// the second half of this fails, because every row below it moves up by
-    /// two the moment nothing is waiting.
+    /// Attention changes in place and never insert a duplicate top section.
     #[test]
-    fn an_empty_tray_keeps_its_space_and_answers_the_question() {
+    fn attention_does_not_insert_a_duplicate_top_section() {
         let sys = SysDto::default();
         let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
 
@@ -9767,11 +9606,11 @@ mod tests {
 
         use AgentState::*;
         let (calm_y, calm) = first_space_row([Idle, Idle, Working, Idle]);
-        assert!(calm.contains("nothing needs you"), "{calm}");
+        assert!(!calm.contains("needs you"), "{calm}");
 
         let (busy_y, busy) = first_space_row([Idle, Waiting, Working, Waiting]);
-        assert!(busy.contains("NEEDS YOU (2)"), "{busy}");
-        assert_eq!(calm_y, busy_y, "the fleet list moved when the tray filled up");
+        assert!(!busy.contains("NEEDS YOU"), "{busy}");
+        assert_eq!(calm_y, busy_y, "attention moved the fleet list");
     }
 
     /// The columns `start..end` of a painted row, as text.

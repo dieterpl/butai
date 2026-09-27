@@ -1107,13 +1107,9 @@ export const TARGETS = Object.freeze({
   "footer.settings": t("footer", [VerbId.SpaceSettings]),
 
   // -- HOME ----------------------------------------------------------------
-  // A machine header and a project header are not click targets: the cursor
-  // steps over them, and clicking a machine's name is not a request to open
-  // somebody's agent. The tray's rows are *copies* of rows in the list below,
-  // so clicking one moves the one cursor rather than being a second thing you
-  // can select — which is why its verbs are the walking pair and not `open`.
+  // A row selects/previews. Workspace and agent `open` controls are explicit,
+  // so selecting a header cannot collapse it or travel by surprise.
   "home.row": t("HOME", [VerbId.FocusFleet, VerbId.Down, VerbId.Up]),
-  "home.tray": t("HOME", [VerbId.Down, VerbId.Up]),
   "home.open": t("HOME", [VerbId.OpenAgent]),
 
   // -- AGENTS --------------------------------------------------------------

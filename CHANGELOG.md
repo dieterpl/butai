@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BOOTH navigation cleanup (`1.3.0-dev.3.beta.5`).** Removed the duplicate
+  top status tray and folded-project status strips. Workspace rows now expose
+  an explicit `[open]` button; clicking the row selects it, while the chevron
+  folds its chats. The selected chat stays highlighted when its preview has
+  keyboard focus. The terminal's `[+ agent]` hit area now uses the same layout
+  and default-agent label as the painted button.
+
 - **Agent launch discovery across desktop environments.** A daemon started by
   a macOS app no longer needs the interactive shell's `PATH` to spawn Claude,
   Codex or OpenCode: it recognizes their standalone installer directories and

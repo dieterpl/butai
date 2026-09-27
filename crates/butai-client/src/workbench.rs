@@ -8578,7 +8578,7 @@ fn handle_input(
             // the drawing was given or a click lands on the wrong agent.
             let fleet = all_agent_rows(daemons, hosts);
             let fleet_machines = machine_rows(daemons, hosts, &fleet);
-            let fleet_spaces = fleet_spaces(daemons, &fleet, None);
+            let fleet_spaces = fleet_spaces(daemons, &fleet, view.pinned_agent.as_deref());
             // How wide the open file's line numbers are, so a selection can
             // start after them. Only the buffer knows, and only here is it in
             // scope — hence a value passed down rather than a lookup.

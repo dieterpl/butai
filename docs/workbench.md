@@ -120,7 +120,7 @@ still walk them without opening anything.
 and before that a rail down the left edge, on the argument that a signal from a
 space you are *not* looking at needs somewhere that survives every page. It does
 not need the bar to do it: a waiting agent already says so on its rail row, on
-its workspace chip, on the booth chip, in the footer, in BOOTH's NEEDS YOU tray
+its workspace chip, on the booth chip, in the footer, in BOOTH's fleet
 and through the bell. What is genuinely given up is narrower than it sounds and
 worth stating — a branch that has fallen behind, and an account limit under
 pressure, are now invisible on the pages that draw no CHANGES rail. Open the menu
@@ -682,27 +682,21 @@ everyone's.
 
 ```
 ┌ FLEET (4) ────────────┐┌ claude · local:butai ────────┐┌ COMPUTE ──────────────┐
-│ !  gemini · gpu-box:di││                              ││> local ██   3 RAM  59%│
-│                       ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
-│                       ││    1. Yes  2. No             ││                       │
-│                       ││                              ││                       │
-├ NEEDS YOU (1) ────────┤│  > _                         ││                       │
-│v local               3││                              ││                       │
-│  v butai    [+ claude]││                              ││                       │
+│v local               3││                              ││> local ██   3 RAM  59%│
+│  v butai   [open] [+] ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
 │     ✓  claude   [open]││                              ││                       │
 │     ·  codex    [open]││                              ││                       │
-│  > caliper     ... [+]││                              ││                       │
-│  v notes no agents [+]││                              ││                       │
+│  > caliper [open] [+] ││                              ││                       │
+│  v notes   [open] [+] ││                              ││                       │
 │v gpu-box             1││                              ││                       │
-│  v diffusion       [+]││                              ││                       │
+│  v diffusi…[open] [+] ││                              ││                       │
 │     !  gemini   [open]││                              ││                       │
 └───────────────────────┘└──────────────────────────────┘└───────────────────────┘
 ```
 
 That is a 100-column terminal, which is where the fallbacks start to bite: the
-meter has shrunk to two cells, `caliper` is folded and spends its cells on its
-agent's state rather than on spelling `[+ claude]`, and `diffusion` has no
-preferred agent to name. Wider, every one of them says more.
+meter has shrunk to two cells and project buttons shorten to `[+]`.
+Wider columns spell out the preferred agent, such as `[+ claude]`.
 
 **It is a list of projects that happens to contain agents**, and that is a change
 from what it was. The rows used to be built by walking the agent list and
@@ -713,21 +707,9 @@ are exactly the ones you want to start something in. They come from the machine
 and project lists now, so `notes` above has a row and so does `mini`, which is
 connected with nothing open on it.
 
-**The tray** at the top is a fixed four rows whether it holds three agents or
-none, because a tray that grew would push the list down every time an agent
-started waiting. Its separator reads `NEEDS YOU (n)` in danger or ` CLEAR ` when
-nothing does, and the empty state says `nothing waiting` — "nothing needs you" is
-the state this page is in most of the day and it should be an answer, not a
-blank. The tray holds *copies*: the originals stay where they are in the list
-below, and it highlights the selected agent's copy rather than owning a second
-cursor.
-
-**Its rows are clickable**, and a click means what it means in the list: put the
-cursor on that agent, which points the middle column at its screen. The copy
-carries no `[open]` — four rows are too few to spend six columns on a button, and
-the original is right there below with one — so `enter` is how you go to it once
-the cursor is on it. Right-clicking a copy opens the same menu the original's row
-does.
+**The fleet starts at the top of the column.** There is no duplicate status tray.
+Each chat's status appears on its own row, and the chat shown in the middle
+column stays highlighted even when the keyboard is focused on that pane.
 
 **The fleet list** is grouped by machine and then by project, and its order is a
 pure function of identity — daemon, then tab order, then spawn order. It reads no
@@ -754,11 +736,10 @@ with branches ending at the last visible sibling after folding.
 
 The status indicator is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
 whatever it wrote into its terminal title, and it is pinned between the sprite
-and the name here exactly as the AGENTS rail pins it, in the tray and in the
-fleet list both. Only the name marquees.
+and the name here exactly as the AGENTS rail pins it. Only the name marquees.
 
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet or NEEDS YOU tray
+the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet
 selects its preview and immediately hands the keyboard to that pane. Clicking
 a machine or project selects it and keeps the keyboard on the fleet. `tab`,
 a click on the pane, or starting an agent also hands it to the pane, and everything you type from then on is that agent's. `alt-w` or
@@ -786,7 +767,8 @@ A project's name puts the cursor on the project — which points the middle colu
 at the agent in it that most needs you — and travels nowhere. It briefly did
 travel, on the grounds that a project row had nothing to preview; it has one, so
 that was the same accidental route off the page in different clothes. `enter` is
-how you go to a project, and `[open]` how you go to an agent. Nothing here takes
+the keyboard route to a project or agent; both have an explicit `[open]` button.
+Nothing here takes
 you somewhere by accident: every route out is a field you aimed at, or a key.
 
 **`a` starts a session in the project the cursor is in**, and `A` picks the type
@@ -835,16 +817,13 @@ else opens it. A client-side pin keyed by directory would be none of those three
 once**, leaving an index of every machine, every project, and what is running in
 each. They are the DIFF page's fold keys and its marks — `v` open, `>` folded —
 because this workbench already has a fold idiom and a second one for the same
-concept is drift. A folded project draws its agents' status indicators where their rows
-were, so folding costs you the titles and the buttons and not the states; three
-terminal cells apiece is what makes that affordable. `z` on an *agent* folds the
+concept is drift. A folded project hides its chat rows without adding a duplicate
+status strip to the header. `z` on an *agent* folds the
 project it is in and takes the cursor up to that row, which is the only move that
 leaves the cursor on something you can still see.
 
 Folding is a filter over the order and never a second ordering: a folded row is
-simply not emitted and the rows around it keep the positions they had. The tray
-is untouched by it — the tray holds copies, so an agent waiting inside a folded
-project is still one click from the top of the page.
+simply not emitted and the rows around it keep the positions they had.
 
 **The compute column** shows one summary line per collapsed machine: its name,
 agent count, a meter where space allows, and the busiest resource reading.
@@ -1439,7 +1418,7 @@ switch.
 workspace chip and on the booth chip, and `● codex is waiting` in the footer —
 with `· alt-w` appended on a page that has hidden the AGENTS rail, because there
 the footer is the only thing naming which agent it is. On BOOTH it also appears
-in the NEEDS YOU tray. The daemon rings a bell through to your terminal too.
+on its fleet row. The daemon rings a bell through to your terminal too.
 
 **A workspace whose directory disappeared** — an unmounted share, a dropped VPN,
 a hung NFS mount. Reads, stats and git calls on it block in the kernel and cannot
@@ -1612,7 +1591,7 @@ lockfile in the repo. Two consequences worth knowing:
 | the pinned glyph an agent writes into its own title | `crates/butai-client/src/chrome/model.rs` (`split_status_glyph`) |
 | the CHANGES rail: rows, label, verbs, split | `crates/butai-client/src/chrome/mod.rs` (`change_rows`, `changes_label`, `changes_verbs`, `changes_split`) |
 | every verb table, the footer packing, the `?` text | `crates/butai-client/src/verbs.rs` |
-| BOOTH: columns, tray, fleet order, `[open]` | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `booth_tray`, `fleet_open_span`) |
+| BOOTH: columns, fleet order, `[open]` | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `fleet_open_span`) |
 | BOOTH: which projects the fleet lists, and what each starts | `crates/butai-client/src/workbench.rs` (`fleet_spaces`), `crates/butai-client/src/chrome/mod.rs` (`SpaceRow`) |
 | BOOTH: what the cursor is on, and what the pane shows | `crates/butai-client/src/chrome/mod.rs` (`booth_selected`, `booth_preview`), `crates/butai-client/src/workbench.rs` (`booth_cursor`) |
 | BOOTH: folding, and what `Z` folds | `crates/butai-client/src/chrome/mod.rs` (`Folds`, `booth_space_keys`), `crates/butai-client/src/workbench.rs` (`fold_cursors_space`) |
@@ -1623,7 +1602,7 @@ lockfile in the repo. Two consequences worth knowing:
 | BOOTH: which machine a press in COMPUTE lands on, and the height both sides walk | `crates/butai-client/src/chrome/mod.rs` (`compute_machine_h`, `booth_compute_machine_at`), `crates/butai-client/src/hit.rs` (`on_compute`) |
 | BOOTH: starting an agent in a row's project | `crates/butai-client/src/workbench.rs` (`spawn_agent_in`, `fleet_agent_picker`, `open_fleet_row`) |
 | BOOTH: putting the cursor and the keyboard in the agent you just started | `crates/butai-client/src/workbench.rs` (`NewAgentFollow`, `follow_new_agent`, `NEW_AGENT_GRACE`) |
-| BOOTH: what a press on the fleet or the tray lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`, `booth_tray_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |
+| BOOTH: what a press on the fleet lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |
 | BOOTH: `x`, the row menu, and which machine they act on | `crates/butai-client/src/workbench.rs` (`handle_fleet_key`, `fleet_menu`, `fleet_route`, `selected_route`) |
 | FILES / DOCS: the trail, editor, gutter, `[find]` | `crates/butai-client/src/chrome/mod.rs` (`Files`, `Column`, `Editor`, `draw_files_page`), `crates/butai-client/src/syntax.rs` |
 | FILES: the minimap | `crates/butai-client/src/chrome/minimap.rs` |
