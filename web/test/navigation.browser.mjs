@@ -111,6 +111,28 @@ try {
   assert.ok(await page.locator("header").evaluate(el => el.scrollWidth <= innerWidth));
   await page.setViewportSize({ width: 320, height: 600 });
   assert.ok(await page.locator("header").evaluate(el => el.scrollWidth <= innerWidth));
+  assert.ok(await page.getByRole("button", { name: "Switch view" }).isVisible());
+  for (let i = 3; i <= 20; i++) spaces.push(workspace(`local:${i}`, `project-${i}-long-name`, []));
+  await page.reload();
+  const tabs = page.getByRole("navigation", { name: "Workspaces" });
+  await tabs.getByRole("button", { name: /20:project-20/ }).waitFor();
+  const boothBefore = await page.getByRole("button", { name: "booth", exact: true }).boundingBox();
+  const viewsBefore = await page.getByRole("button", { name: "Switch view" }).boundingBox();
+  await tabs.hover();
+  await page.mouse.wheel(0, 500);
+  await page.waitForFunction(() => document.querySelector('nav[aria-label="Workspaces"]').scrollLeft > 0);
+  assert.deepEqual(await page.getByRole("button", { name: "booth", exact: true }).boundingBox(), boothBefore);
+  assert.deepEqual(await page.getByRole("button", { name: "Switch view" }).boundingBox(), viewsBefore);
+  await tabs.getByRole("button", { name: /20:project-20/ }).click();
+  await page.keyboard.press("Alt+1");
+  await page.waitForFunction(() => document.querySelector('nav[aria-label="Workspaces"]').scrollLeft < 10);
+  await page.keyboard.press("Control+b"); await page.keyboard.press("Space");
+  await page.getByRole("dialog", { name: "Views" }).waitFor();
+  assert.deepEqual(await page.getByRole("menuitemradio").evaluateAll(items => items.map(item => item.getAttribute("aria-label"))), ["agents", "files", "git", "docker", "docs"]);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Alt+Space");
+  await page.getByRole("dialog", { name: "Views" }).waitFor();
+  await page.keyboard.press("Escape");
   assert.deepEqual(errors, []);
   console.log("PASS: views, Booth, workspaces, utility return, terminal chords, stage diff, rail keys, layout, detach and workspace creation");
 } finally { await browser?.close(); server.kill(); }

@@ -151,6 +151,7 @@ export function Shell() {
   const [systemHeight, setSystemHeight] = useState<number | null>(null);
   const [attached, setAttached] = useState(true);
   const returnPage = useRef<PageName>("work");
+  const projectTabs = useRef<HTMLElement>(null);
   const prefixPending = useRef(false);
   const [menu, setMenu] = useState(false);
 
@@ -193,6 +194,23 @@ export function Shell() {
   const ws: QualifiedWorkspace | null = detailed(
     spaces.find((w) => String(w.id) === wsId) ?? [...spaces].sort((a, b) => weight(b) - weight(a))[0] ?? null,
   );
+
+  useEffect(() => {
+    projectTabs.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [ws?.id, page]);
+
+  useEffect(() => {
+    const tabs = projectTabs.current;
+    if (!tabs) return;
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || tabs.scrollWidth <= tabs.clientWidth) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      tabs.scrollLeft += delta * (e.deltaMode === 1 ? 18 : e.deltaMode === 2 ? tabs.clientWidth : 1);
+      e.preventDefault();
+    };
+    tabs.addEventListener("wheel", wheel, { passive: false });
+    return () => tabs.removeEventListener("wheel", wheel);
+  }, []);
 
   // What the stage streams: the selection, while it still names a pane this
   // workspace has, and otherwise the same fallback `renderWorkspace` uses — a
@@ -358,6 +376,9 @@ export function Shell() {
       if (prefix && prefixPending.current) { prefixPending.current = false; return; }
       const pending = prefixPending.current;
       prefixPending.current = false;
+      if (key === " " && (pending || e.altKey)) {
+        e.preventDefault(); e.stopImmediatePropagation(); setViewsOpen(true); return;
+      }
       const verb = pending ? prefixVerb(key) : e.altKey ? altVerb(key) : null;
       let handled = true;
       switch (verb?.id) {
@@ -415,7 +436,7 @@ export function Shell() {
             booth{spaces.some(w => workspaceAttention(w) && !world.daemons.find(d => d.key === machineOf(w))?.error) ? " !" : ""}
           </Button>
           <span className="text-border" aria-hidden="true">│</span>
-          <nav aria-label="Workspaces" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          <nav ref={projectTabs} aria-label="Workspaces" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
             {spaces.map((w, i) => {
               const active = page !== "home" && String(w.id) === String(ws?.id);
               const down = !!world.daemons.find(d => d.key === machineOf(w))?.error;
@@ -429,7 +450,7 @@ export function Shell() {
               </div>;
             })}
           </nav>
-          <div className="hidden w-[10ch] shrink-0 justify-end min-[360px]:flex">
+          <div className="flex w-[10ch] shrink-0 justify-end">
             <Button size="sm" variant="outline" aria-label="Switch view" aria-haspopup="dialog" aria-expanded={viewsOpen}
               onClick={() => setViewsOpen(true)}>{VIEWS.includes(page) ? pageLabel(page) : "views"} v</Button>
           </div>

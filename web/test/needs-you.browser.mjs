@@ -58,6 +58,7 @@ try {
   await asking.waitFor();
   assert.equal(await fleet.evaluate(el => el.getBoundingClientRect().top), fleetTop, "attention moved the fleet");
   await asking.click();
+  await page.waitForFunction(() => document.activeElement?.closest('[data-slot="stage"]'));
   await page.waitForFunction(() => document.querySelector('[aria-label="needs you"] [aria-selected="true"]')?.textContent.includes("claude"));
   await page.locator("main").getByText("claude · alpha", { exact: true }).waitFor();
   assert.equal(await fleet.getByRole("option").filter({ hasText: "claude" }).getAttribute("aria-selected"), "true");
@@ -73,6 +74,10 @@ try {
   assert.deepEqual(writes.filter(w => w.method === "DELETE").map(w => decodeURIComponent(w.path)), ["/api/workspaces/local:2/panes/local:21"]);
   await page.getByTitle("Hide chats in alpha", { exact: true }).click();
   assert.equal(await asking.count(), 1, "folding hid the attention copy");
+  await asking.click();
+  await page.getByTitle("Hide chats in alpha", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.activeElement?.closest('[data-slot="stage"]'));
+  await page.getByTitle("Hide chats in alpha", { exact: true }).click();
   await asking.getByRole("button", { name: "Close claude in alpha", exact: true }).click();
   await page.getByRole("dialog", { name: "End claude?" }).waitFor();
   await page.getByRole("button", { name: "Yes, do it", exact: true }).click();
@@ -81,6 +86,10 @@ try {
   await page.getByTitle("Show chats in alpha", { exact: true }).click();
   await mkdir("/var/tmp/butai-web-parity", { recursive: true });
   await page.screenshot({ path: "/var/tmp/butai-web-parity/needs-you.png" });
+  await page.setViewportSize({ width: 320, height: 640 });
+  assert.ok(await tray.isVisible(), "narrow BOOTH hides NEEDS YOU");
+  assert.ok(await fleet.isVisible(), "narrow BOOTH hides the fleet");
+  assert.ok(await page.getByRole("button", { name: "Switch view" }).isVisible());
   assert.deepEqual(errors, []);
   console.log("PASS: NEEDS YOU empty state, stable layout, preview selection, folded visibility and chat close buttons");
 } finally { await browser?.close(); server.kill(); }

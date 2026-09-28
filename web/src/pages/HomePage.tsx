@@ -65,6 +65,8 @@ export interface HomeCallbacks {
   /// Walk the cursor to this index in the **row list** — machines and projects
   /// included, folded-away rows excluded.
   walk(sel: number): void;
+  /// Focus a chat's live preview, revealing it if its project was folded.
+  preview(row: AgentRow): void;
   /// `enter` on an agent: go to its project, on its own machine, and stage it.
   /// Both ids are qualified, and both halves are needed — the workspace to
   /// switch to and the pane to put on the stage may be on a machine that is not
@@ -152,12 +154,10 @@ function CloseChat({ row, on }: { row: AgentRow; on: HomeCallbacks }) {
 /// disappears moves the list underneath it every time it does.
 function Tray({
   rows,
-  list,
   previewed,
   on,
 }: {
   rows: readonly AgentRow[];
-  list: readonly HomeRow[];
   previewed: number | null;
   on: HomeCallbacks;
 }) {
@@ -179,14 +179,7 @@ function Tray({
               // agent's copy rather than owning a cursor of its own —
               // otherwise every waiting agent is two things you can select.
               selected={at === previewed}
-              // …and a copy walks to its original's row, which is the currency
-              // the cursor counts in. An original folded away inside its
-              // project has no row to move to, and the press does nothing
-              // rather than moving the cursor somewhere else.
-              onSelect={() => {
-                const row = list.findIndex((r) => r.kind === HomeRowKind.Agent && r.sel === at);
-                if (row >= 0) on.walk(row);
-              }}
+              onSelect={() => on.preview(row)}
               title={`${row.agent.title} — ${m.label} · ${where(row)}`}
             >
               <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={row.agent} sprite /></span>
@@ -260,6 +253,12 @@ function FleetList({
               // explicit controls, so a broad row click cannot unexpectedly
               // hide its chats or throw the user into another workspace.
               onSelect={() => on.walk(i)}
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && e.key === "Enter") {
+                  e.preventDefault();
+                  on.go(space.ws);
+                }
+              }}
             >
               <button
                 type="button"
@@ -329,7 +328,13 @@ function FleetList({
             key={r.row.pane}
             selected={i === sel || r.sel === previewed}
             data-home-row={i}
-            onSelect={() => on.walk(i)}
+            onSelect={() => on.preview(r.row)}
+            onKeyDown={(e) => {
+              if (e.target === e.currentTarget && e.key === "Enter") {
+                e.preventDefault();
+                on.open({ ws: r.row.ws, pane: r.row.pane });
+              }
+            }}
             title={`${r.row.agent.title} — ${m.label} · ${where(r.row)}`}
           >
             <span className="shrink-0 pl-2 text-dim">{list[i + 1]?.kind === HomeRowKind.Agent ? "├─" : "└─"}</span>
@@ -485,13 +490,13 @@ export function HomePage({
       <div
         className={cn(
           "grid min-h-0 flex-1",
-          "[grid-template-columns:1fr]",
-          "md:[grid-template-columns:clamp(22ch,25%,40ch)_1fr_clamp(20ch,25%,36ch)]",
+          "[grid-template-columns:1fr] [grid-template-rows:minmax(10rem,40%)_minmax(0,1fr)]",
+          "md:[grid-template-rows:1fr] md:[grid-template-columns:clamp(22ch,25%,40ch)_1fr_clamp(20ch,25%,36ch)]",
         )}
       >
-        <section className="hidden min-h-0 min-w-0 flex-col border-r border-border bg-card md:flex">
+        <section className="flex min-h-0 min-w-0 flex-col border-b border-border bg-card md:border-b-0 md:border-r">
           <SectionTitle>fleet ({rows.length})</SectionTitle>
-          <Tray rows={rows} list={list} previewed={previewed} on={on} />
+          <Tray rows={rows} previewed={previewed} on={on} />
           <ScrollArea className={cn("min-h-0 flex-1", SCROLLER)}>
             <div className="pb-1" ref={fleet} role="listbox" aria-label="fleet">
               <FleetList list={list} sel={at} previewed={previewed} folds={folds} on={on} />

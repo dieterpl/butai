@@ -325,6 +325,18 @@ function Home(p: PageProps) {
 
   const on: HomeCallbacks = {
     walk: (sel) => p.on.setSel(sel),
+    preview: (agent) => {
+      const folds = { ...p.view.folds, machines: new Set(p.view.folds.machines), spaces: new Set(p.view.folds.spaces) };
+      const machine = machines.find(m => m.daemon === agent.daemon);
+      if (machine) folds.machines.delete(machine.label);
+      folds.spaces.delete(agent.ws);
+      const revealed = homeRows(spaces, machines, folds);
+      const next = revealed.findIndex(r => r.kind === HomeRowKind.Agent && r.row.pane === agent.pane);
+      if (next < 0) return;
+      p.on.setFolds(folds);
+      p.on.setSel(next);
+      requestAnimationFrame(focusTerminal);
+    },
     // Both halves are needed and both are the shell's: the workspace to switch
     // to and the pane to stage may be on a machine that is not the active tab's.
     open: ({ ws, pane }) => {
@@ -368,14 +380,16 @@ function Home(p: PageProps) {
         else p.actions.toast("nothing to open here");
         return;
       }
-      if (verb?.id === VerbId.NewAgent) {
-        if (row?.kind === HomeRowKind.Space) on.start(row.space);
+      if (verb?.id === VerbId.NewAgent || verb?.id === VerbId.PickAgent) {
+        const space = row?.kind === HomeRowKind.Space ? row.space : spaces.find(s => s.ws === cursor?.ws);
+        if (space && verb.id === VerbId.PickAgent) void p.actions.spawnPick(space.ws, true, null);
+        else if (space) on.start(space);
         else p.actions.toast("put the cursor on a project to start an agent");
         return;
       }
       // `x` ends the thing the row *is*: on an agent that is the session, and
-      // on a project it is the workspace and everything running in it. Only the
-      // second asks — an agent is a process whose transcript is on disk.
+      // on a project it is the workspace and everything running in it.
+      // Chat and workspace close actions both ask before ending anything.
       if (verb?.id === VerbId.Kill) {
         if (row?.kind === HomeRowKind.Space) on.close(row.space);
         else if (cursor) void p.actions.kill(cursor.ws, cursor.pane, cursor.agent.title);

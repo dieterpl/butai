@@ -487,10 +487,9 @@ const HOME: readonly Verb[] = Object.freeze([
   // The rails' own verb, bound here unchanged. What moved is only what it acts
   // on: on a rail that is the tab you are looking at, and here it is the
   // project the cursor is in — which on this page are routinely not the same
-  // project, or even the same machine. No `a`/`A` split, for the reason the
-  // AGENTS rail has none in this client: it asks which type every time unless
-  // SETTINGS has pinned one.
+  // project, or even the same machine. `a` uses its preferred agent; `A` picks.
   verb("a", "new...", VerbId.NewAgent),
+  quiet("A", "choose an agent", VerbId.PickAgent),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
   // `x` ends the thing the row *is* — the session on an agent row, and on a
@@ -1420,7 +1419,7 @@ Use alt-n to open a project. With the AGENTS rail or a BOOTH project row focused
 a starts the pinned agent and A lets you choose another. Alt+Enter opens the
 agent picker from inside a running pane.
 
-The Views button opens the view chooser with each view's shortcut. Alt+O opens
+The Views button, Alt+Space or C-b Space opens the chooser with each view's shortcut. Alt+O opens
 Files and Alt+M opens the project's Docs. Help is a separate page: use the help
 button, ? off the stage, or C-b ? from anywhere.`,
     rows: [],

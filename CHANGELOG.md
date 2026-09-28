@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Browser navigation parity.** BOOTH chat clicks focus the live preview and
+  attention entries reveal chats inside folded projects. Enter opens the
+  selected project or chat, and `A` chooses an agent. Project tabs scroll with
+  the mouse wheel and follow keyboard selection, while BOOTH and Views stay
+  in place. Narrow screens keep the fleet and Views accessible; Alt+Space and
+  prefix Space open the view chooser.
+
 - **Help and FAQ (`1.3.0-dev.3.beta.7`).** Added a FAQ in terminal and web Help
   covering copying, clipboard troubleshooting, pasting text and images, focus,
   scrolling, NEEDS YOU, leaving sessions running, and choosing agents and views.
