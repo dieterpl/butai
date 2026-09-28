@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Help and FAQ (`1.3.0-dev.3.beta.7`).** Added a FAQ in terminal and web Help
+  covering copying, clipboard troubleshooting, pasting text and images, focus,
+  scrolling, NEEDS YOU, leaving sessions running, and choosing agents and views.
+  Corrected outdated BOOTH navigation and Docs/Help instructions and filled in
+  missing terminal shortcuts. Copy instructions reflect each client's behavior.
+
 - **Views cleanup (`1.3.0-dev.3.beta.6`).** Removed the unreliable Usage view
   from terminal and web navigation, including its terminal shortcuts and the
   web command palette.

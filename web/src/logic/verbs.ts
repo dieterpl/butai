@@ -269,8 +269,7 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.SpaceGit, "git", { alt: "r", prefix: "r" },
     "the repository over time, not the CHANGES rail — alt-g is the rail, and they do not share a letter"),
   g(VerbId.SpaceDocs, "docs", { alt: "m", prefix: "m" },
-    "the files page filtered to a project's writing — and where this reference lives, "
-    + "as a `reference` folder at the top of the rail"),
+    "the project's writing, filtered from Files; Help is a separate page opened with C-b ?"),
   g(VerbId.SpaceWork, "agents", { prefix: "w" }, "the stage, the rails, the terminal"),
   g(VerbId.SpaceNext, "next space", { alt: ".", prefix: "." }),
   g(VerbId.SpacePrev, "prev space", { alt: ",", prefix: "," }),
@@ -317,9 +316,9 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.Layout, "resize the rails", { alt: "l", prefix: "l" }),
   g(VerbId.Zen, "collapse the rails", { alt: "z", prefix: "z" }),
   g(VerbId.Alerts, "who needs you", { alt: "u", prefix: "u" },
-    "the [! n] badge — a web affordance with no TUI counterpart, so it takes a letter the TUI leaves free"),
+    "This shortcut is currently unavailable in the web client; use NEEDS YOU in BOOTH (alt-0)."),
   g(VerbId.PasteImage, "paste an image", { alt: "v", prefix: "v" }, "",
-    "Firefox opens its View menu on Alt+V when the menu bar is on"),
+    "This shortcut is currently unavailable in the web client; paste into the pane with Ctrl+V or Cmd+V instead."),
   g(VerbId.FontBigger, "bigger", { alt: "=", prefix: "+" }, "the terminal's font, not the browser's zoom"),
   g(VerbId.FontSmaller, "smaller", { alt: "-", prefix: "-" }),
   g(VerbId.Help, "this reference", { prefix: "?" }, "bare ? off the stage"),
@@ -1011,7 +1010,10 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "bare keys in the fleet list (alt-0 for the page, alt-w for the list). The list spans every " +
     "connected machine and each row says which one it is on; enter goes to that agent's project, " +
     "on its own machine, and puts it on the stage. The middle column is a real pane — click it or " +
-    "tab to it and every key is the agent's, which is why alt-w and alt-esc are the way back out.",
+    "tab to it and every key is the agent's, which is why alt-w and alt-esc are the way back out. " +
+    "Clicking a project selects its preview; its chevron folds the chats and [open] goes to the project. " +
+    "NEEDS YOU gathers chats needing attention even inside folded projects. Clicking a chat there " +
+    "or in FLEET focuses its live preview. The chat's [x] button asks before ending it.",
   AGENTS: "bare keys, with the rail focused (alt-a)",
   PROCESSES: "bare keys, with the rail focused (alt-p)",
   CHANGES:
@@ -1020,9 +1022,8 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "commit shows. y and n appear only while a merge or rebase is in progress.",
   FILES:
     "bare keys on the files page (alt-o) and on the docs page (alt-m), which are one widget over " +
-    "two listings — docs is the same tree filtered to a project's writing, with this reference as " +
-    "a `reference` folder at the top of it. The last two are for while you are editing; a " +
-    "reference page has no file behind it and refuses all three of edit, upload and download.",
+    "two listings — docs is the same tree filtered to a project's writing. Help has its own page, " +
+    "opened from the footer or with C-b ?. The save and cancel keys apply while editing a file.",
   SETTINGS:
     "bare keys on the settings page (alt-s, or [settings] in the footer). Not a space — alt-, and " +
     "alt-. walk past it — because it is about this client rather than about a project. Moving the " +
@@ -1356,6 +1357,75 @@ export type ReferenceSection = { title: string; note: string; rows: ReferenceRow
 export function reference(): ReferenceSection[] {
   const sections: ReferenceSection[] = [];
   sections.push({
+    title: "FAQ",
+    note: `## How do I copy text?
+
+In a chat or shell, drag with the left mouse button and release to copy automatically.
+Hold Alt or Shift while dragging if the running program uses the mouse itself.
+Ctrl+C goes to the focused program and can interrupt it; it does not copy the pane's selection.
+
+In Files, Docs and Help, select ordinary page text and use the browser's Copy command
+(Ctrl+C on Windows or Linux, Cmd+C on macOS). File line numbers are excluded.
+
+## Why did copying not reach my clipboard?
+
+Automatic copying from a pane requires HTTPS or localhost and clipboard access in
+your browser. Keep the tab focused and allow clipboard access when prompted.
+If a remote page uses plain HTTP, open it over HTTPS or through localhost instead.
+Copying ordinary page text uses the browser's normal selection and Copy command.
+
+## How do I paste text or an image?
+
+Click the chat or shell, then use Ctrl+V (Windows or Linux) or Cmd+V (macOS).
+An image on the clipboard is uploaded to the workspace and its path is pasted
+into the pane. You can also drop a file onto the pane. Browser clipboard access
+may require permission over HTTPS or localhost. Text in prompts and file editors
+uses the normal paste shortcut.
+
+## Why are my keys typing into the chat?
+
+The pane has keyboard focus. Use alt-a for the AGENTS rail, alt-p for PROCESSES,
+or alt-w for BOOTH's fleet. Enter on an agent row focuses its pane; clicking
+a chat in BOOTH focuses its live preview.
+
+If the browser or operating system takes an Alt shortcut, use the prefix shown
+in The two layers (C means Ctrl). Press C-b, release it, then the next key. C-b ? opens Help
+from a focused pane, and pressing the prefix twice sends it to the program.
+
+## How do I read earlier output or the rest of Help?
+
+Use the wheel over the pane to scroll its output. A program that handles the
+mouse may handle that wheel itself. In Help, use the wheel, j/k, or Page Up/Down
+to scroll. Choose a topic in the contents list; Tab moves keyboard focus among
+controls. Esc returns to the page you were using.
+
+## What is NEEDS YOU in BOOTH?
+
+It gathers chats needing attention across connected machines, even when their
+projects are folded in FLEET. Click one to read and reply in the preview.
+Waiting means the agent needs input; finished means it produced a result.
+Use [open] to go to its project. Clicking a project name selects its preview;
+the chevron folds or unfolds its chats.
+
+## Can I leave without ending my chats?
+
+Yes. Closing the browser tab disconnects this client; the daemon keeps the
+panes running. Reopen the web client to reconnect. The [x] beside a chat ends
+that session after confirmation. Closing a project with alt-x asks before
+ending everything running in it.
+
+## How do I start another agent or change views?
+
+Use alt-n to open a project. With the AGENTS rail or a BOOTH project row focused,
+a starts the pinned agent and A lets you choose another. Alt+Enter opens the
+agent picker from inside a running pane.
+
+The Views button opens the view chooser with each view's shortcut. Alt+O opens
+Files and Alt+M opens the project's Docs. Help is a separate page: use the help
+button, ? off the stage, or C-b ? from anywhere.`,
+    rows: [],
+  });
+  sections.push({
     title: "The two layers",
     note:
       "Alt works from inside a running program — an Alt key this client does not bind falls " +
@@ -1381,10 +1451,9 @@ export function reference(): ReferenceSection[] {
   sections.push({
     title: "The pointer's alone",
     note:
-      "Two gestures stand for no verb, so neither has a key: dragging to select text in the " +
-      "terminal, and the wheel. Everything else on screen is in the table above — verbs.js's " +
-      "TARGETS is the registry, and a button that is not in it throws rather than shipping " +
-      "as something you can only click.",
+      "Drag across terminal output and release to copy it. Alt-drag or Shift-drag selects " +
+      "even when the running program handles the mouse. Use the wheel over the pane to scroll. " +
+      "For clipboard requirements and copying other page text, see FAQ.",
     rows: [],
   });
   return sections;
