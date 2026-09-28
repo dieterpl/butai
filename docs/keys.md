@@ -49,7 +49,6 @@ The same set on the same letters, reaching the workbench from anywhere.
 | docs | `alt-m` | `C-b m` | a project's own markdown |
 | docker | `alt-c` | `C-b c` | `alt-d` is detach, so containers take `c` |
 | git | `alt-r` | `C-b r` | the repository: its refs, its history, its working tree |
-| usage | `alt-u` | `C-b u` | which agent account stops you first. On a Mac, Option-u is the diaeresis dead key, so use `C-b u` there |
 | work | the space key again | `C-b w` | each space key toggles back |
 | walk the spaces | `alt-,` `alt-.` | `C-b ,` `C-b .` | |
 | the spaces menu | `alt-space` | `C-b space` | every space with its badge — what the tab bar's own control opens |
@@ -222,10 +221,6 @@ key does nothing on one.
 **DOCKER** — `enter` follow the logs · `r` restart · `x` stop · `s` a shell in
 the container · `q` close.
 
-**USAGE** — `j` `k` walk the CLIs · `r` re-read. Three keys and no more: the
-page reports a state of the world it does not own — an account's standing lives
-with the provider — so there is nothing on it to change from here.
-
 **SETTINGS** — `j` `k` rows · `tab` groups · `enter` open a list, choose, or
 carry out an action row · `space` toggle · `-` `+` resize a rail · `0` back to
 automatic · `r` re-read MACHINES · `esc` leave. `enter` does more here than
@@ -268,7 +263,7 @@ F5 = "process build cargo build"      # C-a F5
 The vocabulary:
 
 ```
-space work|files|docker|docs|git|usage|booth|next|prev|menu
+space work|files|docker|docs|git|booth|next|prev|menu
 workspace 1..9|next|prev|new|close
 focus agents|processes|changes|fleet|stage
 agent [NAME]            spawn one, or pick from the list

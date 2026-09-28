@@ -67,7 +67,6 @@ changes is *which space* the middle is showing.
     alt-m       docs — this page
     alt-c       docker (containers; alt-d is detach)
     alt-r       git — the repository over time
-    alt-u       usage — which account limit stops you first
     alt-, / .   walk the spaces
     alt-space   the menu of them, with what each one is asking for
     alt-e       files, without the toggle back
@@ -493,7 +492,7 @@ prefix layer is for terminals that eat Alt, or fingers that prefer it.
 ## The Alt layer
 
     alt-o m c       files · docs · docker
-    alt-r u         git · usage
+    alt-r           git
     alt-, .         walk the spaces
     alt-space       the menu of spaces
     alt-e           files

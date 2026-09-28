@@ -29,6 +29,7 @@ import {
   fleetSpaces,
   homePreview,
   homeRows,
+  homeTray,
   machineIsDown,
   machinePressure,
   machineRows,
@@ -79,6 +80,8 @@ export interface HomeCallbacks {
   /// Close that workspace, and everything running in it. Asks first — this is
   /// the one press on the page that takes something away.
   close(space: SpaceRow): void;
+  /// End this exact chat, using its own workspace and machine.
+  closeChat(row: AgentRow): void;
 }
 
 export interface HomePageProps {
@@ -120,6 +123,90 @@ function where(row: AgentRow): string {
 // ---------------------------------------------------------------------------
 // FLEET
 // ---------------------------------------------------------------------------
+
+function CloseChat({ row, on }: { row: AgentRow; on: HomeCallbacks }) {
+  const label = `Close ${row.agent.title} in ${where(row)}`;
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      className="shrink-0 text-bad"
+      title={label}
+      aria-label={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        on.closeChat(row);
+      }}
+    >
+      x
+    </Button>
+  );
+}
+
+/// The agents that need you, copied to the top.
+///
+/// **Copies, not moves** — `homeTray` keeps each row's `sel`, so clicking one
+/// walks the single cursor to the original rather than being a second thing you
+/// can select. The section is drawn whether or not it has anything in it: "no
+/// agent is waiting on you" is worth a line, and a region that appears and
+/// disappears moves the list underneath it every time it does.
+function Tray({
+  rows,
+  list,
+  previewed,
+  on,
+}: {
+  rows: readonly AgentRow[];
+  list: readonly HomeRow[];
+  previewed: number | null;
+  on: HomeCallbacks;
+}) {
+  const tray = homeTray(rows);
+  return (
+    <>
+      <div role="listbox" aria-label="needs you" className="h-[4lh] shrink-0 overflow-hidden">
+        {!tray.length ? <Empty>nothing needs you</Empty> : null}
+        {tray.slice(0, 4).map(({ row, sel: at }) => {
+          // The mark, not a hard-coded `[?]`. The tray ranks three states —
+          // blocked, then an unread crash, then an unread turn — and the old
+          // page drew the waiting glyph for all three, which is a third
+          // vocabulary for a fact the two lists below it already agree on.
+          const m = agentMark(row.agent);
+          return (
+            <Row
+              key={row.pane}
+              // The tray holds *copies*, so it highlights the previewed
+              // agent's copy rather than owning a cursor of its own —
+              // otherwise every waiting agent is two things you can select.
+              selected={at === previewed}
+              // …and a copy walks to its original's row, which is the currency
+              // the cursor counts in. An original folded away inside its
+              // project has no row to move to, and the press does nothing
+              // rather than moving the cursor somewhere else.
+              onSelect={() => {
+                const row = list.findIndex((r) => r.kind === HomeRowKind.Agent && r.sel === at);
+                if (row >= 0) on.walk(row);
+              }}
+              title={`${row.agent.title} — ${m.label} · ${where(row)}`}
+            >
+              <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={row.agent} sprite /></span>
+              <span className="min-w-0 flex-1 truncate">{row.agent.title}</span>
+              <span className="shrink-0 truncate text-11 text-dim">{where(row)}</span>
+              <CloseChat row={row} on={on} />
+            </Row>
+          );
+        })}
+      </div>
+      <SectionTitle
+        action={
+          tray.length ? <Badge variant="destructive">{tray.length}</Badge> : <Badge variant="outline">clear</Badge>
+        }
+      >
+        needs you
+      </SectionTitle>
+    </>
+  );
+}
 
 /// Machine header, project row, then that project's agents — one sequence,
 /// headers included, exactly as `homeRows` builds it, so the drawing and the
@@ -259,6 +346,7 @@ function FleetList({
             >
               open
             </Button>
+            <CloseChat row={r.row} on={on} />
           </Row>
         );
       })}
@@ -403,6 +491,7 @@ export function HomePage({
       >
         <section className="hidden min-h-0 min-w-0 flex-col border-r border-border bg-card md:flex">
           <SectionTitle>fleet ({rows.length})</SectionTitle>
+          <Tray rows={rows} list={list} previewed={previewed} on={on} />
           <ScrollArea className={cn("min-h-0 flex-1", SCROLLER)}>
             <div className="pb-1" ref={fleet} role="listbox" aria-label="fleet">
               <FleetList list={list} sel={at} previewed={previewed} folds={folds} on={on} />

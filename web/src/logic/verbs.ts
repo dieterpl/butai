@@ -1110,6 +1110,8 @@ export const TARGETS = Object.freeze({
   // A row selects/previews. Workspace and agent `open` controls are explicit,
   // so selecting a header cannot collapse it or travel by surprise.
   "home.row": t("HOME", [VerbId.FocusFleet, VerbId.Down, VerbId.Up]),
+  "home.tray": t("HOME", [VerbId.Down, VerbId.Up]),
+  "home.closeChat": t("HOME", [VerbId.Kill]),
   "home.open": t("HOME", [VerbId.OpenAgent]),
 
   // -- AGENTS --------------------------------------------------------------

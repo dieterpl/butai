@@ -1894,6 +1894,12 @@ pub async fn run(
                     // The row under the cursor, not the one on the stage: `x`
                     // is a verb of the list it is drawn under, and the two are
                     // routinely different rows.
+                    Flow::EndAgent(at) => {
+                        if let Err(e) = kill_pane(&daemons, at).await {
+                            view.flash = Some(format!("{e:#}"));
+                        }
+                        dirty = true;
+                    }
                     Flow::KillSelected => {
                         // `x` ends the thing the row *is*. On an agent that is
                         // the session, and it does not ask, because an agent is
@@ -5799,6 +5805,8 @@ enum Flow {
     /// Kill the row the focused left rail's cursor is on — the `x` both
     /// sections advertise, and the first row of the right-click menu.
     KillSelected,
+    /// Close the exact chat named by a BOOTH button, even inside a folded project.
+    EndAgent(Route),
     /// One framed command on a fresh control connection.
     ///
     /// The two that go this way (`kill-server`, `reload-config`) are about the
@@ -7452,7 +7460,7 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 /// else — which re-points BOOTH's middle column at that agent's screen, because
 /// the preview follows the cursor — and only `[open]` travels.
 ///
-/// **Every branch moves the cursor first.** The flows that follow carry no row
+/// Navigation moves the cursor first. The flows that follow carry no row
 /// index and resolve `view.booth_sel` when they run, so a click and the act it
 /// asks for cannot come to name two different rows.
 ///
@@ -7461,6 +7469,9 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 /// spawning transfers focus only once the new agent has actually arrived.
 fn fleet_click(hit: hit::FleetHit, agent_row: bool, view: &mut View) -> Flow {
     let (row, flow) = match hit {
+        hit::FleetHit::EndAgent { daemon, workspace, pane } => {
+            return Flow::EndAgent(Route { daemon, workspace, pane });
+        }
         hit::FleetHit::Row(row) => (row, Flow::Continue),
         hit::FleetHit::Open(row) => (row, Flow::OpenFleetRow),
         hit::FleetHit::New(row) => (row, Flow::NewFleetAgent { pick: false }),
@@ -8605,11 +8616,22 @@ fn handle_input(
                         m.column,
                         m.row,
                     ) {
+                        if let hit::FleetHit::EndAgent { daemon, workspace, pane } = fleet_hit {
+                            view.overlay = Some(menu_overlay(chrome::MenuTarget::Agent {
+                                daemon,
+                                workspace,
+                                pane,
+                            }));
+                            return Flow::Continue;
+                        }
                         let (hit::FleetHit::Row(row)
                         | hit::FleetHit::Open(row)
                         | hit::FleetHit::New(row)
                         | hit::FleetHit::Close(row)
-                        | hit::FleetHit::Fold(row)) = fleet_hit;
+                        | hit::FleetHit::Fold(row)) = fleet_hit
+                        else {
+                            return Flow::Continue;
+                        };
                         view.overlay = fleet_menu_here(daemons, hosts, view, row);
                         return Flow::Continue;
                     }
@@ -9315,10 +9337,6 @@ fn alt_verb(code: event::KeyCode) -> Option<ViewVerb> {
         // rail — which is the *other* git surface, so taking its letter for this
         // page would have swapped the two things most easily confused.
         K::Char('r') => ViewVerb::Space(Page::Git),
-        // Alt-u: usage. The one free letter that is also the word — `alt-a`
-        // is the AGENTS rail and `alt-l` is layout, so neither half of
-        // "account limits" was available.
-        K::Char('u') => ViewVerb::Space(Page::Usage),
         // Alt-,/. cycle the spaces in the order the menu lists them — the
         // pairing the tab bar advertises by naming the one you are on.
         K::Char(',') => ViewVerb::SpacePrev,
@@ -13443,6 +13461,20 @@ name = \"terminal\"
         // A row that has gone between the frame and the press is not an error to
         // report, it is nothing to do.
         assert_eq!(fleet_route(&fleet, 2), None);
+        let mut view =
+            View { page: Page::Booth, focus: Focus::Stage, booth_sel: 0, ..Default::default() };
+        let flow = fleet_click(
+            hit::FleetHit::EndAgent {
+                daemon: away.daemon,
+                workspace: away.workspace,
+                pane: away.pane,
+            },
+            false,
+            &mut view,
+        );
+        assert!(matches!(flow, Flow::EndAgent(at) if at == away));
+        assert_eq!(view.booth_sel, 0, "closing another chat must not select it");
+        assert_eq!(view.focus, Focus::Stage);
     }
 
     /// Following a just-started agent names its machine as well as its pane.
@@ -14127,8 +14159,7 @@ name = \"terminal\"
     #[test]
     fn the_mac_table_covers_the_alt_layer_or_says_why_not() {
         // Dead keys: Option-e (´), Option-n (˜) and Option-u (¨) emit nothing
-        // until the next keystroke, so there is no character to read back. The
-        // USAGE space is reached with `<prefix> u` on a Mac for this reason.
+        // until the next keystroke, so there is no character to read back.
         let dead = ['e', 'n', 'u'];
         let bound: Vec<char> = ('a'..='z')
             .chain('0'..='9')

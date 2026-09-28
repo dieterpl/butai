@@ -246,12 +246,12 @@ fn page_region(
             let list = c::docker_row_area(geom);
             [(list, list), (logs, logs), (logs, logs), (logs, logs)]
         }
-        // BOOTH is three columns. The first two region slots both name the
-        // fleet now that its duplicate attention tray is gone.
+        // BOOTH is three columns and a tray, and the tray is a list of its own —
+        // the same agent appears in both, so a drag must not run between them.
         Page::Booth => {
             let h = c::booth_columns(c::booth_area(cols, geom));
             [
-                (h.fleet_rows, h.fleet_rows),
+                (h.tray_rows, h.tray_rows),
                 (h.fleet_rows, h.fleet_rows),
                 (h.stage_inner, h.stage_inner),
                 (h.compute_rows, h.compute_rows),
@@ -530,7 +530,8 @@ mod tests {
         }
     }
 
-    /// BOOTH's three columns remain distinct drag regions.
+    /// BOOTH is three columns and a tray, and the same agent is in two of them —
+    /// so a drag over the fleet must not pick up its own copy from the tray.
     #[test]
     fn booths_columns_do_not_run_into_each_other() {
         const COLS: u16 = 160;
@@ -540,9 +541,9 @@ mod tests {
         let h = crate::chrome::booth_columns(crate::chrome::booth_area(COLS, &geom));
         let at =
             |r: LRect| region(&view, COLS, ROWS, r.x + 1, r.y + 1, one()).expect("a BOOTH column");
-        let (fleet_alias, fleet, stage, compute) =
-            (at(h.fleet_rows), at(h.fleet_rows), at(h.stage_inner), at(h.compute_rows));
-        assert_eq!(fleet_alias, fleet, "the fleet aliases disagree");
+        let (tray, fleet, stage, compute) =
+            (at(h.tray_rows), at(h.fleet_rows), at(h.stage_inner), at(h.compute_rows));
+        assert_ne!(tray, fleet, "the tray and the list are one region");
         assert_ne!(fleet, stage, "the fleet and the pane are one region");
         assert_ne!(stage, compute, "the pane and the gauges are one region");
         assert!(fleet.right() <= stage.x && stage.right() <= compute.x, "the columns overlap");

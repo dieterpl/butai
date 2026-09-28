@@ -58,12 +58,12 @@ import { daemonOf, type Qid, type QualifiedWorkspace } from "../logic/events.ts"
 import { type GitActionId, type MenuCx, type GroupId, groupsFor, itemsFor } from "../logic/git-menu.ts";
 import type { StageEvents } from "@/stage/Stage";
 import type { SettingsFacts } from "@/pages/SettingsPage";
-import { VIEWS, cycleView, pageLabel } from "./navigation";
+import { VIEWS, cycleView, pageLabel, viewShortcut } from "./navigation";
 import { VerbId, altVerb, prefixVerb, keyName, isPrefix } from "../logic/verbs";
 import { PAGE_TABLE } from "./pages.tsx";
 
 /** The pages the shell can show. `work` is where a client opens. */
-export const PAGES = ["work", "home", "git", "files", "docs", "docker", "usage", "settings", "help"] as const;
+export const PAGES = ["work", "home", "git", "files", "docs", "docker", "settings", "help"] as const;
 export type PageName = (typeof PAGES)[number];
 
 
@@ -474,7 +474,7 @@ export function Shell() {
         </footer>
 
         <Dialog open={viewsOpen} onOpenChange={setViewsOpen}>
-          <DialogContent className="sm:max-w-xs">
+          <DialogContent className="sm:max-w-sm">
             <DialogHeader><DialogTitle>Views</DialogTitle></DialogHeader>
             <div className="flex flex-col" role="menu" aria-label="Workspace views" onKeyDown={e => {
               if (!["j", "k", "ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
@@ -486,10 +486,13 @@ export function Shell() {
               buttons[next]?.focus();
             }}>
               {VIEWS.map(p => <button key={p} type="button" role="menuitemradio" aria-checked={page === p}
+                aria-label={pageLabel(p)}
                 autoFocus={page === p || (p === "work" && !VIEWS.includes(page))}
-                className={`flex h-row items-center px-2 text-left hover:bg-sel ${page === p ? "bg-sel" : ""}`}
+                className={`flex h-row-lg items-center gap-2 px-2 text-left hover:bg-sel ${page === p ? "bg-sel" : ""}`}
                 onClick={() => { setPage(p); setViewsOpen(false); }}>
-                <span className="w-3">{page === p ? ">" : " "}</span>{pageLabel(p)}
+                <span className="w-3 shrink-0">{page === p ? ">" : " "}</span>
+                <span className="flex-1">{pageLabel(p)}</span>
+                <kbd className="shrink-0 font-mono text-dim">{viewShortcut(p, prefs.prefix)}</kbd>
               </button>)}
             </div>
           </DialogContent>

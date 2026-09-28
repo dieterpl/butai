@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Views cleanup (`1.3.0-dev.3.beta.6`).** Removed the unreliable Usage view
+  from terminal and web navigation, including its terminal shortcuts and the
+  web command palette.
+  The Views chooser is wider and shows the shortcut beside each view.
+
+- **BOOTH attention and chat controls (`1.3.0-dev.3.beta.6`).** Restored the
+  **NEEDS YOU** tray in the terminal and web clients. Agents
+  needing attention are gathered above the fleet again, with a fixed empty
+  state and clickable previews. The newer workspace navigation controls remain.
+  Individual chats now have an `[x]` close button in both the tray and fleet.
+
 - **BOOTH navigation cleanup (`1.3.0-dev.3.beta.5`).** Removed the duplicate
   top status tray and folded-project status strips. Workspace rows now expose
   an explicit `[open]` button; clicking the row selects it, while the chevron

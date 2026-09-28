@@ -286,7 +286,7 @@ pub fn on_fleet(
     cols: u16,
     rows: u16,
     view: &View,
-    _fleet: &[chrome::AllAgentRow<'_>],
+    fleet: &[chrome::AllAgentRow<'_>],
     spaces: &[chrome::SpaceRow<'_>],
     machines: &[chrome::MachineRow<'_>],
     x: u16,
@@ -297,12 +297,33 @@ pub fn on_fleet(
     }
     let geom = chrome::page_geom(cols, rows, view);
     let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+    // The tray sits above the list and the two rectangles are disjoint, so this
+    // is a first look rather than a precedence: only one of them can contain the
+    // point. It carries no `[open]` — four rows are too few to spend six columns
+    // on a button, and the copy's original is right there in the list with one.
+    //
+    // A tray copy resolves to its original's *row*, which is what the cursor
+    // counts. An original folded away inside its project has no row to move to,
+    // and the press does nothing rather than moving the cursor somewhere else —
+    // the tray is still the shortest route to it, through unfolding.
     let booth = chrome::booth_rows(spaces, machines, &view.folds);
+    if let Some(agent) = chrome::booth_tray_row_at(&c, fleet, x, y) {
+        if chrome::fleet_chat_close_span(c.tray_rows).is_some_and(|(a, b)| x >= a && x < b) {
+            return fleet.get(agent).map(FleetHit::end_agent);
+        }
+        return booth
+            .iter()
+            .position(|r| matches!(r, chrome::BoothRow::Agent { sel, .. } if *sel == agent))
+            .map(FleetHit::Row);
+    }
     let row = chrome::booth_fleet_row_at(&c, &booth, view.booth_sel, x, y)?;
     // Buttons before the row they sit on, or the row would swallow them — the
     // same order the tab bar resolves its `[x]` in.
     match booth.get(row)? {
-        chrome::BoothRow::Agent { .. } => {
+        chrome::BoothRow::Agent { row: agent, .. } => {
+            if chrome::fleet_chat_close_span(c.fleet_rows).is_some_and(|(a, b)| x >= a && x < b) {
+                return Some(FleetHit::end_agent(agent));
+            }
             if let Some((start, end)) = chrome::fleet_open_span(c.fleet_rows) {
                 if x >= start && x < end {
                     return Some(FleetHit::Open(row));
@@ -396,8 +417,8 @@ pub fn on_compute(
     chrome::booth_compute_machine_at(&c, machines, view, x, y)
 }
 
-/// What a press on BOOTH's fleet list landed on. Every variant carries a *row*
-/// index — the currency [`View::booth_sel`] is counted in.
+/// What a press on BOOTH's fleet list landed on. Navigation carries a *row*
+/// index. Closing a chat carries its identity, including for folded tray copies.
 ///
 /// **A press on an agent row is not the same act as going to it, which is why
 /// BOOTH's list does not take the rails' two-step.** A second click on a rail
@@ -416,6 +437,8 @@ pub fn on_compute(
 /// the only things here that travel are `[open]` and `enter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FleetHit {
+    /// An individual chat's `[x]`, independent of the selected workspace.
+    EndAgent { daemon: usize, workspace: butai_protocol::SessionId, pane: butai_protocol::PaneId },
     /// Any row's text — an agent, a project's name: put the cursor on it, and
     /// the preview with it. Never more.
     Row(usize),
@@ -427,6 +450,12 @@ pub enum FleetHit {
     Close(usize),
     /// A machine or project row, off its name and off its button: fold it.
     Fold(usize),
+}
+
+impl FleetHit {
+    fn end_agent(row: &chrome::AllAgentRow<'_>) -> Self {
+        Self::EndAgent { daemon: row.daemon, workspace: row.workspace_id, pane: row.agent.pane }
+    }
 }
 
 /// Stable identity of a foldable fleet row, independent of scrolling, names
@@ -1104,10 +1133,15 @@ mod tests {
         (machines, spaces)
     }
 
-    /// With the duplicate attention tray gone, the first interior row is the
-    /// first fleet row rather than a copy of an agent farther down the list.
+    /// A press in the NEEDS YOU tray names the agent the row is a copy of, and
+    /// the tray's empty rows name nothing.
+    ///
+    /// The tray is a fixed four rows whether or not anything is in it, so
+    /// "resolve the row at this y" has to answer `None` below the last copy —
+    /// clamping to the nearest would make three quarters of a quiet page a
+    /// button that selects whatever is at the top of the tray.
     #[test]
-    fn the_fleet_starts_at_the_top_of_its_column() {
+    fn a_press_in_the_needs_you_tray_names_the_agent_it_is_a_copy_of() {
         use butai_protocol::api::{AgentDto, AgentState};
 
         let agent = |title: &str, pane: u64, state: AgentState| AgentDto {
@@ -1121,6 +1155,8 @@ mod tests {
             unread: false,
         };
         let calm = agent("claude", 1, AgentState::Idle);
+        let asking = agent("codex", 2, AgentState::Waiting);
+        let busy = agent("gemini", 3, AgentState::Working);
         let row = |ws, a| chrome::AllAgentRow {
             workspace: ws,
             workspace_id: butai_protocol::SessionId(1),
@@ -1128,18 +1164,66 @@ mod tests {
             host: None,
             daemon: 0,
         };
-        let fleet = vec![row("one", &calm)];
+        let fleet = vec![row("one", &calm), row("one", &asking), row("one", &busy)];
         let sys = butai_protocol::api::SysDto::default();
-        let (machines, spaces) = booth_scaffold(&sys, &fleet, &[("one", 1, 1)]);
+        let (machines, spaces) = booth_scaffold(&sys, &fleet, &[("one", 1, 3)]);
         let view = View { page: Page::Booth, ..Default::default() };
+        let tabs: [Tab<'_>; 0] = [];
         let geom = chrome::page_geom(WIDE, ROWS, &view);
         let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
-        assert_eq!(c.fleet_rows.y, c.fleet_box.y + 1);
+        assert!(c.tray_rows.height > 1, "this terminal is tall enough for a tray");
+
+        let x = c.tray_rows.x;
+        // Row 3 of the list, not agent 1: a tray copy resolves to its
+        // original's *row*, which is the currency the cursor is counted in —
+        // machine, project, then the three agents.
         assert_eq!(
-            on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, c.fleet_rows.x, c.fleet_rows.y),
-            Some(FleetHit::Fold(0)),
-            "the first interior row is the machine disclosure row"
+            on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, c.tray_rows.y),
+            Some(FleetHit::Row(3)),
+            "the only waiting agent is the only copy in the tray, and it is on row 3"
         );
+
+        // Fold its project and the copy still answers — but there is no row to
+        // move a cursor to, so it names nothing rather than naming a row that
+        // belongs to something else.
+        let mut folded = View { page: Page::Booth, ..Default::default() };
+        folded.folds.toggle_space("local", butai_protocol::SessionId(1));
+        assert_eq!(
+            on_fleet(WIDE, ROWS, &folded, &fleet, &spaces, &machines, x, c.tray_rows.y),
+            None,
+            "a copy of a folded-away agent must not select some other row"
+        );
+        let (cx, ce) = chrome::fleet_chat_close_span(c.tray_rows).expect("chat close fits");
+        let close = FleetHit::EndAgent {
+            daemon: 0,
+            workspace: butai_protocol::SessionId(1),
+            pane: asking.pane,
+        };
+        for x in cx..ce {
+            for v in [&view, &folded] {
+                assert_eq!(
+                    on_fleet(WIDE, ROWS, v, &fleet, &spaces, &machines, x, c.tray_rows.y),
+                    Some(close),
+                    "the tray close button must name its chat even when folded"
+                );
+            }
+            assert_eq!(
+                on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, c.fleet_rows.y + 3),
+                Some(close),
+                "the original chat's close button must name the same chat"
+            );
+        }
+        for y in c.tray_rows.y + 1..c.tray_rows.y + c.tray_rows.height {
+            assert_eq!(
+                on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, y),
+                None,
+                "row {y} of the tray is empty and must name nothing"
+            );
+            // And it must not fall through to a rail BOOTH does not draw, which
+            // is the trap the fleet list below has its own assertion for.
+            let t = at(WIDE, ROWS, &view, &tabs, 1, None, x, y);
+            assert!(matches!(t, Target::Nothing), "row {y} of the tray resolved to {t:?}");
+        }
     }
 
     /// Every chip is clickable across its whole width, and the gaps between the

@@ -25,7 +25,7 @@
 //    two `setState` calls with no daemon in them at all. Both arrive on a page's
 //    *actions* interface, because from the page they are one gesture.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type { PageName, PageProps } from "./Shell.tsx";
 import { api } from "../logic/api.ts";
 import {
@@ -49,7 +49,6 @@ import {
   keyName,
   type Verb,
 } from "../logic/verbs.ts";
-import type { UsageDto } from "../protocol/generated/protocol.ts";
 
 import { WorkPage, type WorkActions, type WorkView } from "../pages/WorkPage.tsx";
 import { HomePage, type HomeActions, type HomeCallbacks } from "../pages/HomePage.tsx";
@@ -57,7 +56,6 @@ import { GitPage, type GitActions } from "../pages/GitPage.tsx";
 import { FilesPage, type FilesActions } from "../pages/FilesPage.tsx";
 import { DockerPage, FOLLOWER, type DockerActions } from "../pages/DockerPage.tsx";
 import { SettingsPage } from "../pages/SettingsPage.tsx";
-import { UsagePage } from "../pages/UsagePage.tsx";
 import { HelpPage } from "../pages/HelpPage.tsx";
 
 // ---------------------------------------------------------------------------
@@ -201,55 +199,6 @@ function useRailKeys(run: (key: string) => boolean) {
 }
 function focusTerminal() {
   document.querySelector<HTMLElement>('[data-slot="stage"] textarea, [data-slot="stage"] canvas')?.focus();
-}
-
-// ---------------------------------------------------------------------------
-// USAGE
-// ---------------------------------------------------------------------------
-
-/**
- * `GET /api/usage`, on the page that shows it.
- *
- * Not in `world.ts`, deliberately. The world is what every page reads and what
- * the event stream keeps current; usage is one page's data, has no event, and
- * costs a round trip to each machine's agent CLIs — polling it for pages that
- * never draw it would be work nobody asked for. Fetched when USAGE is opened and
- * refreshed on demand.
- *
- * `daemon` is the *active* machine, not the primary. An account limit is a fact
- * about the box the CLI logs in from, so a bridge serving two machines would
- * otherwise report the wrong account confidently — the terminal reads the active
- * daemon for the same reason (`workbench.rs`'s `refresh_usage`).
- */
-function useUsage(daemon: string | null): [UsageDto | null, boolean, () => void] {
-  const [usage, setUsage] = useState<UsageDto | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [nonce, setNonce] = useState(0);
-  useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    (daemon ? api.usage(daemon) : api.usage())
-      .then((u) => {
-        if (alive) {
-          setUsage(u);
-          setLoaded(true);
-        }
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [daemon, nonce]);
-  return [usage, loaded, () => setNonce((n) => n + 1)];
-}
-
-function Usage(p: PageProps) {
-  const daemon = p.ws ? (p.ws.daemon ?? daemonOf(p.ws.id)) : null;
-  const [usage, loaded, refresh] = useUsage(daemon);
-  const entry = p.world.daemons.find((d) => d.key === daemon) ?? p.world.daemons.find((d) => d.primary);
-  return <UsagePage usage={usage} loaded={loaded} machine={entry?.label ?? null} onRefresh={refresh} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +351,9 @@ function Home(p: PageProps) {
     },
     close: (space) => {
       void p.actions.closeWorkspace(space.ws, space.name);
+    },
+    closeChat: (row) => {
+      void p.actions.kill(row.ws, row.pane, row.agent.title);
     },
   };
 
@@ -649,7 +601,7 @@ function isNamed(ws: QualifiedWorkspace | null, pane: Qid, name: string): boolea
 }
 
 // ---------------------------------------------------------------------------
-// SETTINGS, USAGE's siblings
+// SETTINGS
 // ---------------------------------------------------------------------------
 
 function Settings(p: PageProps) {
@@ -683,7 +635,6 @@ export const PAGE_TABLE: Record<PageName, (p: PageProps) => React.ReactNode> = {
   files: Files,
   docs: Docs,
   docker: Docker,
-  usage: Usage,
   settings: Settings,
   help: Help,
 };

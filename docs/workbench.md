@@ -106,14 +106,13 @@ opens the menu of all of them. `alt-space` is its key, and `alt-,` / `alt-.`
 still walk them without opening anything.
 
 ```
-┌ VIEWS ──────┐
-│ >agents  2! │
-│  files      │
-│  git     ↓1 │
-│  docker     │
-│  docs       │
-│  usage      │
-└─────────────┘
+┌ VIEWS ───────────────────────────┐
+│ >agents  ^B w        2!           │
+│  files   alt-o                    │
+│  git     alt-r       ↓1           │
+│  docker  alt-c                    │
+│  docs    alt-m                    │
+└──────────────────────────────────┘
 ```
 
 **The counts are in the menu and nowhere else.** They used to ride the button,
@@ -122,15 +121,13 @@ space you are *not* looking at needs somewhere that survives every page. It does
 not need the bar to do it: a waiting agent already says so on its rail row, on
 its workspace chip, on the booth chip, in the footer, in BOOTH's fleet
 and through the bell. What is genuinely given up is narrower than it sounds and
-worth stating — a branch that has fallen behind, and an account limit under
-pressure, are now invisible on the pages that draw no CHANGES rail. Open the menu
-or the space itself.
+worth stating — a branch that has fallen behind is invisible on pages that draw no CHANGES
+rail. Open the menu or the Git view itself.
 
 | space | what its row says |
 |---|---|
 | agents | `n!` in danger when `n` agents are waiting |
 | git | `n!` in danger when `n` files are conflicted, else `↓n` in amber when the branch is behind |
-| usage | the tightest declared window, in the colour of the pressure it is under |
 | files, docker, docs | nothing — "there is stuff here" is noise |
 
 The button's *ink* is as wide as the space it names — `[git v]` is seven cells
@@ -682,6 +679,11 @@ everyone's.
 
 ```
 ┌ FLEET (4) ────────────┐┌ claude · local:butai ────────┐┌ COMPUTE ──────────────┐
+│ ! gemini · gpu-box:di ││                              ││                       │
+│                       ││                              ││                       │
+│                       ││                              ││                       │
+│                       ││                              ││                       │
+├ NEEDS YOU (1) ────────┤│                              ││                       │
 │v local               3││                              ││> local ██   3 RAM  59%│
 │  v butai   [open] [+] ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
 │     ✓  claude   [open]││                              ││                       │
@@ -707,9 +709,20 @@ are exactly the ones you want to start something in. They come from the machine
 and project lists now, so `notes` above has a row and so does `mini`, which is
 connected with nothing open on it.
 
-**The fleet starts at the top of the column.** There is no duplicate status tray.
-Each chat's status appears on its own row, and the chat shown in the middle
-column stays highlighted even when the keyboard is focused on that pane.
+**The NEEDS YOU tray** gathers agents needing attention above the fleet, even
+when their projects are folded. It ranks questions first, then unread crashes,
+then unread completed turns. Its fixed height keeps the fleet from shifting
+when attention changes; when empty, it says `nothing needs you`.
+
+The tray holds copies, so each agent keeps its place in the fleet. Clicking a
+copy selects its original row and preview; unfold its project or machine first
+if that row is hidden. The previewed agent stays highlighted in both lists even
+when the keyboard is focused on its pane.
+
+Each chat has an `[x]` button in the fleet and in NEEDS YOU. It ends that chat
+on its own machine; the tray button also works when the project is folded.
+The terminal follows the existing `x` key behavior and closes immediately;
+the web client uses its existing confirmation dialog.
 
 **The fleet list** is grouped by machine and then by project, and its order is a
 pure function of identity — daemon, then tab order, then spawn order. It reads no
@@ -739,7 +752,7 @@ whatever it wrote into its terminal title, and it is pinned between the sprite
 and the name here exactly as the AGENTS rail pins it. Only the name marquees.
 
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet
+the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet or NEEDS YOU tray
 selects its preview and immediately hands the keyboard to that pane. Clicking
 a machine or project selects it and keeps the keyboard on the fleet. `tab`,
 a click on the pane, or starting an agent also hands it to the pane, and everything you type from then on is that agent's. `alt-w` or

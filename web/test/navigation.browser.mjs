@@ -48,10 +48,9 @@ try {
   await view("agents");
   await page.locator('[data-surface="system"]').getByText("net eth0", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Switch view" }).click();
-  assert.deepEqual((await page.getByRole("menuitemradio").allTextContents()).map(s => s.trim()), [">agents", "files", "git", "docker", "docs", "usage"]);
+  assert.deepEqual(await page.getByRole("menuitemradio").evaluateAll(items => items.map(item => item.getAttribute("aria-label"))), ["agents", "files", "git", "docker", "docs"]);
   await page.getByRole("menuitemradio", { name: "docs" }).click();
   await view("docs");
-  await page.keyboard.press("Alt+."); await view("usage");
   await page.keyboard.press("Alt+."); await view("agents");
   await page.keyboard.press("Alt+0"); await view("views");
   assert.equal(await page.locator('nav [aria-current="page"]').count(), 0);

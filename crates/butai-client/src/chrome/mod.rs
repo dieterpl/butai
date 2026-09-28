@@ -390,22 +390,8 @@ pub enum Page {
     /// program rather than about a workspace — so it is entered and left rather
     /// than cycled, and it remembers where it was entered from.
     Help,
-    /// Which agent account stops you first, and when it comes back.
-    ///
-    /// **The one page in [`Page::ORDER`] that is not about the workspace**, and
-    /// the tension is worth stating rather than hiding: an account limit spans
-    /// every workspace and every machine, which by the same test that put BOOTH
-    /// on the tab bar makes it BOOTH-shaped.
-    ///
-    /// It is in the rail anyway, because the question is asked *while you work*
-    /// — you check what is left before starting something long, in the project
-    /// you are starting it in — and a page you reach with `alt-,` is a page you
-    /// actually check. [`page_badge`] is the other half of the bargain: the one
-    /// number that matters follows you onto the pages that are about the
-    /// workspace, so the page does not have to be visited to do its job.
-    ///
-    /// Reads `GET /v1/usage` on arrival and on `r`. No timer — the daemon
-    /// samples on its own clock, and nothing here moves between keystrokes.
+    /// Disabled account-usage view. Kept internally for now, but absent from
+    /// navigation, key bindings and saved workspace views until it is reliable.
     Usage,
 }
 
@@ -439,8 +425,7 @@ impl Page {
     /// [`Page::Diff`] still exists, because the client does draw the diff in the
     /// stage's place. It is reached from the CHANGES rail and left by staging
     /// anything, which is the behaviour it always had.
-    pub const ORDER: [Page; 6] =
-        [Page::Agents, Page::Files, Page::Git, Page::Docker, Page::Docs, Page::Usage];
+    pub const ORDER: [Page; 5] = [Page::Agents, Page::Files, Page::Git, Page::Docker, Page::Docs];
 
     /// Short lowercase label on the space button.
     pub fn label(self) -> &'static str {
@@ -3274,7 +3259,10 @@ fn overlay_layout(cols: u16, rows: u16, overlay: &Overlay) -> OverlayRows {
     // are short ("sh", "amp") but whose question is long would otherwise cut the
     // question, which is the half that says what the list is for.
     let widest = o.lines.iter().map(|l| l.chars().count()).max().unwrap_or(20);
-    let want_w = widest.max(o.title.chars().count()) as u16 + 4;
+    let mut want_w = widest.max(o.title.chars().count()) as u16 + 4;
+    if matches!(overlay, Overlay::List(list) if list.kind == ListKind::Space) {
+        want_w = want_w.max(36);
+    }
     let w = want_w.min(cols.saturating_sub(4)).max(12);
     let h = (o.lines.len() as u16 + 2).min(rows.saturating_sub(4)).max(3);
     o.rect = LRect::new(cols.saturating_sub(w) / 2, rows.saturating_sub(h) / 2, w, h);
@@ -3461,9 +3449,14 @@ fn draw_right_zen(buf: &mut Buffer, geom: &Geom, ws: Option<&WorkspaceDetail>, t
 
 // ---- BOOTH -----------------------------------------------------------------
 
-/// Maximum number of attention-ranked agents returned by [`booth_tray`].
-/// BOOTH no longer renders the duplicate tray, but the pure ranking remains
-/// useful to clients and tests that consume the shared model.
+/// Rows the attention tray reserves, excluding its separator.
+///
+/// **Fixed, and that is the whole point.** A tray that grew with its contents
+/// would push the fleet list down every time an agent started waiting, which is
+/// the moving list the fixed order exists to prevent. It reserves its space
+/// whether it holds three agents or none — and an empty tray is doing real work,
+/// since "nothing needs you" is the state this page is in most of the day and it
+/// should be an answer rather than an absence.
 pub const BOOTH_TRAY_H: u16 = 4;
 /// Narrower than [`tree_width`]: BOOTH's middle column is a live pane, and a
 /// terminal squeezed under ~60 columns is worse than a short list.
@@ -3520,6 +3513,10 @@ pub fn page_geom(cols: u16, rows: u16, view: &View) -> Geom {
 /// The BOOTH page's three columns, carved out of the band it is given.
 pub struct BoothColumns {
     pub fleet_box: LRect,
+    /// Fixed-height tray at the top of the fleet column, under its box border.
+    pub tray_rows: LRect,
+    /// Separator row between the tray and the fleet list.
+    pub fleet_sep: u16,
     pub fleet_rows: LRect,
     pub stage_box: LRect,
     pub stage_inner: LRect,
@@ -3553,15 +3550,20 @@ pub fn booth_columns(stage_box: LRect) -> BoothColumns {
     let compute_box =
         LRect::new(stage_box.x + fleet_w + stage_w, stage_box.y, compute_w, stage_box.height);
 
-    // The fleet uses the whole interior. Attention is already visible on each
-    // agent row (and in the BOOTH tab), so copying those rows into a fixed tray
-    // only duplicated status marks and pushed the actual work down.
+    // Fleet interior: tray on top, separator, then the list.
     let inner_h = fleet_box.height.saturating_sub(2);
     let inner_w = fleet_w.saturating_sub(2);
-    let fleet_rows = LRect::new(fleet_box.x + 1, fleet_box.y + 1, inner_w, inner_h);
+    // The tray yields rather than eating a list that would have nothing left.
+    let tray_h = if inner_h >= BOOTH_TRAY_H + 3 { BOOTH_TRAY_H } else { 0 };
+    let tray_rows = LRect::new(fleet_box.x + 1, fleet_box.y + 1, inner_w, tray_h);
+    let fleet_sep = fleet_box.y + 1 + tray_h;
+    let fleet_rows =
+        LRect::new(fleet_box.x + 1, fleet_sep + 1, inner_w, inner_h.saturating_sub(tray_h + 1));
 
     BoothColumns {
         fleet_box,
+        tray_rows,
+        fleet_sep,
         fleet_rows,
         stage_inner: LRect::new(
             stage_box_.x + 1,
@@ -3591,8 +3593,8 @@ pub fn booth_columns(stage_box: LRect) -> BoothColumns {
 /// The alternative was measured and rejected. A list re-sorted by urgency on
 /// the daemon's ~2s sampler tick travels ~174 positions per ten ticks at 24
 /// agents, and banding plus hysteresis only brought that to 169, because
-/// damping changes *when* a row moves and not *how far*. Attention stays on
-/// each stable row and is also summarized by the BOOTH tab's marker.
+/// damping changes *when* a row moves and not *how far*. Attention
+/// is surfaced by [`booth_tray`] copying rows upward instead.
 ///
 /// **Driven by the machine and project lists, not by the agents.** Walking the
 /// agents emitted a header only where one existed to sit above, so a machine
@@ -3774,7 +3776,7 @@ pub const FLEET_OPEN_LABEL: &str = "[open]";
 /// A project row's start button, with no room to say what it starts.
 pub const FLEET_ADD_LABEL: &str = "[+]";
 
-/// A project row's close button — the tab bar's `[x]`, one level in.
+/// The close button for a project or an individual chat.
 pub const FLEET_CLOSE_LABEL: &str = "[x]";
 
 /// The narrowest fleet column that can afford the button: enough for the
@@ -3795,11 +3797,17 @@ const FLEET_MIN_NAME: u16 = 6;
 ///
 /// `None` when the column is too narrow to spend six characters on it.
 pub fn fleet_open_span(area: LRect) -> Option<(u16, u16)> {
-    if area.width < FLEET_OPEN_MIN_W {
+    let end = fleet_chat_close_span(area).map_or(area.right(), |(start, _)| start - 1);
+    if end.saturating_sub(area.x) < FLEET_OPEN_MIN_W {
         return None;
     }
-    let end = area.x + area.width;
     Some((end.saturating_sub(FLEET_OPEN_LABEL.len() as u16), end))
+}
+
+/// Chat close control shared by fleet/tray painting and pointer resolution.
+pub fn fleet_chat_close_span(area: LRect) -> Option<(u16, u16)> {
+    (area.width >= SPRITE_W as u16 + 8 + FLEET_CLOSE_LABEL.len() as u16)
+        .then(|| (area.right() - FLEET_CLOSE_LABEL.len() as u16, area.right()))
 }
 
 /// What an empty project says where its agents would be.
@@ -3975,6 +3983,35 @@ pub fn booth_fleet_row_at(
     (i < rows.len()).then_some(i)
 }
 
+/// Which agent the tray row at `y` is a copy *of* — an index into `all`.
+/// Resolve it to its visible fleet row before moving the fleet cursor.
+///
+/// The tray is the answer to "what needs me", so the rows in it are the rows
+/// worth reaching first, and until this existed they were the only rows on the
+/// page you could not point at: the pointer resolved the list underneath and
+/// nothing else. It returns the *original's* index rather than a position in
+/// the tray, because the tray holds copies and the page has one cursor — see
+/// [`booth_tray`].
+///
+/// Scrolled with the same [`scroll_for`] the drawing uses, from a fixed top:
+/// the tray does not follow the cursor, so a row that is off the bottom of four
+/// is not clickable, exactly as it is not visible.
+pub fn booth_tray_row_at(
+    cols: &BoothColumns,
+    all: &[AllAgentRow<'_>],
+    x: u16,
+    y: u16,
+) -> Option<usize> {
+    let area = cols.tray_rows;
+    if area.height == 0 || !area.contains(x, y) {
+        return None;
+    }
+    let tray = booth_tray(all);
+    let visible = area.height as usize;
+    let first = scroll_for(0, visible, tray.len());
+    tray.get(first + (y - area.y) as usize).map(|(sel, _)| *sel)
+}
+
 /// Scroll offset that keeps `sel` inside a window of `height` rows.
 ///
 /// Shared by both BOOTH columns so a wheel and a cursor cannot disagree about
@@ -4004,6 +4041,7 @@ fn draw_booth_page(
     let focused = view.focus == Focus::AllAgents;
     let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
     let spines = fleet_spines(&rows);
+    let tray = booth_tray(scene.all_agents);
     let preview = booth_preview(&rows, view.booth_sel);
     let mut out = Painted::default();
 
@@ -4016,6 +4054,72 @@ fn draw_booth_page(
             theme.border(focused),
             theme.ground,
         );
+
+        // The tray: a fixed region, whether or not anything is in it.
+        if cols.tray_rows.height > 0 {
+            let area = cols.tray_rows;
+            let bound = area.x + area.width;
+            if tray.is_empty() {
+                put_str(
+                    buf,
+                    area.x,
+                    area.y,
+                    // Short enough to survive a narrow fleet column: at 160
+                    // columns the column is 21 cells and a longer sentence
+                    // ellipsizes into nonsense.
+                    &ellipsize("nothing needs you", area.width as usize),
+                    bound,
+                    Pen::new(theme.faint, theme.ground),
+                );
+            } else {
+                let visible = area.height as usize;
+                let first = scroll_for(0, visible, tray.len());
+                for (i, (idx, row)) in tray.iter().skip(first).take(visible).enumerate() {
+                    let y = area.y + i as u16;
+                    let close = fleet_chat_close_span(area);
+                    let title_end = close.map_or(bound, |(start, _)| start - 1);
+                    let (sprite, color, animating) = sprite_for(row.agent, view.fast_tick, theme);
+                    out.wants_fast_anim |= animating;
+                    // The tray holds copies, so it highlights the *selected
+                    // agent's* copy rather than owning a cursor of its own —
+                    // otherwise every waiting agent is two things you can select.
+                    let bg = theme.row_bg(Some(*idx) == preview);
+                    fill_row(buf, area.x, y, bound, bg);
+                    put_str(buf, area.x, y, &sprite, bound, Pen::new(color, bg));
+                    let where_ = match row.host {
+                        Some(h) => format!("{h}:{}", row.workspace),
+                        None => row.workspace.to_string(),
+                    };
+                    // The agent's own spinner is pinned beside the sprite for
+                    // the reason the rail pins it: it says where the agent is,
+                    // and a marker that has to be chased across the row says it
+                    // to nobody.
+                    let (glyph, title) = split_status_glyph(&row.agent.title);
+                    let mut x = area.x + SPRITE_W as u16 + 1;
+                    if !glyph.is_empty() {
+                        put_str(buf, x, y, glyph, title_end, Pen::new(color, bg));
+                        x += glyph.chars().count() as u16 + 1;
+                    }
+                    let (text, moving) = marquee(
+                        &format!("{title} · {where_}"),
+                        title_end.saturating_sub(x) as usize,
+                        view.tick,
+                    );
+                    out.wants_anim |= moving;
+                    put_str(buf, x, y, &text, title_end, Pen::new(theme.ink, bg));
+                    if let Some((start, end)) = close {
+                        put_str(buf, start, y, FLEET_CLOSE_LABEL, end, Pen::new(theme.danger, bg));
+                    }
+                }
+            }
+            let label = if tray.is_empty() {
+                " CLEAR ".to_string()
+            } else {
+                format!(" NEEDS YOU ({}) ", tray.len())
+            };
+            let color = if tray.is_empty() { theme.rule } else { theme.danger };
+            draw_section_sep(buf, cols.fleet_box, cols.fleet_sep, &label, color, theme.ground);
+        }
 
         // The fleet list, scrolled to keep the cursor in view. The cursor is an
         // index into this list, folds included, so there is nothing to map.
@@ -4115,7 +4219,8 @@ fn draw_booth_page(
                         // it, so a long title cannot run under the button and
                         // leave it unreadable on the row you are aiming at.
                         let open = fleet_open_span(area);
-                        let title_end = match open {
+                        let close = fleet_chat_close_span(area);
+                        let title_end = match open.or(close) {
                             Some((start, _)) => start.saturating_sub(1),
                             None => bound,
                         };
@@ -4136,6 +4241,16 @@ fn draw_booth_page(
                             // whole point of the button.
                             let ink = if cursor { theme.ink } else { theme.faint };
                             put_str(buf, start, y, FLEET_OPEN_LABEL, bound, Pen::new(ink, bg));
+                        }
+                        if let Some((start, end)) = close {
+                            put_str(
+                                buf,
+                                start,
+                                y,
+                                FLEET_CLOSE_LABEL,
+                                end,
+                                Pen::new(theme.danger, bg),
+                            );
                         }
                     }
                 }
@@ -4858,10 +4973,16 @@ pub fn spaces_menu_rows(
         .iter()
         .map(|p| {
             let here = if *p == view.page { ">" } else { " " };
-            match page_badge(*p, ws, usage) {
-                Some((badge, _)) => format!("{here}{:<lw$}  {badge}", p.label()),
-                None => format!("{here}{}", p.label()),
-            }
+            let shortcut = match p {
+                Page::Agents => format!("{} w", view.prefix),
+                Page::Files => "alt-o".into(),
+                Page::Git => "alt-r".into(),
+                Page::Docker => "alt-c".into(),
+                Page::Docs => "alt-m".into(),
+                _ => String::new(),
+            };
+            let badge = page_badge(*p, ws, usage).map(|(text, _)| text).unwrap_or_default();
+            format!("{here}{:<lw$}  {shortcut:<10} {badge}", p.label())
         })
         .collect()
 }
@@ -8812,8 +8933,10 @@ mod tests {
             "the columns must tile the band exactly"
         );
         assert_eq!(c.compute_box.right(), band.right());
-        // The fleet gets the whole column; status is not copied into a tray.
-        assert_eq!(c.fleet_rows.y, c.fleet_box.y + 1);
+        // The tray reserves its rows above the list, separator included.
+        assert_eq!(c.tray_rows.height, BOOTH_TRAY_H);
+        assert_eq!(c.fleet_sep, c.tray_rows.y + c.tray_rows.height);
+        assert_eq!(c.fleet_rows.y, c.fleet_sep + 1);
 
         // The pane is measured to the middle column, not the whole stage.
         let view = View { page: Page::Booth, ..Default::default() };
@@ -8863,7 +8986,8 @@ mod tests {
         // A project with nothing in it says so, and still offers to start one.
         assert!(screen.contains("no agents"), "{screen}");
         assert!(screen.contains("[+ codex]"), "notes names its own agent:\n{screen}");
-        assert!(!screen.contains("NEEDS YOU"), "attention rows must not be duplicated:\n{screen}");
+        // The tray counts what is waiting, and says so where a count belongs.
+        assert!(screen.contains("NEEDS YOU (2)"), "{screen}");
         // The stage names the previewed agent *and* its machine, because two
         // machines may run an agent of the same name one row apart.
         //
@@ -8881,6 +9005,13 @@ mod tests {
             b2.cell((c.fleet_rows.x, c.fleet_rows.y + 3)).map(|cell| cell.bg),
             Some(Theme::default().selection),
             "the codex chat shown on stage is not highlighted"
+        );
+        let on_stage = View { focus: Focus::Stage, ..on_project };
+        draw(&mut b2, 160, 40, &scene, &on_stage, &Theme::default());
+        assert_eq!(
+            b2.cell((c.tray_rows.x, c.tray_rows.y)).map(|cell| cell.bg),
+            Some(Theme::default().selection),
+            "the previewed tray copy must stay highlighted while typing"
         );
 
         // Collapsed COMPUTE gives each machine one headline and keeps resource
@@ -9534,10 +9665,14 @@ mod tests {
         assert!(seen.contains("mod.rs"), "the path's tail never scrolled into view");
     }
 
-    /// BOOTH pins the agent's own spinner beside its status sprite; it must not
-    /// march through the row with a long scrolling title.
+    /// BOOTH pins the agent's own spinner too — both in the fleet list and in
+    /// the tray, which draw the same agent through two different code paths.
+    ///
+    /// The sprite says the same thing more loudly, so the glyph is kept rather
+    /// than dropped only because it is the agent's word for its own state and
+    /// the sprite is ours; what it must not do is march through the row.
     #[test]
-    fn booth_pins_an_agents_own_spinner_on_its_chat_row() {
+    fn booth_pins_an_agents_own_spinner_in_both_columns() {
         let sys = SysDto::default();
         let agents = [
             agent(1, "✳ Wire the export watcher up to the daemon", AgentState::Waiting),
@@ -9557,8 +9692,9 @@ mod tests {
         let fleet_w =
             booth_columns(booth_area(160, &page_geom(160, 40, &view))).fleet_box.width as usize;
 
-        // The glyph lands once, on the chat row, and holds still while the
-        // title scrolls beside it.
+        // Every column the glyph lands on, over enough ticks for the name to
+        // have scrolled and wrapped: two rows draw this agent (the tray copy
+        // and the fleet row) and both must hold still.
         let mut columns: BTreeSet<Vec<usize>> = BTreeSet::new();
         let mut moved = false;
         for tick in 0..80 {
@@ -9569,7 +9705,7 @@ mod tests {
                 (0..40).map(|y| text_of(&b, y).chars().take(fleet_w).collect::<String>()).collect();
             let at: Vec<usize> =
                 rows.iter().filter_map(|r| r.chars().position(|c| c == '✳')).collect();
-            assert_eq!(at.len(), 1, "chat row, tick {tick}:\n{}", rows.join("\n"));
+            assert_eq!(at.len(), 2, "tray copy and fleet row, tick {tick}:\n{}", rows.join("\n"));
             moved |= !rows.iter().any(|r| r.contains("Wire the export"));
             columns.insert(at);
         }
@@ -9577,9 +9713,15 @@ mod tests {
         assert!(moved, "the name never scrolled, so this proves nothing about the glyph");
     }
 
-    /// Attention changes in place and never insert a duplicate top section.
+    /// With nothing waiting the tray still holds its rows, and says so — and
+    /// the fleet list below starts on the same screen row either way.
+    ///
+    /// This is the fixed-tray promise measured on the painted buffer rather
+    /// than asserted about the geometry: shrink the tray to its contents and
+    /// the second half of this fails, because every row below it moves up by
+    /// two the moment nothing is waiting.
     #[test]
-    fn attention_does_not_insert_a_duplicate_top_section() {
+    fn an_empty_tray_keeps_its_space_and_answers_the_question() {
         let sys = SysDto::default();
         let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
 
@@ -9606,11 +9748,11 @@ mod tests {
 
         use AgentState::*;
         let (calm_y, calm) = first_space_row([Idle, Idle, Working, Idle]);
-        assert!(!calm.contains("needs you"), "{calm}");
+        assert!(calm.contains("nothing needs you"), "{calm}");
 
         let (busy_y, busy) = first_space_row([Idle, Waiting, Working, Waiting]);
-        assert!(!busy.contains("NEEDS YOU"), "{busy}");
-        assert_eq!(calm_y, busy_y, "attention moved the fleet list");
+        assert!(busy.contains("NEEDS YOU (2)"), "{busy}");
+        assert_eq!(calm_y, busy_y, "the fleet list moved when the tray filled up");
     }
 
     /// The columns `start..end` of a painted row, as text.
