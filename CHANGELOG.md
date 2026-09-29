@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-29
+
+Stable release of the 1.3 development track, with BOOTH controls, terminal and
+browser navigation improvements, OpenCode support, and SSH update reconnect fixes.
+Packages are available for all eight release targets across Linux, macOS, and
+Windows. Native Windows TUI support remains experimental alpha.
+
 ### Changed
 
 - **SSH connections return on the first launch after an update (`1.3.0-dev.3.beta.9`).** Each
@@ -2605,7 +2612,9 @@ Initial workspace: per-user daemon with server-side VT emulation, editor,
 file tree, and git panes; a terminal (TUI) client; and a public framed +
 REST protocol. See [`docs/protocol.md`](docs/protocol.md).
 
-[Unreleased]: https://github.com/dieterpl/butai/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/dieterpl/butai/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/dieterpl/butai/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/dieterpl/butai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/dieterpl/butai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/dieterpl/butai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/dieterpl/butai/compare/v0.12.1...v1.0.0

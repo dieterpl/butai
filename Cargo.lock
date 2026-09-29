@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "butai"
-version = "1.3.0-dev.3.beta.9"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "butai-client",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "butai-client"
-version = "1.3.0-dev.3.beta.9"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "butai-protocol"
-version = "1.3.0-dev.3.beta.9"
+version = "1.3.0"
 dependencies = [
  "bytes",
  "crossterm",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "butai-server"
-version = "1.3.0-dev.3.beta.9"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "butai-protocol",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "butai-update"
-version = "1.3.0-dev.3.beta.9"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "flate2",
