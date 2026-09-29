@@ -589,68 +589,35 @@ impl Role {
 /// Braille spinner frames for the "working" indicator.
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-// -- ALL AGENTS sprites -----------------------------------------------------
-//
-// A working agent gets a little figure typing; the head glyph says how long it
-// has been alive, so a long-running agent reads differently at a glance from one
-// you just started. Deliberately plain ASCII, one column per char: a renderer
-// advances a column per `char` while the wire format advances by display width,
-// so a double-width glyph (any emoji) would shear the rail. See `docs/design.md`
-// on single-cell status glyphs.
+// -- Compact agent status indicators ---------------------------------------
 
-/// Sprite width in cells. Every frame in every table below must be this long.
+/// Fixed cell width keeps fleet titles aligned across every state.
 pub const SPRITE_W: usize = 3;
+const WORKING_FRAMES: [&str; 3] = [".  ", ".. ", "..."];
 
-/// Age thresholds in seconds, and the head glyph each one wears. Ascending.
-pub const AGE_HEADS: [(u64, char); 4] =
-    [(5 * 60, 'o'), (20 * 60, '0'), (60 * 60, 'O'), (u64::MAX, '@')];
-
-/// Hand positions cycled while an agent is working: fingers on a keyboard.
-/// Deliberately the smallest motion that still reads as movement — this panel is
-/// meant to be left open, so a working agent should be noticeable at a glance
-/// without pulling the eye off the stage. No frame is mirrored, which is what
-/// keeps a rail of them from beating in time like a metronome.
-pub const SPRITE_ARMS: [(char, char); 4] = [('.', '\''), (',', '.'), ('\'', ','), ('.', '.')];
-
-/// The still frame for an agent that is alive but not working.
-pub const SPRITE_RESTING: (char, char) = ('-', '-');
-/// Blocked on you: the figure throws its hands up.
-pub const SPRITE_WAITING: (char, char) = ('?', '?');
-/// A finished turn: hands off the keyboard. Its own const rather than
-/// `SPRITE_ARMS[0]` because a typing cycle has no frame that reads as
-/// celebration — every one of them is just mid-keystroke.
-pub const SPRITE_DONE: (char, char) = ('\\', '/');
-/// The process is gone.
-pub const SPRITE_EXITED: &str = "x_x";
-
-/// The 3-cell sprite for an agent, its role, and whether it is moving (which is
-/// what keeps a fast clock repainting).
-///
-/// `age_secs` is the agent's whole life, `fast_tick` the animation phase.
+/// A quiet loading indicator or a static status mark, its colour role, and
+/// whether the loading clock should repaint it. Age does not alter the mark.
 pub fn agent_sprite(
     state: AgentState,
     exited: Option<u32>,
-    age_secs: u64,
-    fast_tick: u64,
+    _age_secs: u64,
+    loading_tick: u64,
 ) -> (String, Role, bool) {
     if let Some(code) = exited {
-        let role = if code == 0 { Role::Faint } else { Role::Danger };
-        return (SPRITE_EXITED.to_string(), role, false);
+        return (" x ".into(), if code == 0 { Role::Faint } else { Role::Danger }, false);
     }
-    let head =
-        AGE_HEADS.iter().find(|(limit, _)| age_secs < *limit).map(|(_, h)| *h).unwrap_or('@');
-    let frame = |(l, r): (char, char)| format!("{l}{head}{r}");
-    match state {
-        AgentState::Exited => (SPRITE_EXITED.to_string(), Role::Faint, false),
-        AgentState::Waiting => (frame(SPRITE_WAITING), Role::Danger, false),
-        AgentState::Working => {
-            let arms = SPRITE_ARMS[(fast_tick as usize) % SPRITE_ARMS.len()];
-            (frame(arms), Role::Attention, true)
-        }
-        // A finished turn is the one still pose worth celebrating.
-        AgentState::Finished => (frame(SPRITE_DONE), Role::Info, false),
-        AgentState::Idle => (frame(SPRITE_RESTING), Role::Faint, false),
-    }
+    let (text, role, moving) = match state {
+        AgentState::Exited => (" x ", Role::Faint, false),
+        AgentState::Waiting => (" ! ", Role::Danger, false),
+        AgentState::Working => (
+            WORKING_FRAMES[(loading_tick % WORKING_FRAMES.len() as u64) as usize],
+            Role::Attention,
+            true,
+        ),
+        AgentState::Finished => (" ✓ ", Role::Info, false),
+        AgentState::Idle => (" · ", Role::Faint, false),
+    };
+    (text.into(), role, moving)
 }
 
 /// Compact `m:ss` (or `Ns` under a minute) for the working timer.
@@ -928,7 +895,7 @@ mod row_tests {
         for state in
             [AgentState::Waiting, AgentState::Working, AgentState::Finished, AgentState::Idle]
         {
-            for tick in 0..SPRITE_ARMS.len() as u64 {
+            for tick in 0..WORKING_FRAMES.len() as u64 {
                 for age in [0, 6 * 60, 21 * 60, 2 * 60 * 60] {
                     let (s, _, _) = agent_sprite(state, None, age, tick);
                     assert_eq!(s.chars().count(), SPRITE_W, "{state:?} age {age}: {s:?}");
@@ -940,12 +907,22 @@ mod row_tests {
     }
 
     #[test]
-    fn the_head_glyph_ages() {
-        let head = |secs| agent_sprite(AgentState::Idle, None, secs, 0).0.chars().nth(1).unwrap();
-        assert_eq!(head(1), 'o');
-        assert_eq!(head(10 * 60), '0');
-        assert_eq!(head(30 * 60), 'O');
-        assert_eq!(head(5 * 60 * 60), '@');
+    fn status_marks_do_not_change_with_age_and_exits_keep_their_severity() {
+        for (state, mark) in [
+            (AgentState::Waiting, " ! "),
+            (AgentState::Idle, " · "),
+            (AgentState::Finished, " ✓ "),
+            (AgentState::Exited, " x "),
+        ] {
+            for age in [0, 600, 1800, 18000] {
+                let (text, _, moving) = agent_sprite(state, None, age, 0);
+                assert_eq!(text, mark);
+                assert!(!moving);
+                assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), SPRITE_W);
+            }
+        }
+        assert_eq!(agent_sprite(AgentState::Idle, Some(1), 0, 0).1, Role::Danger);
+        assert_eq!(agent_sprite(AgentState::Idle, Some(0), 0, 0).1, Role::Faint);
     }
 
     #[test]

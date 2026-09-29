@@ -26,6 +26,21 @@ use serde::Deserialize;
 /// The palette a config with no `[theme] name` gets.
 pub const DEFAULT_THEME: &str = "blueprint-dark";
 
+/// How many workspaces `[views]` remembers a page for.
+///
+/// A bound rather than a housekeeping pass, because there is nothing to base a
+/// pass on: a workspace closed on a machine that is not connected today is
+/// indistinguishable from one that will be back on Monday, and a client that
+/// pruned every key it could not currently see would forget every other machine
+/// in the fleet the moment it started alone.
+///
+/// So the table is a fixed-size recency list instead. Sixty-four is well past
+/// what anyone keeps open and small enough that the whole thing is a screenful
+/// — and the eviction is what makes it true that opening a project once does
+/// not leave a line in the file forever. [`Config::save_view_at`] has the
+/// ordering it evicts by.
+pub const VIEWS_CAP: usize = 64;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -40,6 +55,27 @@ pub struct Config {
     /// `[update]`: whether to look for a newer release, and which one was
     /// turned down.
     pub update: UpdateConfig,
+    /// `[views]`: the space each workspace was last looking at, keyed by the
+    /// machine it is on and the directory it is open in.
+    ///
+    /// ```toml
+    /// [views]
+    /// "local:/media/nvme/Projects/butai" = "git"
+    /// "gpu-box:/srv/diffusion" = "files"
+    /// ```
+    ///
+    /// **Held as words rather than as [`Page`](crate::chrome::Page)s**, and
+    /// that is the version-skew policy this module states at the top, applied
+    /// to a value instead of a key: a page name a newer butai writes is one
+    /// this build has never heard of, and deserialising straight into an enum
+    /// would fail the whole file's parse over one line about one project.
+    /// [`Page::space_named`](crate::chrome::Page::space_named) is what reads
+    /// them back, and a word it does not know is a line that is ignored.
+    ///
+    /// Written by the workbench, not by hand — see [`crate::views`], which owns
+    /// the key's shape and the cap that keeps this table from growing a line
+    /// per project you ever opened.
+    pub views: HashMap<String, String>,
 }
 
 /// One `[[remote]]` block.
@@ -79,13 +115,15 @@ pub struct RemoteDef {
 /// ```toml
 /// [update]
 /// check = true                 # look for a newer release at all
+/// channel = "stable"           # or "dev": prereleases too
 /// declined_version = "1.1.0"   # written when you answer no; that one stops asking
 /// ```
 ///
-/// Client-side, because the client is the side that can ask a question and the
-/// side that owns the binary a person actually runs. The daemon never declares
-/// this table and serde ignores what it does not know, so it costs the daemon
-/// nothing.
+/// `check` and `declined_version` are client-side, because the client is the
+/// side that can ask a question and the side that owns the binary a person
+/// actually runs. `channel` is the exception: the daemon declares it too, since
+/// it checks for itself when asked to update. Each side still ignores the other
+/// keys, and serde ignores what it does not know.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -96,6 +134,15 @@ pub struct UpdateConfig {
     /// — here, or with `BUTAI_NO_UPDATE_CHECK` for a packaged install whose
     /// updates arrive some other way — stops it entirely.
     pub check: bool,
+    /// Which releases to follow: `"stable"` — every tag cut on `main`, and the
+    /// default — or `"dev"`, which takes the `-dev.N` prereleases as well.
+    ///
+    /// It belongs to the *install*, and lands here because the config is the
+    /// only per-install thing there is: a dev butai run with its own
+    /// `BUTAI_HOME` carries this key, and the stable one beside it never sees
+    /// it. Installing a dev build does not set it — a build is a file, and the
+    /// track it came from is not recorded in one.
+    pub channel: crate::update::Channel,
     /// A version that was offered and turned down.
     ///
     /// Answering no to the prompt is an answer about *that release*, not about
@@ -108,7 +155,7 @@ pub struct UpdateConfig {
 
 impl Default for UpdateConfig {
     fn default() -> Self {
-        Self { check: true, declined_version: None }
+        Self { check: true, channel: crate::update::Channel::default(), declined_version: None }
     }
 }
 
@@ -180,6 +227,8 @@ impl Default for General {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
+    /// Font-compatible graphics on Windows; Unicode on Unix.
+    pub glyphs: crate::glyphs::Glyphs,
     /// Width of the left rail (agents/processes/system) in cells.
     pub left_rail: Option<u16>,
     /// Width of the right (changes) rail in cells.
@@ -207,6 +256,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
+            glyphs: crate::glyphs::Glyphs::default(),
             left_rail: None,
             right_rail: None,
             procs_height: None,
@@ -512,6 +562,62 @@ impl Config {
         })
     }
 
+    /// Which releases to follow: `[update] channel`.
+    pub fn save_update_channel(channel: crate::update::Channel) -> std::io::Result<()> {
+        Self::save_update_channel_at(&Self::path(), channel)
+    }
+
+    /// [`save_update_channel`](Self::save_update_channel) against an explicit
+    /// path.
+    pub fn save_update_channel_at(
+        path: &Path,
+        channel: crate::update::Channel,
+    ) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            table(doc, "update")["channel"] = toml_edit::value(channel.as_str());
+        })
+    }
+
+    /// Remember which space a workspace was last looking at: one line of
+    /// `[views]`.
+    pub fn save_view(key: &str, page: crate::chrome::Page) -> std::io::Result<()> {
+        Self::save_view_at(&Self::path(), key, page)
+    }
+
+    /// [`save_view`](Self::save_view) against an explicit path (tests).
+    ///
+    /// **One key, like every other writer here, and for one more reason than
+    /// the rest.** Two workbenches are routinely open at once — that is what
+    /// the whole client is for — and each holds its own idea of where every
+    /// project was left. Writing the table back whole would mean the second one
+    /// to quit erased what the first one learned; setting the line it is
+    /// actually about leaves every other project's alone.
+    ///
+    /// **The table's order is its recency, and the eviction runs on that.** A
+    /// key being written is removed and re-appended rather than updated where
+    /// it sits, so the file reads oldest-first and the entries that fall off the
+    /// front are the projects nobody has looked at in the longest time. It costs
+    /// a rewritten line and buys an LRU with nothing extra in the file to
+    /// explain — no timestamps, no counters, nothing for a person reading their
+    /// own config to have to decode. The cost is that a comment written beside
+    /// one of these lines does not survive the next visit to that project; the
+    /// rest of the file keeps every comment it had, as always.
+    pub fn save_view_at(path: &Path, key: &str, page: crate::chrome::Page) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            let Some(views) = table(doc, "views").as_table_like_mut() else { return };
+            views.remove(key);
+            views.insert(key, toml_edit::value(page.label()));
+            while views.len() > VIEWS_CAP {
+                // The front is the least recently written, by the rule above.
+                // `break` rather than a bare unwrap: an empty table cannot be
+                // over the cap, so this cannot happen — and if it ever does, a
+                // config write is not the place to panic.
+                let Some(oldest) = views.iter().next().map(|(k, _)| k.to_string()) else { break };
+                views.remove(&oldest);
+            }
+        })
+    }
+
     /// Remember a machine connected from `[+ host]`, as a `[[remote]]` block.
     ///
     /// **Only a deliberate connection is written.** A machine that announced
@@ -788,6 +894,53 @@ mod tests {
         // release has to ask once of its own.
         assert!(!cfg.update.declined("1.2.0"));
         assert!(!cfg.update.declined("1.0.9"));
+    }
+
+    #[test]
+    fn the_release_channel_defaults_to_stable_and_reads_dev() {
+        assert_eq!(Config::default().update.channel, crate::update::Channel::Stable);
+
+        let text = "[update]\nchannel = \"dev\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.update.channel, crate::update::Channel::Dev);
+        // The keys in this table are independent: following the dev track says
+        // nothing about whether to look, or about what was turned down.
+        assert!(cfg.update.check);
+        assert_eq!(cfg.update.declined_version, None);
+    }
+
+    /// A misspelled channel is a parse error naming both words, which
+    /// `load_from` turns into a warning. Silently reading it as stable would
+    /// leave an install that believes it is on dev quietly months behind.
+    #[test]
+    fn a_channel_that_is_neither_word_is_reported() {
+        let err = toml::from_str::<Config>("[update]\nchannel = \"beta\"\n").unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("stable") && err.contains("dev"), "{err}");
+    }
+
+    #[test]
+    fn save_update_channel_preserves_other_content() {
+        let dir = std::env::temp_dir().join(format!("butai-save-channel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# my setup\n[update]\ncheck = true\ndeclined_version = \"1.1.0\"\n")
+            .unwrap();
+
+        Config::save_update_channel_at(&path, crate::update::Channel::Dev).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my setup"), "{text}");
+        // Written into the table that is already there, not a second one.
+        assert_eq!(text.matches("[update]").count(), 1, "{text}");
+
+        let (cfg, warnings) = Config::load_from(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cfg.update.channel, crate::update::Channel::Dev);
+        assert!(cfg.update.check);
+        assert!(cfg.update.declined("1.1.0"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

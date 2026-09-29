@@ -1394,6 +1394,7 @@ impl ServerCore {
         let mut ws = Workspace::new(sid, name, cwd.clone());
         // Project workspace file: name, managed processes, agent autostart.
         let (ws_file, warnings) = crate::config::WorkspaceFile::load(&cwd);
+        ws.autostart = ws_file.agents.autostart.clone();
         for w in warnings {
             warn!("workspace config: {w}");
         }
@@ -2550,11 +2551,17 @@ impl ServerCore {
                     return None;
                 }
                 self.updating = true;
+                // This machine's channel, not the asking client's: the daemon
+                // is the thing being replaced, and the track it follows is a
+                // property of the install here.
+                let channel = self.config.update.channel;
                 tokio::spawn(async move {
                     // Blocking throughout — `ureq`, sha2, gzip — so it goes on
                     // the blocking pool rather than a runtime worker.
-                    let result = tokio::task::spawn_blocking(|| {
-                        butai_update::check()?.map(|offer| butai_update::stage(&offer)).transpose()
+                    let result = tokio::task::spawn_blocking(move || {
+                        butai_update::check(channel)?
+                            .map(|offer| butai_update::stage(&offer))
+                            .transpose()
                     })
                     .await
                     .map_err(|e| format!("the download did not finish: {e}"))
@@ -3324,6 +3331,7 @@ impl ServerCore {
                 conflicts: self.git_pane(w).map(|g| g.conflict_count()).unwrap_or(0),
                 repo_state: self.git_pane(w).map(|g| g.state()).unwrap_or_default(),
                 attached_clients: self.attached_count(w.id),
+                autostart: w.autostart.clone(),
             })
             .collect()
     }
@@ -3331,9 +3339,9 @@ impl ServerCore {
     fn build_ws_detail(&mut self, sid: SessionId) -> Option<WorkspaceDetail> {
         // Read the workspace's own fields out first: building the process rows
         // borrows `self` mutably (see `build_processes`).
-        let (id, name, cwd, stage) = {
+        let (id, name, cwd, stage, autostart) = {
             let w = self.workspaces.get(&sid)?;
-            (w.id, w.name.clone(), w.cwd.display().to_string(), w.stage)
+            (w.id, w.name.clone(), w.cwd.display().to_string(), w.stage, w.autostart.clone())
         };
         Some(WorkspaceDetail {
             id,
@@ -3343,6 +3351,7 @@ impl ServerCore {
             processes: self.build_processes(sid),
             changes: self.build_changes(sid),
             stage,
+            autostart,
         })
     }
 
@@ -3633,7 +3642,7 @@ impl ServerCore {
     /// operation runner's lock, timeouts or progress. `GIT_OPTIONAL_LOCKS=0`
     /// keeps a listing from taking the index lock and racing a real operation.
     fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
-        let out = std::process::Command::new("git")
+        let out = butai_protocol::local::background_command("git")
             .arg("-C")
             .arg(root)
             .arg("--no-pager")
@@ -3866,7 +3875,7 @@ impl ServerCore {
         // Validate the path stays inside the workspace, but pass the relative
         // form to git (which wants a repo-relative pathspec).
         safe_join(cwd, rel).ok_or_else(|| ApiReply::BadRequest("path escapes workspace".into()))?;
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = butai_protocol::local::background_command("git");
         cmd.arg("-C").arg(cwd).arg("--no-pager").arg("diff");
         if staged {
             cmd.arg("--cached");
@@ -3918,7 +3927,7 @@ impl ServerCore {
     /// once staged — so what the diff view shows is what `s` would stage, and
     /// hunk-staging one of its hunks applies.
     fn untracked_patch(root: &Path, rel: &str) -> String {
-        let mut ls = std::process::Command::new("git");
+        let mut ls = butai_protocol::local::background_command("git");
         ls.arg("-C").arg(root).args(["ls-files", "--others", "--exclude-standard", "-z"]);
         if !rel.is_empty() {
             ls.arg("--").arg(rel);
@@ -3937,7 +3946,7 @@ impl ServerCore {
         }
         let mut patch = String::new();
         for path in paths.iter().take(UNTRACKED_DIFF_LIMIT) {
-            let out = std::process::Command::new("git")
+            let out = butai_protocol::local::background_command("git")
                 .arg("-C")
                 .arg(root)
                 .arg("--no-pager")
@@ -3960,7 +3969,7 @@ impl ServerCore {
     #[allow(clippy::result_large_err)]
     fn build_show(cwd: &Path, id: &str) -> Result<DiffDto, ApiReply> {
         crate::git_op::valid_show_rev(id).map_err(ApiReply::BadRequest)?;
-        let out = std::process::Command::new("git")
+        let out = butai_protocol::local::background_command("git")
             .arg("-C")
             .arg(cwd)
             .arg("--no-pager")

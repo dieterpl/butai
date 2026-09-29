@@ -271,6 +271,7 @@ fn resolve(cmd: &str) -> Option<PathBuf> {
 
 /// First match for `cmd` on `PATH`. An absolute or relative path is taken as
 /// given, matching how the pane spawner would launch it.
+#[cfg(unix)]
 fn which(cmd: &str) -> Option<PathBuf> {
     if cmd.contains('/') {
         let p = PathBuf::from(cmd);
@@ -306,7 +307,7 @@ fn is_exec(p: &Path) -> bool {
 /// machine this was found on, which cannot parse the file. Probing without the
 /// repair reports no version for a CLI that runs fine in a pane.
 async fn probe_version(program: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(program);
+    let mut cmd = butai_protocol::local::background_async_command(program);
     cmd.arg("--version");
     if let Some(path) = crate::pane::terminal::child_path() {
         cmd.env("PATH", path);
@@ -941,6 +942,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+#[cfg(windows)]
+fn which(cmd: &str) -> Option<PathBuf> {
+    crate::pane::terminal::windows_program(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,10 +1382,8 @@ mod tests {
             &gem_msg("m1", "2026-08-11T20:16:00.000Z", 100, 10, 0),
         );
         let now = parse_rfc3339_ms("2026-08-11T21:00:00.000Z").unwrap();
-        // Pinned to a whole second before the first read: `touch` cannot restore
-        // sub-second precision, so a stamp taken from the filesystem could not
-        // be put back exactly and the file would look changed for the wrong
-        // reason.
+        // Use the same explicit timestamp before and after rewriting, so the
+        // file looks unchanged regardless of the filesystem's clock precision.
         let stamp = SystemTime::now() - Duration::from_secs(1);
         filetime_set(&path, stamp);
         let mut c = Counter::default();
@@ -1401,16 +1405,14 @@ mod tests {
         assert_eq!(c.windows(now)[0].used, 110, "a file whose mtime did not move is not reopened");
     }
 
-    /// Push a file's mtime forward. `std::fs` cannot set one, and the crate
-    /// does not depend on `filetime` — touching through the shell is enough for
-    /// a test that only needs the stamp to differ.
+    /// Set fixture timestamps without depending on GNU `touch` syntax.
     fn filetime_set(path: &Path, when: SystemTime) {
-        let secs = when.duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let _ = std::process::Command::new("touch")
-            .arg("-d")
-            .arg(format!("@{secs}"))
-            .arg(path)
-            .status();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
     }
 
     #[test]
@@ -1541,6 +1543,7 @@ mod tests {
     }
 
     /// An executable script in a fake home's `bin` directory.
+    #[cfg(unix)]
     fn fake_bin(home: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = home.join(".local/bin");
@@ -1556,6 +1559,7 @@ mod tests {
     /// reported `absent` — while the AGENTS rail launched it perfectly well,
     /// because the pane spawner has always looked in those directories.
     #[tokio::test]
+    #[cfg(unix)]
     async fn an_agent_a_pane_could_launch_is_never_absent() {
         let tmp = tempdir();
         fake_bin(&tmp, "butai-fake-agent", "#!/bin/sh\necho '9.9.9 (Fake)'\n");
@@ -1582,6 +1586,7 @@ mod tests {
     /// stands in for the interpreter — reachable only if the `PATH` handed to
     /// the probe was repaired.
     #[tokio::test]
+    #[cfg(unix)]
     async fn a_version_probe_runs_with_the_path_a_pane_would_have_given() {
         let tmp = tempdir();
         fake_bin(&tmp, "butai-fake-node", "#!/bin/sh\necho '1.2.3 (via interpreter)'\n");

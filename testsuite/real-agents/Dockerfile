@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN for pkg in @anthropic-ai/claude-code @openai/codex @google/gemini-cli; do \
+RUN for pkg in @anthropic-ai/claude-code @openai/codex @google/gemini-cli @opencode/cli; do \
         npm install -g --no-fund --no-audit "$pkg" \
             || echo "WARNING: could not install $pkg — its tests will report SKIP"; \
     done

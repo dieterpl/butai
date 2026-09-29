@@ -1,7 +1,8 @@
 //! The daemon's half of `~/.butai/config.toml`.
 //!
 //! One file, two readers. This one takes the shell, the scrollback and restore
-//! budgets, `[api]`, `[[agents]]` and `[update] allow_remote`; the client's
+//! budgets, `[api]`, `[[agents]]` and `[update] allow_remote` and `channel`;
+//! the client's
 //! `config::Config` takes `[keys]`, `[theme]`, `[ui]`, `[[remote]]`, the prefix
 //! and the rest of `[update]`. Neither struct declares the other's tables and
 //! serde ignores what it does not know, so each side parses the whole file and
@@ -86,12 +87,19 @@ impl Default for General {
 }
 
 /// The daemon's share of `[update]`. The client reads `check` and
-/// `declined_version` out of the same table and ignores this key, as this
-/// struct ignores those — the "one file, two readers" split at the top of this
-/// module.
+/// `declined_version` out of the same table and ignores those, as this struct
+/// ignores them — the "one file, two readers" split at the top of this module.
+///
+/// `channel` is the one key both sides declare, and it has to be: the client
+/// checks for the binary a person runs, and this daemon checks for itself when
+/// `POST /v1/update` asks it to. A daemon reading the other track would answer
+/// "already on the latest" to a machine whose client can see a newer one.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Update {
+    /// Which releases this daemon's own check follows — `"stable"` or
+    /// `"dev"`. See [`butai_update::Channel`].
+    pub channel: butai_update::Channel,
     /// Let a client attached to this daemon make it update *itself* —
     /// `POST /v1/update`, and `butai update --daemon` on top of it.
     ///
@@ -211,29 +219,41 @@ impl Config {
             // `--resume` only in `resume_args`.
             //
             // Filled in only where verified against the installed CLI:
-            // `claude` v2.1 and `gemini` v0.53.1, both 2026-08-03. The rest are
-            // left empty deliberately — a wrong flag makes the CLI exit on
-            // launch. Fill them in via `[[agents]]` once checked against the
-            // CLI you actually run.
-            let builtins: [(&str, &[&str], &[&str]); 5] = [
+            // `claude` v2.1 and `gemini` v0.53.1, both 2026-08-03, and
+            // `opencode` v1.1.25 on 2026-09-24. The rest are left empty
+            // deliberately — a wrong flag makes the CLI exit on launch. Fill
+            // them in via `[[agents]]` once checked against the CLI you
+            // actually run.
+            type Builtin<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
+            let builtins: [Builtin<'_>; 6] = [
                 (
                     "claude",
                     &["--dangerously-skip-permissions", "--session-id", "{session_id}"],
                     &["--dangerously-skip-permissions", "--resume", "{session_id}"],
+                    &[],
                 ),
                 // Codex has no way to be told an id at launch; it assigns its
                 // own, and `codex resume` takes it afterwards. Reopening the
                 // right one therefore means learning the id from codex first,
                 // which butai does not do yet.
-                ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[]),
+                ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[], &[]),
                 (
                     "gemini",
                     &["--yolo", "--session-id", "{session_id}"],
                     &["--yolo", "--resume", "{session_id}"],
+                    &[],
                 ),
                 // aider has no session concept at all: its history is per
                 // directory, so there is nothing per-pane to name.
-                ("aider", &["--yes-always"], &[]),
+                ("aider", &["--yes-always"], &[], &[]),
+                // OpenCode assigns its own opaque id on first launch. It can
+                // reopen that id with `--session`, but cannot be told the id
+                // butai minted before the session exists, so resume stays off.
+                // Permissions are configuration rather than a stable v1 CLI
+                // flag; the inline override is the documented unattended
+                // equivalent and preserves every explicit `deny` only when a
+                // user replaces this built-in with their own definition.
+                ("opencode", &[], &[], &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]),
                 // Antigravity, Google's agent CLI and the announced successor
                 // to `gemini`. Its binary is `agy`, so that is the agent's name
                 // here, the same way the others are named after theirs.
@@ -246,15 +266,15 @@ impl Config {
                 // ambiguity `{session_id}` exists to remove.
                 //
                 // Flag verified against agy 1.1.12 on 2026-08-11.
-                ("agy", &["--dangerously-skip-permissions"], &[]),
+                ("agy", &["--dangerously-skip-permissions"], &[], &[]),
             ];
-            for (name, args, resume_args) in builtins {
+            for (name, args, resume_args, env) in builtins {
                 self.agents.push(AgentDef {
                     name: name.into(),
                     command: name.into(),
                     args: args.iter().map(|s| s.to_string()).collect(),
                     resume_args: resume_args.iter().map(|s| s.to_string()).collect(),
-                    env: HashMap::new(),
+                    env: env.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
                     // The built-ins are exactly the agents the generic tables
                     // are tuned against, so they carry no overrides.
                     waiting_pattern: None,
@@ -265,11 +285,7 @@ impl Config {
     }
 
     pub fn shell(&self) -> String {
-        self.general
-            .default_shell
-            .clone()
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/sh".into())
+        self.general.default_shell.clone().or_else(environment_shell).unwrap_or_else(platform_shell)
     }
 
     pub fn agent(&self, name: &str) -> Option<&AgentDef> {
@@ -316,14 +332,56 @@ impl WorkspaceFile {
     }
 }
 
+#[cfg(unix)]
+fn environment_shell() -> Option<String> {
+    std::env::var("SHELL").ok()
+}
+#[cfg(windows)]
+fn environment_shell() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn platform_shell() -> String {
+    "/bin/sh".into()
+}
+#[cfg(windows)]
+fn platform_shell() -> String {
+    std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `[update]` table is one table with two readers, and `channel` is the
+    /// key they share: a daemon asked to update itself checks the track this
+    /// machine follows, not the asking client's.
+    #[test]
+    fn the_daemon_reads_the_channel_and_leaves_the_client_keys_alone() {
+        let cfg: Config = toml::from_str(
+            "[update]\nchannel = \"dev\"\nallow_remote = true\ndeclined_version = \"1.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.update.channel, butai_update::Channel::Dev);
+        assert!(cfg.update.allow_remote);
+
+        // And the defaults are the cautious ones on both keys.
+        let cfg = Config::with_defaults();
+        assert_eq!(cfg.update.channel, butai_update::Channel::Stable);
+        assert!(!cfg.update.allow_remote);
+    }
 
     #[test]
     fn defaults_have_builtins() {
         let cfg = Config::with_defaults();
         assert!(cfg.agent("claude").is_some());
+        let opencode = cfg.agent("opencode").expect("opencode is a built-in");
+        assert_eq!(
+            opencode.env.get("OPENCODE_PERMISSION").map(String::as_str),
+            Some(r#"{"*":"allow"}"#)
+        );
+        assert!(opencode.resume_args.is_empty(), "opencode cannot name a fresh session yet");
         assert!(cfg.agent("agy").is_some(), "antigravity is a built-in");
         assert_eq!(cfg.general.scrollback, 5000);
     }
@@ -338,8 +396,8 @@ mod tests {
     fn every_builtin_auto_approves_and_names_the_conversation_it_resumes() {
         for agent in &Config::with_defaults().agents {
             assert!(
-                !agent.args.is_empty(),
-                "{} launches without its auto-approve flag",
+                !agent.args.is_empty() || agent.env.contains_key("OPENCODE_PERMISSION"),
+                "{} launches without an auto-approve flag or permission override",
                 agent.name
             );
             if !agent.resume_args.is_empty() {

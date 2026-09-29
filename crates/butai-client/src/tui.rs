@@ -25,14 +25,17 @@ impl TerminalGuard {
         // Before raw mode: `install` saves the settings it will hand back, and
         // those are the cooked ones.
         term::install();
+        let guard = Self;
         terminal::enable_raw_mode().context("enable raw mode")?;
         let mut out = io::stdout();
         execute!(out, terminal::EnterAlternateScreen, event::EnableBracketedPaste, cursor::Hide,)?;
         // Not crossterm's EnableMouseCapture — see [`term::ENABLE`].
+        #[cfg(windows)]
+        execute!(out, event::EnableMouseCapture)?;
         out.write_all(term::ENABLE)?;
         out.flush()?;
         install_panic_hook();
-        Ok(Self)
+        Ok(guard)
     }
 }
 
@@ -76,6 +79,8 @@ fn restore_terminal() {
     // DisableBracketedPaste, LeaveAlternateScreen and cursor::Show.
     let _ = out.write_all(term::RESTORE);
     let _ = out.flush();
+    #[cfg(windows)]
+    let _ = execute!(out, event::DisableMouseCapture);
     let _ = terminal::disable_raw_mode();
     term::disarm();
 }
@@ -98,6 +103,7 @@ fn restore_terminal() {
 /// too: it is what works outside tmux, it is what a `set-clipboard on` config
 /// wants (that also files the text as a tmux paste buffer), and a clipboard set
 /// twice with the same text is the same clipboard.
+#[cfg(unix)]
 pub fn set_clipboard(text: &str) -> Result<()> {
     let mut out = io::stdout().lock();
     let b64 = butai_protocol::b64::encode(text.as_bytes());
@@ -110,6 +116,12 @@ pub fn set_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn set_clipboard(text: &str) -> Result<()> {
+    arboard::Clipboard::new()?.set_text(text)?;
+    Ok(())
+}
+
 /// Wrap a sequence so tmux hands it to the terminal it is drawing on.
 ///
 /// `ESC P tmux; <payload> ESC \`, with every `ESC` in the payload doubled —
@@ -119,6 +131,7 @@ pub fn set_clipboard(text: &str) -> Result<()> {
 /// a newer tmux than this machine's the wrapped copy is dropped and the plain
 /// one alongside it is what has to land. That is the config where
 /// `set-clipboard on` is still worth setting.
+#[cfg(any(unix, test))]
 fn tmux_passthrough(seq: &str) -> String {
     format!("\x1bPtmux;{}\x1b\\", seq.replace('\x1b', "\x1b\x1b"))
 }

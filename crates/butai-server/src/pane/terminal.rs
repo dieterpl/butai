@@ -29,6 +29,7 @@ const FG_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Cap on a rendered command line, so a pathological argv never becomes a
 /// megabyte-long marquee.
+#[cfg(any(unix, test))]
 const FG_MAX: usize = 512;
 
 /// ...but only once the burst has been *streaming* for at least this long.
@@ -228,6 +229,8 @@ pub struct TerminalPane {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    #[cfg(windows)]
+    _command_script: Option<tempfile::TempPath>,
     /// Present until the child exits.
     exit_status: Option<u32>,
     command_label: String,
@@ -414,27 +417,61 @@ impl TerminalPane {
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .context("openpty")?;
 
+        #[cfg(windows)]
+        let mut command_script = None;
         let (mut cmd, label) = match spec.program {
             None => (CommandBuilder::new(spec.shell), shell_label(spec.shell)),
             Some(prog) if spec.via_shell => {
                 let mut c = CommandBuilder::new(spec.shell);
-                c.arg("-c");
+                shell_command_args(&mut c, spec.shell);
+                #[cfg(unix)]
                 c.arg(prog);
+                #[cfg(windows)]
+                {
+                    let name =
+                        Path::new(spec.shell).file_stem().unwrap_or_default().to_string_lossy();
+                    if name.eq_ignore_ascii_case("cmd") {
+                        // Keep raw shell syntax out of the PTY's CRT quoting.
+                        // A single batch-file path is safe for cmd /C, including
+                        // when the user's TEMP directory contains spaces.
+                        let mut script = tempfile::Builder::new()
+                            .prefix("butai-command-")
+                            .suffix(".cmd")
+                            .tempfile()?;
+                        script.write_all(
+                            format!("@echo off\r\nchcp 65001 >nul\r\n{prog}\r\n").as_bytes(),
+                        )?;
+                        let path = script.into_temp_path();
+                        c.arg(&path);
+                        command_script = Some(path);
+                    } else if name.eq_ignore_ascii_case("powershell")
+                        || name.eq_ignore_ascii_case("pwsh")
+                    {
+                        // EncodedCommand preserves embedded quotes and Unicode.
+                        c = CommandBuilder::new(spec.shell);
+                        c.args(["-NoLogo", "-EncodedCommand"]);
+                        let bytes: Vec<u8> =
+                            prog.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                        c.arg(butai_protocol::b64::encode(&bytes));
+                    } else {
+                        c.arg(prog);
+                    }
+                }
                 // The whole command, not just its first word: a row reading
                 // "sudo" says far less than "sudo apt-get update -y".
                 (c, prog.to_string())
             }
             Some(prog) => {
-                let mut c = CommandBuilder::new(resolve_program(prog));
-                for a in spec.args {
-                    c.arg(a);
-                }
+                let c = program_command(prog, spec.args);
                 // Label with what was asked for, not where it was found: the
                 // rail should say `claude`, not a 60-character nvm path.
                 (c, prog.to_string())
             }
         };
+        #[cfg(unix)]
         cmd.cwd(spec.cwd);
+        #[cfg(windows)]
+        cmd.cwd(windows_shell_cwd(spec.cwd).as_os_str());
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // The one thing the daemon's inherited environment routinely gets wrong.
@@ -442,7 +479,8 @@ impl TerminalPane {
         // *child's* lookups that fail: the interpreter behind an agent's
         // launcher, and every command in a `$SHELL -c` process, which reads no
         // rc file. `None` when there is nothing to add — see [`child_path`].
-        if let Some(path) = child_path() {
+        let repaired_path = child_path();
+        if let Some(path) = &repaired_path {
             cmd.env("PATH", path);
         }
         // Marker so a butai client launched inside a pane can detect the nesting
@@ -462,6 +500,14 @@ impl TerminalPane {
         cmd.env("BUTAI_SOCKET", spec.socket);
         cmd.env("BUTAI_PANE", spec.pane.to_string());
         cmd.env("BUTAI_WORKSPACE", spec.ws.to_string());
+        // `$BUTAI_HOME` is deliberately *not* re-set here, and that is not an
+        // omission. A pane starts from a snapshot of the daemon's own
+        // environment, and the daemon's environment is where `paths::butai_dir`
+        // read it from in the first place — so a daemon running out of
+        // `~/.butai-dev` hands every pane the same answer by inheritance, and a
+        // `butai` shelled out inside one reaches that butai rather than the
+        // real one. `$BUTAI_SOCKET` needs the line above precisely because it
+        // is the exception: `daemon::serve` binds a socket without one set.
         for (k, v) in spec.env {
             cmd.env(k, v);
         }
@@ -473,10 +519,13 @@ impl TerminalPane {
             // from whatever started it, which is rarely the login shell the
             // user installed the agent from — so "not found in PATH" without
             // saying *which* PATH sends people hunting in the wrong shell.
-            format!(
-                "spawn in pty (PATH={})",
-                std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
-            )
+            let path = match &repaired_path {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => std::env::var_os("PATH")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<unset>".into()),
+            };
+            format!("spawn {label} in pty (PATH={path})")
         })?;
         drop(pair.slave);
 
@@ -498,6 +547,8 @@ impl TerminalPane {
             master: pair.master,
             writer,
             killer,
+            #[cfg(windows)]
+            _command_script: command_script,
             exit_status: None,
             command_label: label,
             label_fixed,
@@ -953,6 +1004,7 @@ impl TerminalPane {
         // `process_group_leader` yields a `libc::pid_t`, which is `i32` on every
         // target with a `read_argv` body — naming the libc type here would break
         // Linux, where butai-server has no libc dependency.
+        #[cfg(unix)]
         let fresh = self
             .master
             .process_group_leader()
@@ -960,6 +1012,8 @@ impl TerminalPane {
             .and_then(read_argv)
             .filter(|argv| !is_self(argv))
             .and_then(display_argv);
+        #[cfg(windows)]
+        let fresh = None;
         self.fg_cache = Some((std::time::Instant::now(), fresh.clone()));
         fresh
     }
@@ -974,6 +1028,7 @@ impl TerminalPane {
     ///
     /// `None` when the foreground process is not ssh, which is the case worth
     /// falling back for: the announcement carries a `user@host` hint too.
+    #[cfg(unix)]
     pub fn ssh_dial_back(&self) -> Option<(Vec<String>, String)> {
         let argv = self.master.process_group_leader().and_then(read_argv)?;
         let program = std::path::Path::new(argv.first()?).file_name()?.to_str()?;
@@ -1160,9 +1215,10 @@ impl Drop for TerminalPane {
 /// The daemon inherits its environment from whatever started it — a desktop
 /// session, a systemd unit, an ssh command, the first client to auto-spawn it.
 /// That is rarely the login shell the user installed their tools from, and the
-/// most common install locations are invisible without one: `cargo
-/// install`/pipx land in `~/.local/bin`, and an npm-installed `claude` lands
-/// under whichever `~/.nvm/versions/node/*/bin` nvm's shell hook selects.
+/// most common install locations are invisible without one: pipx and native
+/// installers land in `~/.local/bin`, Cargo uses `~/.cargo/bin`, and an
+/// npm-installed `claude` lands under whichever
+/// `~/.nvm/versions/node/*/bin` nvm's shell hook selects.
 ///
 /// Returned in two groups because nvm is not like the others: it keeps one
 /// directory per installed node version and a `PATH` may name only one of them,
@@ -1173,7 +1229,19 @@ fn login_bin_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return (Vec::new(), Vec::new());
     };
-    let user = vec![home.join(".local/bin"), home.join(".bun/bin"), home.join("bin")];
+    let user = vec![
+        home.join(".local/bin"),
+        home.join(".opencode/bin"),
+        home.join(".cargo/bin"),
+        home.join(".bun/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".local/share/pnpm"),
+        home.join("Library/pnpm"),
+        home.join(".volta/bin"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/mise/shims"),
+        home.join("bin"),
+    ];
     let mut nvm = Vec::new();
     if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
         let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -1204,6 +1272,7 @@ fn login_bin_dirs() -> (Vec<PathBuf>, Vec<PathBuf>) {
 ///
 /// Returns an absolute path when the fallback finds one, otherwise `prog`
 /// unchanged so the caller's error names what was asked for.
+#[cfg(unix)]
 pub(crate) fn resolve_program(prog: &str) -> String {
     // A path, relative or absolute, is the user being explicit. Don't second-guess.
     if prog.contains('/') {
@@ -1219,7 +1288,78 @@ pub(crate) fn resolve_program(prog: &str) -> String {
             return candidate.to_string_lossy().into_owned();
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Some(candidate) = macos_app_program(prog) {
+        return candidate.to_string_lossy().into_owned();
+    }
     prog.to_string()
+}
+
+/// A CLI bundled by a macOS desktop app.
+///
+/// Codex.app (and recent ChatGPT.app builds) ship a directly executable
+/// `Resources/codex`. Claude Desktop keeps versioned Claude Code bundles in
+/// Application Support, and OpenCode.app carries an `opencode-cli` sidecar.
+/// None of the containing directories belongs on PATH: in particular the Codex
+/// resources directory also contains a private `node` which must not shadow
+/// the user's runtime. Resolve just the requested executable instead.
+#[cfg(target_os = "macos")]
+fn macos_app_program(prog: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    macos_app_program_in(&home, &[PathBuf::from("/Applications"), home.join("Applications")], prog)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn macos_app_program_in(home: &Path, applications: &[PathBuf], prog: &str) -> Option<PathBuf> {
+    if prog == "codex" || prog == "opencode" {
+        for root in applications {
+            let candidates: &[(&str, &str)] = if prog == "codex" {
+                &[
+                    ("Codex.app", "Contents/Resources/codex"),
+                    ("ChatGPT.app", "Contents/Resources/codex"),
+                ]
+            } else {
+                &[("OpenCode.app", "Contents/MacOS/opencode-cli")]
+            };
+            for (app, executable) in candidates {
+                let candidate = root.join(app).join(executable);
+                if is_executable_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        return None;
+    }
+    if prog != "claude" {
+        return None;
+    }
+
+    let root = home.join("Library/Application Support/Claude/claude-code");
+    let mut versions: Vec<_> = std::fs::read_dir(root).ok()?.flatten().collect();
+    // Versions are dotted decimal today. Numeric components keep 2.1.100
+    // newer than 2.1.99; the name is a deterministic fallback for a future
+    // non-numeric channel directory.
+    versions.sort_by(|a, b| {
+        let key = |entry: &std::fs::DirEntry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let numeric = name
+                .split('.')
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_default();
+            (numeric, name)
+        };
+        key(a).cmp(&key(b))
+    });
+    for version in versions.into_iter().rev() {
+        for relative in ["claude", "claude.app/Contents/MacOS/claude"] {
+            let candidate = version.path().join(relative);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// The `PATH` a pane's child is given, or `None` to pass the daemon's own along
@@ -1276,11 +1416,13 @@ pub(crate) fn child_path() -> Option<std::ffi::OsString> {
 }
 
 /// Whether `prog` resolves against the current `PATH`.
+#[cfg(unix)]
 fn which_on_path(prog: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(prog)).find(|p| is_executable_file(p))
 }
 
+#[cfg(unix)]
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     // Follows symlinks, so an nvm shim pointing at a real binary still counts,
@@ -1298,6 +1440,7 @@ fn is_executable_file(p: &Path) -> bool {
 /// under a test harness the kernel's accounting name is the thread's, so the
 /// check missed and the rail showed a thread name. Comparing the group id is
 /// exact and needs no guessing.
+#[cfg(unix)]
 fn is_own_group(pgid: i32) -> bool {
     // `getpgrp` cannot fail and takes no argument on any Unix.
     pgid == rustix::process::getpgrp().as_raw_nonzero().get()
@@ -1312,6 +1455,7 @@ fn is_own_group(pgid: i32) -> bool {
 /// butai's own name, and the [`FG_TTL`] cache then holds that wrong label on
 /// screen for half a second. Matching on the executable's file name catches
 /// both the full-argv read and the short accounting-name fallback.
+#[cfg(unix)]
 fn is_self(argv: &[String]) -> bool {
     static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let exe = EXE.get_or_init(|| {
@@ -1331,6 +1475,7 @@ fn is_self(argv: &[String]) -> bool {
 /// Upper bound on the argv blob read back from the kernel. Linux allows a
 /// cmdline up to ARG_MAX (megabytes); the rail is 28 columns wide, so reading
 /// the whole thing twice a second would be pure waste.
+#[cfg(unix)]
 const ARGV_READ_MAX: usize = 16 * 1024;
 
 /// argv of `pid`, or `None` when the platform will not say. The syscall is kept
@@ -1455,7 +1600,7 @@ fn proc_name(pid: i32) -> Option<String> {
 
 /// Platforms with neither `/proc` nor `KERN_PROCARGS2`: a shell row simply keeps
 /// its configured name.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn read_argv(_pid: i32) -> Option<Vec<String>> {
     None
 }
@@ -1466,6 +1611,7 @@ fn read_argv(_pid: i32) -> Option<Vec<String>> {
 /// Tolerates a tail cut short by [`ARGV_READ_MAX`] — the complete arguments are
 /// kept. Compiled in on every platform so its tests run everywhere.
 #[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = buf.get(4..)?;
@@ -1488,6 +1634,7 @@ fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
 /// the trailing NUL would otherwise produce). Compiled in on every platform so
 /// its tests run everywhere; only the Linux reader uses it.
 #[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 fn split_nul(raw: &[u8]) -> Vec<String> {
     raw.split(|b| *b == 0)
         .filter(|s| !s.is_empty())
@@ -1497,6 +1644,7 @@ fn split_nul(raw: &[u8]) -> Vec<String> {
 
 /// Basenames that mean "a shell sitting at its prompt" rather than a command
 /// worth naming a row after.
+#[cfg(any(unix, test))]
 const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"];
 
 /// Render argv as a rail label, or `None` when it is just the login shell
@@ -1506,6 +1654,7 @@ const LOGIN_SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "tcsh", "ks
 /// ("/bin/sh"), so both the dash and the directory are stripped before
 /// matching. Only a shell invoked with nothing but flags counts as idle:
 /// `zsh build.sh` and `sh -c 'make'` are real commands.
+#[cfg(any(unix, test))]
 fn display_argv(argv: Vec<String>) -> Option<String> {
     let arg0 = argv.first()?;
     let base = Path::new(arg0)
@@ -1809,6 +1958,7 @@ fn scan_queries(buf: &[u8]) -> (Vec<(usize, Query)>, usize) {
 
 /// ssh options that consume the next argument. Anything else beginning with
 /// `-` is a flag, and the first argument that is neither is the destination.
+#[cfg(unix)]
 const SSH_VALUE_OPTS: &[char] = &[
     'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l', 'm', 'O', 'o', 'P', 'p', 'Q', 'R', 'S',
     'W', 'w',
@@ -1821,6 +1971,7 @@ const SSH_VALUE_OPTS: &[char] = &[
 /// newline-translate it. `-N` and `-f` say "run no command" and "go to the
 /// background", and we are dialling precisely in order to run one in the
 /// foreground.
+#[cfg(unix)]
 const SSH_DROP_FLAGS: &[char] = &['t', 'T', 'N', 'f'];
 
 /// Split an ssh argument list into (flags, destination), dropping the remote
@@ -1828,6 +1979,7 @@ const SSH_DROP_FLAGS: &[char] = &['t', 'T', 'N', 'f'];
 ///
 /// Separated from [`TerminalPane::ssh_dial_back`] so it can be tested without a
 /// pty: the argument grammar is the fiddly part, not the `/proc` read.
+#[cfg(unix)]
 fn split_ssh_argv(args: &[String]) -> Option<(Vec<String>, String)> {
     let mut flags = Vec::new();
     let mut i = 0;
@@ -1998,6 +2150,175 @@ fn set_carry(carry: &mut Vec<u8>, tail: &[u8]) {
     carry.clear();
     if tail.len() <= 32 {
         carry.extend_from_slice(tail);
+    }
+}
+
+#[cfg(windows)]
+fn is_executable_file(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// Windows executable lookup includes npm's .cmd launchers via PATHEXT.
+#[cfg(windows)]
+pub(crate) fn windows_program(prog: &str) -> Option<PathBuf> {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let program = Path::new(prog);
+    let dirs: Vec<PathBuf> = if program.components().count() > 1 {
+        vec![PathBuf::new()]
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?).collect()
+    };
+    for dir in dirs {
+        let base = dir.join(program);
+        // npm writes an extensionless Unix shim alongside its .cmd wrapper.
+        // Resolve PATHEXT first so Windows never launches the Unix shim.
+        if program.extension().is_none() {
+            for extension in extensions.split(';').filter(|e| !e.is_empty()) {
+                let path = PathBuf::from(format!("{}{}", base.display(), extension));
+                if is_executable_file(&path) {
+                    return Some(path);
+                }
+            }
+        }
+        if is_executable_file(&base) {
+            return Some(base);
+        }
+    }
+    None
+}
+
+/// OpenCode's Windows installers do not necessarily expose their executable
+/// on the daemon's inherited PATH. The shell installer uses the same
+/// `~/.opencode/bin` layout as Unix, while the desktop installer keeps its CLI
+/// sidecar beside the app under LocalAppData.
+#[cfg(windows)]
+fn windows_opencode_program() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    windows_opencode_program_in(home.as_deref(), local.as_deref())
+}
+
+#[cfg(any(windows, test))]
+fn windows_opencode_program_in(
+    home: Option<&Path>,
+    local_appdata: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = [
+        home.map(|h| h.join(".opencode/bin/opencode.exe")),
+        local_appdata.map(|d| d.join("OpenCode/opencode-cli.exe")),
+    ];
+    candidates.into_iter().flatten().find(|p| is_executable_file(p))
+}
+
+fn shell_command_args(command: &mut CommandBuilder, shell: &str) {
+    #[cfg(unix)]
+    {
+        let _ = shell;
+        command.arg("-c");
+    }
+    #[cfg(windows)]
+    {
+        let name = Path::new(shell).file_stem().unwrap_or_default().to_string_lossy();
+        if name.eq_ignore_ascii_case("cmd") {
+            command.args(["/D", "/C"]);
+        } else if name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh") {
+            command.args(["-NoLogo", "-Command"]);
+        } else {
+            command.arg("-c");
+        }
+    }
+}
+#[cfg(windows)]
+impl TerminalPane {
+    pub fn ssh_dial_back(&self) -> Option<(Vec<String>, String)> {
+        None
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn resolve_program(prog: &str) -> String {
+    let fallback =
+        || (prog.eq_ignore_ascii_case("opencode")).then(windows_opencode_program).flatten();
+    windows_program(prog)
+        .or_else(fallback)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| prog.into())
+}
+
+#[cfg(unix)]
+fn program_command(prog: &str, args: &[String]) -> CommandBuilder {
+    let mut command = CommandBuilder::new(resolve_program(prog));
+    command.args(args);
+    command
+}
+#[cfg(windows)]
+fn program_command(prog: &str, args: &[String]) -> CommandBuilder {
+    let resolved = resolve_program(prog);
+    let extension = Path::new(&resolved).extension().unwrap_or_default().to_string_lossy();
+    if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+        // CreateProcess cannot execute batch files. PowerShell decodes the
+        // invocation without passing paths or argument quotes through the
+        // portable PTY's CRT command-line quoting a second time.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let script = format!(
+            "& {} {}; exit $LASTEXITCODE",
+            quote(&resolved),
+            args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
+        );
+        let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoLogo", "-NoProfile", "-EncodedCommand"]);
+        command.arg(butai_protocol::b64::encode(&bytes));
+        command
+    } else {
+        let mut command = CommandBuilder::new(resolved);
+        command.args(args);
+        command
+    }
+}
+
+/// `canonicalize` returns a verbatim path on Windows. cmd.exe mistakes its
+/// `\\?\` prefix for a UNC share and silently starts in C:\Windows instead.
+#[cfg(windows)]
+fn windows_shell_cwd(path: &Path) -> std::borrow::Cow<'_, Path> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+    if matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_)))
+    {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        return std::borrow::Cow::Owned(PathBuf::from(std::ffi::OsString::from_wide(&wide[4..])));
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+#[cfg(all(test, windows))]
+mod windows_resolve_tests {
+    use super::*;
+    use crate::testenv::EnvGuard;
+
+    #[test]
+    fn canonical_drive_paths_remain_usable_by_cmd() {
+        assert_eq!(
+            windows_shell_cwd(Path::new(r"\\?\C:\Projects\日本語")),
+            Path::new(r"C:\Projects\日本語")
+        );
+        for path in [r"C:\Projects\normal", r"\\server\share\project", r"relative\project"] {
+            assert_eq!(windows_shell_cwd(Path::new(path)), Path::new(path));
+        }
+    }
+
+    #[test]
+    fn npm_commands_choose_the_windows_wrapper_over_the_unix_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("npm-agent");
+        let wrapper = dir.path().join("npm-agent.cmd");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        std::fs::write(&wrapper, "@echo off\r\n").unwrap();
+        let _guard = EnvGuard::set(&[("PATHEXT", ".EXE;.CMD")]);
+        let resolved = windows_program(shim.to_str().unwrap()).expect("Windows wrapper");
+        // PATHEXT is commonly uppercase; the filesystem treats .CMD and .cmd
+        // as the same file even though Path's string comparison does not.
+        assert_eq!(resolved.canonicalize().unwrap(), wrapper.canonicalize().unwrap());
     }
 }
 
@@ -2979,10 +3300,21 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod resolve_tests {
     use super::*;
     use crate::testenv::EnvGuard;
+
+    fn executable(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 
     /// A path the user wrote out is honoured as-is, found or not — second-
     /// guessing an explicit path would silently run a different binary.
@@ -3038,6 +3370,72 @@ mod resolve_tests {
         std::fs::write(bin.join("not-exec-xyz"), "data").unwrap();
         let _guard = EnvGuard::set(&[("HOME", tmp.path().to_str().unwrap())]);
         assert_eq!(resolve_program("not-exec-xyz"), "not-exec-xyz");
+    }
+
+    #[test]
+    fn desktop_bundles_are_last_resort_clis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Applications");
+        let codex = apps.join("Codex.app/Contents/Resources/codex");
+        let opencode = apps.join("OpenCode.app/Contents/MacOS/opencode-cli");
+        executable(&codex);
+        executable(&opencode);
+
+        assert_eq!(
+            macos_app_program_in(tmp.path(), std::slice::from_ref(&apps), "codex"),
+            Some(codex),
+            "only the codex executable is selected, not the app's Resources directory"
+        );
+        assert_eq!(
+            macos_app_program_in(tmp.path(), &[apps], "opencode"),
+            Some(opencode),
+            "the OpenCode sidecar is also a usable CLI"
+        );
+        assert_eq!(macos_app_program_in(tmp.path(), &[], "gemini"), None);
+    }
+
+    #[test]
+    fn the_opencode_installer_directory_is_added_to_a_short_path() {
+        let tmp = fake_home(&[".opencode/bin"]);
+        let _g =
+            EnvGuard::set(&[("HOME", tmp.path().to_str().unwrap()), ("PATH", "/usr/bin:/bin")]);
+        let got = child_path().expect("OpenCode's native installer directory must be added");
+        assert_eq!(entries(&got).first(), Some(&tmp.path().join(".opencode/bin")));
+    }
+
+    #[test]
+    fn windows_opencode_installers_have_a_path_independent_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let local = tmp.path().join("local-app-data");
+        let desktop = local.join("OpenCode/opencode-cli.exe");
+        executable(&desktop);
+
+        assert_eq!(
+            windows_opencode_program_in(Some(&home), Some(&local)),
+            Some(desktop),
+            "the desktop sidecar is usable when the native install is absent"
+        );
+
+        let native = home.join(".opencode/bin/opencode.exe");
+        executable(&native);
+        assert_eq!(
+            windows_opencode_program_in(Some(&home), Some(&local)),
+            Some(native),
+            "the explicit CLI install takes precedence over the desktop sidecar"
+        );
+    }
+
+    #[test]
+    fn the_newest_claude_desktop_bundle_is_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Library/Application Support/Claude/claude-code");
+        let old = root.join("2.1.99/claude");
+        let current = root.join("2.1.100/claude.app/Contents/MacOS/claude");
+        executable(&old);
+        executable(&current);
+
+        assert_eq!(macos_app_program_in(tmp.path(), &[], "claude"), Some(current));
     }
 
     /// A fake home with the given directories under it, and the environment

@@ -21,8 +21,6 @@ crossterm.workspace = true
 # for the same job; editing a file is client work, so the widget follows.
 tui-textarea.workspace = true
 tracing.workspace = true
-rustix.workspace = true
-libc.workspace = true
 dirs.workspace = true
 arboard.workspace = true
 png.workspace = true
@@ -38,6 +36,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+tempfile.workspace = true
 
 # Wayland's clipboard is a separate protocol from X11's, and arboard only speaks
 # it with this feature on. Linux-only because it is the only target that has
@@ -47,3 +46,10 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

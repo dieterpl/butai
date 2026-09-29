@@ -13,7 +13,14 @@ use clap::Parser;
 
 mod cli;
 mod exit;
+#[cfg(unix)]
 mod handoff;
+#[cfg(windows)]
+mod handoff {
+    pub fn try_handoff(_: &std::path::Path) -> bool {
+        false
+    }
+}
 mod out;
 mod proxy;
 mod standalone;

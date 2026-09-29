@@ -1,49 +1,17 @@
-// WORK — the workbench: three rails, one live pane, one hint bar.
-//
-// The port of `web/ui/work.js`, which is itself the port of `butai-app.js`'s
-// work page and the four rail elements inside it (`<butai-agents>`,
-// `<butai-processes>`, `<butai-system>`, `<butai-changes>`). Between them those
-// carried four of `web/UI-REWRITE.md`'s nine symptoms, and each is fixed by
-// *deleting* something rather than restyling it:
-//
-//   | symptom | what is gone |
-//   |---|---|
-//   | eight rows all reading `crates/butai-client/src/…` | the single truncating box; `Path` is two |
-//   | `+102 -0` floating after the filename | free-flowing text; `DiffStat` is two fixed cells |
-//   | outline · grey fill · blue fill in one rail | three hand-rolled `<button>` styles; one `Button` |
-//   | SYSTEM bars ending at an arbitrary x | the sparkline; `Meter` always draws a track |
-//
-// ## This page draws. It does not decide.
-//
-// Every row here is a prop and every gesture is a callback: the shell owns the
-// world, the selection and the keyboard. `verbs.ts`, `dom.ts` and `fleet.ts` are
-// imported rather than reimplemented, which is what keeps this a *view*-layer
-// port — and what keeps the footer teaching the same keys the terminal does.
-//
-// The one piece of state that is genuinely this page's is the commit message,
-// because it is a half-typed sentence and not a fact about the repository. It is
-// also the bug that state fixes: the vanilla rail rebuilt its `<input>` on every
-// pushed record and had to put the caret back by hand afterwards, `try`/`catch`
-// and all. A controlled React input is never replaced, so there is no caret to
-// restore.
-//
-// ## One hint bar, for the surface the keyboard is on
-//
-// The vanilla client draws a footer *inside* each rail, which is three footers
-// on screen teaching keys that only work in one of them. `HintBar` spans the
-// page and shows the focused surface's verbs — the same table, packed by the
-// same `fits()` at the same column count the terminal uses, because which verbs
-// earn a column is the terminal's decision and not a layout choice.
+// AGENTS — the terminal workbench: agents/processes/system on the left,
+// a framed live pane or file diff in the middle, and changes on the right.
+// Pages render the world and callbacks handed down by the shell. Rail footers
+// and keyboard dispatch read the same verb tables; commits use the shared prompt.
 
-import { useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
+import { AgentStatus } from "@/components/AgentStatus";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffStat } from "@/components/DiffStat";
 import { Empty } from "@/components/Empty";
+import { Patch } from "@/components/Patch";
 import { Gauge } from "@/components/Gauge";
 import { HintBar, type Hint } from "@/components/HintBar";
 import { Notice } from "@/components/Notice";
@@ -68,7 +36,7 @@ import type {
   SysDto,
 } from "@/protocol/generated/protocol.ts";
 
-import { MARK_BADGE, MARK_TONE, SCROLLER, agentMark, hints, procBadge, sysGauges } from "./parts.ts";
+import { MARK_TONE, SCROLLER, agentMark, hints, procBadge, sysGauges } from "./parts.ts";
 
 // ---------------------------------------------------------------------------
 // What the page is handed
@@ -153,6 +121,11 @@ export interface WorkView {
   /// `"open"` slides the left rail over the stage — what the burger does below
   /// `md`, where three columns are unusable.
   rails: "auto" | "open";
+  zen?: boolean;
+  procsHeight?: number | null;
+  systemHeight?: number | null;
+  leftRail?: number;
+  rightRail?: number;
 }
 
 export interface WorkPageProps {
@@ -178,6 +151,7 @@ export interface WorkPageProps {
   /// disagrees with this client's. Optional, and the page only forwards them:
   /// dropping a selection the daemon has refused is the shell's call, and
   /// without this there would be no way for it to hear about one.
+  patch?: { title: string; text: string } | null;
   stage?: StageEvents | undefined;
 }
 
@@ -199,21 +173,11 @@ interface SecProps {
   /// in it is worse than no listbox at all.
   list?: boolean | undefined;
   children?: ReactNode;
+  footer?: ReactNode;
 }
 
-// `flex-auto` rather than `flex-1`, and the difference is visible: `flex-1` is
-// `flex:1 1 0%`, which gives AGENTS and PROCESSES *half the rail each* whatever
-// is in them — eleven agents scrolling inside 400px above one shell sitting in
-// 400px of nothing. Growing from the content instead gives the long list the
-// room and the short one what it needs.
-//
-// `ring-primary`, where a `Row`'s selection ring is `ring-ring`. The two say
-// different things and the terminal already distinguishes them: `--focus` is
-// translucent because it draws *around* something you can see, and which rail
-// has the keyboard is the brand colour there (`:host(.focused)`) for the same
-// reason it is here — at one hairline around a whole column, a translucent ring
-// is a ring nobody sees.
-function Sec({ title, action, focused, grow, list, children }: SecProps) {
+// Match the terminal rail's three-fifths agents / two-fifths processes split.
+function Sec({ title, action, focused, grow, list, children, footer }: SecProps) {
   const body = (
     <div className="py-1" role={list ? "listbox" : undefined} aria-label={list ? title : undefined}>
       {children}
@@ -221,14 +185,16 @@ function Sec({ title, action, focused, grow, list, children }: SecProps) {
   );
   return (
     <section
+      data-surface={title === "processes" ? "procs" : title.startsWith("changes") ? "changes" : title}
       className={cn(
         "flex min-h-0 min-w-0 flex-col border-b border-border",
-        grow ? "flex-auto" : "shrink-0",
+        grow ? title === "agents" ? "flex-[3_1_0%]" : title === "processes" ? "flex-[2_1_0%]" : "flex-1" : "shrink-0",
         focused && "ring-1 ring-inset ring-primary",
       )}
     >
-      <SectionTitle action={action}>{title}</SectionTitle>
+      <SectionTitle tone={focused ? "focus" : "default"} action={action}>{title}</SectionTitle>
       {grow ? <ScrollArea className={cn("min-h-0 flex-1", SCROLLER)}>{body}</ScrollArea> : body}
+      {footer}
     </section>
   );
 }
@@ -273,11 +239,10 @@ export function AgentsRail({ agents, selPane, note, pin, focused, actions, on }:
     </>
   );
   return (
-    <Sec title="agents" action={action} focused={focused} grow list>
+    <Sec title="agents" action={action} focused={focused} grow list footer={<HintBar keys={workHints("agents", { pin }, actions.press)} />}>
       {!agents.length ? <Empty>{note ?? "(none)"}</Empty> : null}
       {agents.map((a) => {
         const m = agentMark(a);
-        const badge = MARK_BADGE[m.tone];
         return (
           <Row
             key={a.pane}
@@ -285,37 +250,8 @@ export function AgentsRail({ agents, selPane, note, pin, focused, actions, on }:
             onSelect={() => on.selectPane(a.pane)}
             title={`${a.title} — ${m.label}`}
           >
-            <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}>{m.glyph}</span>
             <span className="min-w-0 flex-1 truncate">{a.title}</span>
-            <Badge variant={badge.variant} className={badge.className}>
-              {m.short}
-            </Badge>
-            {a.state === "waiting" ? (
-              // The daemon clears a bell when a client *looks* at a pane, and
-              // reading the rail is not looking. This is "yes, I saw it".
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                title="Answered — clear waiting (c)"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  actions.ack(a.pane);
-                }}
-              >
-                ✓
-              </Button>
-            ) : null}
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              title="Kill (x)"
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.kill(a.pane);
-              }}
-            >
-              ✕
-            </Button>
+            <span className={cn("shrink-0", m.tone === "work" ? "text-warn" : MARK_TONE[m.tone])}><AgentStatus agent={a} /></span>
           </Row>
         );
       })}
@@ -343,7 +279,7 @@ export function ProcessesRail({ processes, selPane, note, focused, actions, on }
     </Button>
   );
   return (
-    <Sec title="processes" action={action} focused={focused} grow list>
+    <Sec title="processes" action={action} focused={focused} grow list footer={<HintBar keys={workHints("procs", null, actions.press)} />}>
       {!processes.length ? <Empty>{note ?? "(none)"}</Empty> : null}
       {processes.map((p) => {
         const badge = procBadge(p.status);
@@ -362,28 +298,6 @@ export function ProcessesRail({ processes, selPane, note, focused, actions, on }
             <Badge variant={badge.variant} className={badge.className}>
               {p.status}
             </Badge>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              title="Restart (r)"
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.restart(p.pane);
-              }}
-            >
-              ⟳
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              title="Kill (x)"
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.kill(p.pane);
-              }}
-            >
-              ✕
-            </Button>
           </Row>
         );
       })}
@@ -410,7 +324,7 @@ export function SystemRail({ system, focused }: { system: SysDto | null; focused
     <Sec title="system" focused={focused}>
       {!gauges.length ? <Empty>no telemetry</Empty> : null}
       {gauges.map((g) => (
-        <Gauge key={g.key} label={g.label} value={g.value} tone={g.tone} text={g.text} />
+        <Gauge key={g.key} label={g.label} value={g.value} tone={g.tone} text={g.text} history={g.history} traffic={g.traffic} readingOnly={g.readingOnly} />
       ))}
     </Sec>
   );
@@ -464,11 +378,6 @@ export interface ChangesRailProps {
 
 /// The working tree, and everything you can do to it.
 export function ChangesRail({ changes, note, busy, focused, selected, actions }: ChangesRailProps) {
-  // This page's one piece of state, and the reason it is here: a half-typed
-  // sentence is not a fact about the repository, so it cannot come from above
-  // and must survive every pushed record that redraws the rail around it.
-  const [draft, setDraft] = useState("");
-
   if (!changes) {
     return (
       <Sec title="changes" focused={focused} grow>
@@ -481,31 +390,11 @@ export function ChangesRail({ changes, note, busy, focused, selected, actions }:
   const conflicted = ch.conflicted ?? [];
   const n = ch.staged.length + ch.unstaged.length + conflicted.length;
   const seq = ch.state !== "clean";
-  const stop = busy || seq;
   const arrows = (ch.ahead ? "↑" + ch.ahead : "") + (ch.behind ? "↓" + ch.behind : "");
-  const commit = (all: boolean) => {
-    const msg = draft.trim();
-    if (!msg) return;
-    (all ? actions.commitAll : actions.commit)(msg);
-    setDraft("");
-  };
-
   // The branch is a *button* in the header's action slot — the one place a
   // section header has for the thing it is about. Four headers differed only in
   // what they put there; this is what that slot is for.
-  const action = (
-    <>
-      <Button size="sm" variant="ghost" title="Switch branch (b)" onClick={() => actions.branch()}>
-        {ch.branch}
-      </Button>
-      {arrows ? (
-        <Badge variant="outline" title={ch.upstream ? `vs ${ch.upstream}` : undefined}>
-          {arrows}
-        </Badge>
-      ) : null}
-      <Badge variant="outline">{n}</Badge>
-    </>
-  );
+  const action = <Button size="sm" variant="ghost" title="Switch branch (b)" onClick={() => actions.branch()}>b</Button>;
 
   const fileRow = (f: FileChange, staged: boolean) => (
     <Row
@@ -531,7 +420,11 @@ export function ChangesRail({ changes, note, busy, focused, selected, actions }:
   );
 
   return (
-    <Sec title="changes" action={action} focused={focused} grow>
+    <Sec title={`changes (${n}) · ${ch.branch}${arrows ? ` ${arrows}` : ""}`} action={action} focused={focused} grow footer={<HintBar keys={[
+        { key: "c", label: "commit", onSelect: () => actions.press("changes", "c") },
+        { key: "g", label: "git", onSelect: () => actions.press("changes", "g") },
+        { key: "?", label: "keys", onSelect: () => actions.press("changes", "?") },
+      ]} />}>
       {seq ? (
         <Notice variant="bad" className="m-3 flex flex-wrap items-center gap-2 p-2">
           <Badge variant="destructive">{SEQ_LABEL[ch.state] ?? "in progress"}</Badge>
@@ -599,66 +492,10 @@ export function ChangesRail({ changes, note, busy, focused, selected, actions }:
         </div>
       ))}
 
-      <SectionTitle>unstaged</SectionTitle>
-      {ch.unstaged.length ? ch.unstaged.map((f) => fileRow(f, false)) : <Empty>(clean)</Empty>}
+      {ch.unstaged.length ? <><SectionTitle>unstaged</SectionTitle>{ch.unstaged.map(f => fileRow(f, false))}</> : null}
 
-      <SectionTitle>staged</SectionTitle>
-      {ch.staged.length ? ch.staged.map((f) => fileRow(f, true)) : <Empty>(nothing staged)</Empty>}
-
-      <div className="grid grid-cols-3 gap-2 p-3">
-        <Button size="sm" variant="outline" disabled={stop} title="git fetch --prune (f)" onClick={() => actions.fetch()}>
-          Fetch
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={stop}
-          title={`${ch.behind ? `${ch.behind} behind` : "git pull"} (P)`}
-          onClick={() => actions.pull()}
-        >
-          Pull
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={stop}
-          title={`${ch.ahead ? `${ch.ahead} to push` : "git push"} (p)`}
-          onClick={() => actions.push()}
-        >
-          Push
-        </Button>
-      </div>
-
-      <div className="flex flex-col gap-2 px-3 pb-3">
-        <Input
-          placeholder="Commit message"
-          value={draft}
-          aria-label="Commit message"
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commit(false);
-          }}
-        />
-        <div className="grid grid-cols-2 gap-2">
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => commit(false)}
-            disabled={!ch.staged.length || !!conflicted.length}
-            title={conflicted.length ? "Resolve the conflicts first" : "Commit (c)"}
-          >
-            Commit
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => commit(true)}
-            disabled={!n || !!conflicted.length}
-            title={conflicted.length ? "Resolve the conflicts first" : "Stage everything, then commit (C)"}
-          >
-            Commit all
-          </Button>
-        </div>
-      </div>
+      {ch.staged.length ? <><SectionTitle>staged</SectionTitle>{ch.staged.map(f => fileRow(f, true))}</> : null}
+      {!n ? <Empty>(clean)</Empty> : null}
 
       {ch.recent_commits.length ? <SectionTitle>recent</SectionTitle> : null}
       {ch.recent_commits.map((c) => (
@@ -740,7 +577,7 @@ function visible(procs: readonly QualifiedProcess[] | null | undefined): Qualifi
   return (procs ?? []).filter((p) => !String(p.name ?? "").startsWith("logs:"));
 }
 
-export function WorkPage({ world, ws, actions, focus, on, view, theme, fontPx, stage }: WorkPageProps) {
+export function WorkPage({ world, ws, actions, focus, on, view, theme, fontPx, stage, patch }: WorkPageProps) {
   // Below the width where three columns are unusable the rails give way and the
   // page is the pane, which is what every page here does with its rails. But
   // "give way" must not mean "become unreachable": `rails="open"` slides the
@@ -756,11 +593,11 @@ export function WorkPage({ world, ws, actions, focus, on, view, theme, fontPx, s
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <div
+        style={{ "--left-rail": view.leftRail ? `${view.leftRail}px` : "28ch", "--right-rail": view.rightRail ? `${view.rightRail}px` : "38ch" } as CSSProperties}
         className={cn(
           "relative grid min-h-0 flex-1",
           "[grid-template-columns:1fr]",
-          "md:[grid-template-columns:minmax(240px,300px)_1fr]",
-          "xl:[grid-template-columns:minmax(240px,300px)_1fr_minmax(260px,320px)]",
+          !view.zen && "md:[grid-template-columns:var(--left-rail)_1fr_var(--right-rail)]",
         )}
       >
         {/* The same scrim `ui/dialog.tsx` draws, because it is the same
@@ -770,11 +607,14 @@ export function WorkPage({ world, ws, actions, focus, on, view, theme, fontPx, s
           <div className="absolute inset-0 z-10 bg-black/50 md:hidden" onClick={() => on.rails(false)} />
         ) : null}
         <aside
+          style={{ "--procs-height": `${view.procsHeight}px`, "--system-height": `${view.systemHeight}px` } as CSSProperties}
           className={cn(
-            "min-h-0 min-w-0 flex-col border-r border-border bg-card",
+            "work-rails min-h-0 min-w-0 flex-col border-r border-border bg-card",
+            view.procsHeight != null && "[&>[data-surface=procs]]:flex-none [&>[data-surface=procs]]:h-[var(--procs-height)]",
+            view.systemHeight != null && "[&>[data-surface=system]]:overflow-hidden [&>[data-surface=system]]:h-[var(--system-height)]",
             drawer
               ? "absolute inset-y-0 left-0 z-20 flex w-4/5 max-w-xs shadow-lg md:static md:w-auto md:max-w-none"
-              : "hidden md:flex",
+              : view.zen ? "hidden" : "hidden md:flex",
           )}
         >
           <AgentsRail
@@ -797,15 +637,21 @@ export function WorkPage({ world, ws, actions, focus, on, view, theme, fontPx, s
           <SystemRail system={systemFor(world, ws)} focused={focus === "system"} />
         </aside>
 
-        <Stage
+        <section className="flex min-h-0 min-w-0 flex-col shadow-[inset_0_0_0_1px_var(--color-border)]">
+        <SectionTitle tone={focus === "stage" ? "focus" : "default"}>
+          {patch ? `diff · ${patch.title}` : "stage"}{!patch && view.pane != null ? ` · ${ws?.agents.find(a => a.pane === view.pane)?.title ?? ws?.processes.find(p => p.pane === view.pane)?.name ?? ""}` : ""}
+        </SectionTitle>
+        {patch ? <Patch text={patch.text} className="min-h-0 flex-1" /> : <Stage
+          autoFocus={focus === "stage"}
           pane={view.pane}
           theme={theme}
-          className="min-w-0"
+          className="min-h-0 min-w-0 flex-1"
           {...(fontPx != null ? { fontPx } : {})}
           {...(stage ?? {})}
-        />
+        />}
 
-        <aside className="hidden min-h-0 min-w-0 flex-col border-l border-border bg-card xl:flex">
+        </section>
+        <aside className={cn("hidden min-h-0 min-w-0 flex-col border-l border-border bg-card", !view.zen && "md:flex")}>
           <ChangesRail
             changes={ch}
             note={note}

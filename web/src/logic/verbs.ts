@@ -62,7 +62,15 @@ export const VerbId = Object.freeze(ids([
   // …and the one verb that acts on a fleet row: go to that agent's workspace,
   // on its own machine, and put it on the stage. Distinct from `Open`, which
   // every other list uses to mean "stage this row of the workspace I am in".
+  // On a *project* row it goes to that workspace, which is what makes its name
+  // a link — a project has no pane to preview, so travelling is the only thing
+  // pressing it could be asking for.
   "OpenAgent",
+  // Folding the fleet. The DIFF widget's own pair, and its reason transfers
+  // whole: reading a twenty-file diff without folds means scrolling past four
+  // files to reach the fifth, and a fleet of four machines is the same list
+  // with worse names.
+  "Fold", "FoldAll",
   // List navigation, listed in `?` so every rail documents itself.
   "Down", "Up", "First", "Last", "Open",
   // The left rail.
@@ -78,6 +86,12 @@ export const VerbId = Object.freeze(ids([
   // The files page. `DeleteFile` is its own id rather than the rail's `Discard`
   // — one puts a file back to what git has, the other removes it.
   "Upload", "Download", "Edit", "Save", "CancelEdit", "ViewFile", "ViewDiff", "DeleteFile",
+  // …and walking the Finder trail. `TreeUp`/`TreeInto` are not `Up`/`Down`
+  // wearing another name: those move the cursor *within* a column, these move
+  // between columns, and a client that answered one with the other would walk
+  // the wrong axis. `Peek` reads a file without leaving the browser — the
+  // difference from `Open`, which hands it the keyboard.
+  "TreeUp", "TreeInto", "Peek",
   // The docker page.
   "DockerLogs", "DockerShell", "DockerRestart", "DockerStop",
   // The GIT page. `Show` reads a commit or a stash into the body; `Scope`
@@ -93,7 +107,7 @@ export const VerbId = Object.freeze(ids([
   // Overlays.
   "Accept", "Cancel", "Clear", "ClearAll", "NewFolder",
   // The rest of the workbench.
-  "Zen", "Help", "Alerts", "PasteImage", "FontBigger", "FontSmaller",
+  "Layout", "Zen", "Help", "Alerts", "PasteImage", "FontBigger", "FontSmaller",
 ]));
 
 /// One verb's name. The union of [`VerbId`]'s values, read off the table so the
@@ -249,25 +263,24 @@ function g(id: VerbId, label: string, spell: Spell, note?: string, claim?: strin
 export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   // -- spaces --------------------------------------------------------------
   g(VerbId.SpaceFiles, "files", { alt: "o", prefix: "o" },
-    "press it again for work — every space key toggles back"),
+    "press it again for agents — every space key toggles back"),
   g(VerbId.SpaceDocker, "docker", { alt: "c", prefix: "c" },
     "alt-d is the browser's address bar, so containers take c — the same letter the TUI gives them, for its own reason"),
   g(VerbId.SpaceGit, "git", { alt: "r", prefix: "r" },
     "the repository over time, not the CHANGES rail — alt-g is the rail, and they do not share a letter"),
   g(VerbId.SpaceDocs, "docs", { alt: "m", prefix: "m" },
-    "the files page filtered to a project's writing — and where this reference lives, "
-    + "as a `reference` folder at the top of the rail"),
-  g(VerbId.SpaceWork, "work", { prefix: "w" }, "the stage, the rails, the terminal"),
+    "the project's writing, filtered from Files; Help is a separate page opened with C-b ?"),
+  g(VerbId.SpaceWork, "agents", { prefix: "w" }, "the stage, the rails, the terminal"),
   g(VerbId.SpaceNext, "next space", { alt: ".", prefix: "." }),
   g(VerbId.SpacePrev, "prev space", { alt: ",", prefix: "," }),
   // -- the one page that spans machines ------------------------------------
   // Beside the numbered projects because that is where its chip is: HOME is a
   // peer of the workspaces, not a view of one, so `alt-,` / `alt-.` walk the
   // spaces *past* it and this key and the chip are how you reach it.
-  g(VerbId.SpaceHome, "home", { alt: "0", prefix: "0" },
+  g(VerbId.SpaceHome, "booth", { alt: "0", prefix: "0" },
     "every agent on every machine — a peer of the project chips, so the space keys walk past it. "
     + "The browsers that take alt-1..alt-9 do not document alt-0, but C-b 0 is here for the ones that do"),
-  g(VerbId.FocusFleet, "the fleet (HOME)", { alt: "w", prefix: "W" },
+  g(VerbId.FocusFleet, "the fleet (BOOTH)", { alt: "w", prefix: "W" },
     "goes to HOME and puts the cursor in the list; also the way back out of the preview, "
     + "because once the preview has the keyboard every unmodified key is the agent's"),
   // -- the page that is about this client rather than a project -------------
@@ -300,11 +313,12 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.NewShell, "a new shell", { alt: "t", prefix: "t" }, "",
     "Firefox opens its Tools menu on Alt+T when the menu bar is on"),
   // -- the rest ------------------------------------------------------------
+  g(VerbId.Layout, "resize the rails", { alt: "l", prefix: "l" }),
   g(VerbId.Zen, "collapse the rails", { alt: "z", prefix: "z" }),
   g(VerbId.Alerts, "who needs you", { alt: "u", prefix: "u" },
-    "the [! n] badge — a web affordance with no TUI counterpart, so it takes a letter the TUI leaves free"),
+    "This shortcut is currently unavailable in the web client; use NEEDS YOU in BOOTH (alt-0)."),
   g(VerbId.PasteImage, "paste an image", { alt: "v", prefix: "v" }, "",
-    "Firefox opens its View menu on Alt+V when the menu bar is on"),
+    "This shortcut is currently unavailable in the web client; paste into the pane with Ctrl+V or Cmd+V instead."),
   g(VerbId.FontBigger, "bigger", { alt: "=", prefix: "+" }, "the terminal's font, not the browser's zoom"),
   g(VerbId.FontSmaller, "smaller", { alt: "-", prefix: "-" }),
   g(VerbId.Help, "this reference", { prefix: "?" }, "bare ? off the stage"),
@@ -470,8 +484,24 @@ export function homeVerbs(): readonly Verb[] {
 }
 const HOME: readonly Verb[] = Object.freeze([
   verb("enter", "open", VerbId.OpenAgent),
+  // The rails' own verb, bound here unchanged. What moved is only what it acts
+  // on: on a rail that is the tab you are looking at, and here it is the
+  // project the cursor is in — which on this page are routinely not the same
+  // project, or even the same machine. `a` uses its preferred agent; `A` picks.
+  verb("a", "new...", VerbId.NewAgent),
+  quiet("A", "choose an agent", VerbId.PickAgent),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
+  // `x` ends the thing the row *is* — the session on an agent row, and on a
+  // project the workspace and everything running in it. Quiet because the
+  // footer has 26 columns and `enter open · a new...` is already 21 of them,
+  // and because a project row draws its own `x` button when the cursor is on it.
+  quiet("x", "end", VerbId.Kill),
+  // Quiet for the same reason, and one more: unlike those two the fold has an
+  // affordance on the row itself — the `v`/`>` mark every machine and project
+  // carries. `?` is where all three are written down.
+  quiet("z", "fold", VerbId.Fold),
+  quiet("Z", "fold all", VerbId.FoldAll),
   quiet("tab", "the preview", VerbId.FocusCycle),
   quiet("?", "keys", VerbId.Help),
 ]);
@@ -656,6 +686,11 @@ export function filesVerbs(editing: boolean): readonly Verb[] {
 }
 const FILES: readonly Verb[] = Object.freeze([
   verb("enter", "open", VerbId.Open),
+  // In the footer, because walking the trail is the page's main gesture and a
+  // key nothing writes down is a key nobody finds. `h`/`l` are the spelling and
+  // `←`/`→` are aliases for them, exactly as `j`/`k` own the vertical axis and
+  // the arrows alias those — one table, two ways to press it.
+  verb(" ", "peek", VerbId.Peek),
   verb("e", "edit", VerbId.Edit),
   verb("d", "diff", VerbId.ViewDiff),
   verb("f", "file", VerbId.ViewFile),
@@ -664,6 +699,8 @@ const FILES: readonly Verb[] = Object.freeze([
   danger("x", "delete", VerbId.DeleteFile),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
+  quiet("h", "up a level", VerbId.TreeUp),
+  quiet("l", "into", VerbId.TreeInto),
   quiet("tab", "next rail", VerbId.FocusCycle),
   quiet("?", "keys", VerbId.Help),
 ]);
@@ -972,7 +1009,10 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "bare keys in the fleet list (alt-0 for the page, alt-w for the list). The list spans every " +
     "connected machine and each row says which one it is on; enter goes to that agent's project, " +
     "on its own machine, and puts it on the stage. The middle column is a real pane — click it or " +
-    "tab to it and every key is the agent's, which is why alt-w and alt-esc are the way back out.",
+    "tab to it and every key is the agent's, which is why alt-w and alt-esc are the way back out. " +
+    "Clicking a project selects its preview; its chevron folds the chats and [open] goes to the project. " +
+    "NEEDS YOU gathers chats needing attention even inside folded projects. Clicking a chat there " +
+    "or in FLEET focuses its live preview. The chat's [x] button asks before ending it.",
   AGENTS: "bare keys, with the rail focused (alt-a)",
   PROCESSES: "bare keys, with the rail focused (alt-p)",
   CHANGES:
@@ -981,9 +1021,8 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "commit shows. y and n appear only while a merge or rebase is in progress.",
   FILES:
     "bare keys on the files page (alt-o) and on the docs page (alt-m), which are one widget over " +
-    "two listings — docs is the same tree filtered to a project's writing, with this reference as " +
-    "a `reference` folder at the top of it. The last two are for while you are editing; a " +
-    "reference page has no file behind it and refuses all three of edit, upload and download.",
+    "two listings — docs is the same tree filtered to a project's writing. Help has its own page, " +
+    "opened from the footer or with C-b ?. The save and cancel keys apply while editing a file.",
   SETTINGS:
     "bare keys on the settings page (alt-s, or [settings] in the footer). Not a space — alt-, and " +
     "alt-. walk past it — because it is about this client rather than about a project. Moving the " +
@@ -1068,13 +1107,11 @@ export const TARGETS = Object.freeze({
   "footer.settings": t("footer", [VerbId.SpaceSettings]),
 
   // -- HOME ----------------------------------------------------------------
-  // A machine header and a project header are not click targets: the cursor
-  // steps over them, and clicking a machine's name is not a request to open
-  // somebody's agent. The tray's rows are *copies* of rows in the list below,
-  // so clicking one moves the one cursor rather than being a second thing you
-  // can select — which is why its verbs are the walking pair and not `open`.
+  // A row selects/previews. Workspace and agent `open` controls are explicit,
+  // so selecting a header cannot collapse it or travel by surprise.
   "home.row": t("HOME", [VerbId.FocusFleet, VerbId.Down, VerbId.Up]),
   "home.tray": t("HOME", [VerbId.Down, VerbId.Up]),
+  "home.closeChat": t("HOME", [VerbId.Kill]),
   "home.open": t("HOME", [VerbId.OpenAgent]),
 
   // -- AGENTS --------------------------------------------------------------
@@ -1118,7 +1155,14 @@ export const TARGETS = Object.freeze({
 
   // -- FILES ---------------------------------------------------------------
   "files.upload": t("FILES", [VerbId.Upload]),
-  "files.row": t("FILES", [VerbId.Down, VerbId.Up, VerbId.Open]),
+  "files.row": t("FILES", [
+    VerbId.Down,
+    VerbId.Up,
+    VerbId.Open,
+    VerbId.TreeUp,
+    VerbId.TreeInto,
+    VerbId.Peek,
+  ]),
   "files.edit": t("FILES", [VerbId.Edit]),
   "files.save": t("FILES", [VerbId.Save]),
   "files.cancel": t("FILES", [VerbId.CancelEdit]),
@@ -1312,6 +1356,75 @@ export type ReferenceSection = { title: string; note: string; rows: ReferenceRow
 export function reference(): ReferenceSection[] {
   const sections: ReferenceSection[] = [];
   sections.push({
+    title: "FAQ",
+    note: `## How do I copy text?
+
+In a chat or shell, drag with the left mouse button and release to copy automatically.
+Hold Alt or Shift while dragging if the running program uses the mouse itself.
+Ctrl+C goes to the focused program and can interrupt it; it does not copy the pane's selection.
+
+In Files, Docs and Help, select ordinary page text and use the browser's Copy command
+(Ctrl+C on Windows or Linux, Cmd+C on macOS). File line numbers are excluded.
+
+## Why did copying not reach my clipboard?
+
+Automatic copying from a pane requires HTTPS or localhost and clipboard access in
+your browser. Keep the tab focused and allow clipboard access when prompted.
+If a remote page uses plain HTTP, open it over HTTPS or through localhost instead.
+Copying ordinary page text uses the browser's normal selection and Copy command.
+
+## How do I paste text or an image?
+
+Click the chat or shell, then use Ctrl+V (Windows or Linux) or Cmd+V (macOS).
+An image on the clipboard is uploaded to the workspace and its path is pasted
+into the pane. You can also drop a file onto the pane. Browser clipboard access
+may require permission over HTTPS or localhost. Text in prompts and file editors
+uses the normal paste shortcut.
+
+## Why are my keys typing into the chat?
+
+The pane has keyboard focus. Use alt-a for the AGENTS rail, alt-p for PROCESSES,
+or alt-w for BOOTH's fleet. Enter on an agent row focuses its pane; clicking
+a chat in BOOTH focuses its live preview.
+
+If the browser or operating system takes an Alt shortcut, use the prefix shown
+in The two layers (C means Ctrl). Press C-b, release it, then the next key. C-b ? opens Help
+from a focused pane, and pressing the prefix twice sends it to the program.
+
+## How do I read earlier output or the rest of Help?
+
+Use the wheel over the pane to scroll its output. A program that handles the
+mouse may handle that wheel itself. In Help, use the wheel, j/k, or Page Up/Down
+to scroll. Choose a topic in the contents list; Tab moves keyboard focus among
+controls. Esc returns to the page you were using.
+
+## What is NEEDS YOU in BOOTH?
+
+It gathers chats needing attention across connected machines, even when their
+projects are folded in FLEET. Click one to read and reply in the preview.
+Waiting means the agent needs input; finished means it produced a result.
+Use [open] to go to its project. Clicking a project name selects its preview;
+the chevron folds or unfolds its chats.
+
+## Can I leave without ending my chats?
+
+Yes. Closing the browser tab disconnects this client; the daemon keeps the
+panes running. Reopen the web client to reconnect. The [x] beside a chat ends
+that session after confirmation. Closing a project with alt-x asks before
+ending everything running in it.
+
+## How do I start another agent or change views?
+
+Use alt-n to open a project. With the AGENTS rail or a BOOTH project row focused,
+a starts the pinned agent and A lets you choose another. Alt+Enter opens the
+agent picker from inside a running pane.
+
+The Views button, Alt+Space or C-b Space opens the chooser with each view's shortcut. Alt+O opens
+Files and Alt+M opens the project's Docs. Help is a separate page: use the help
+button, ? off the stage, or C-b ? from anywhere.`,
+    rows: [],
+  });
+  sections.push({
     title: "The two layers",
     note:
       "Alt works from inside a running program — an Alt key this client does not bind falls " +
@@ -1337,10 +1450,9 @@ export function reference(): ReferenceSection[] {
   sections.push({
     title: "The pointer's alone",
     note:
-      "Two gestures stand for no verb, so neither has a key: dragging to select text in the " +
-      "terminal, and the wheel. Everything else on screen is in the table above — verbs.js's " +
-      "TARGETS is the registry, and a button that is not in it throws rather than shipping " +
-      "as something you can only click.",
+      "Drag across terminal output and release to copy it. Alt-drag or Shift-drag selects " +
+      "even when the running program handles the mouse. Use the wheel over the pane to scroll. " +
+      "For clipboard requirements and copying other page text, see FAQ.",
     rows: [],
   });
   return sections;

@@ -77,14 +77,12 @@ radius    none. The namespace is cleared; `rounded-none` is the only spelling.
 shadow    none. Same. `shadow-[inset_0_0_0_1px_var(--color-border)]` is a frame,
           not an elevation, and it is the one exception.
 type      text-13 (the cell, 14px) · text-11 (an annotation, 12px). Both on 18px.
-rows      h-row 22px (default) · h-row-compact 20px (dense lists) · h-row-lg 26px
+rows      h-row / h-row-compact / h-row-lg: one terminal line, 18px
 motion    none
 ```
 
-**22px, not 18px, is the one deliberate concession to the pointer.** The
-terminal's line is 18px at 14px type. Four pixels buys a row you can click at
-without it reading as a web app's control. It is spent once, here, and nowhere
-else — do not spend it again on a taller button or a padded card.
+**Every row is 18px.** The browser uses the terminal cell rhythm, including
+buttons and the app header.
 
 ## The two rules that are not about geometry
 

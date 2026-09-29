@@ -12,6 +12,10 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { patchFiles, syntaxRuns } from "@/logic/patch";
+import { Card } from "@/components/ui/card";
+import { SectionTitle } from "@/components/SectionTitle";
+import { DiffStat } from "@/components/DiffStat";
 import { CODE_BOX } from "@/components/Code";
 
 // Which colour a line takes. **The order is load-bearing** and it is the
@@ -37,26 +41,36 @@ function patchTone(line: string): string {
   return "";
 }
 
-type PatchProps = Omit<React.ComponentProps<"pre">, "children"> & {
+type PatchProps = Omit<React.ComponentProps<"div">, "children"> & {
   /** Raw unified-diff text, as `git diff` prints it — [`DiffDto`]'s `patch`. */
   text: string;
 };
 
 function Patch({ className, text, ...props }: PatchProps) {
-  const lines = text.split("\n");
-  return (
-    // One `<pre>` of inline spans, each ending in its own newline, rather than
-    // a block element per line: a block per line would let a row take a tinted
-    // background, but copying it out depends on the browser reinserting the
-    // line breaks. A diff you cannot paste into a comment is not worth a tint.
-    <pre data-slot="patch" {...props} className={cn(CODE_BOX, "overflow-auto", className)}>
-      {lines.map((line, i) => (
-        <span key={i} className={patchTone(line) || undefined}>
-          {line + "\n"}
-        </span>
-      ))}
-    </pre>
-  );
+  const files = patchFiles(text);
+  return <div data-slot="patch" {...props} className={cn("min-w-0 overflow-auto", className)}>
+    {files.map((file, index) => <Card key={index} className="mb-1 min-w-max">
+      <SectionTitle action={<DiffStat added={file.added} deleted={file.deleted} />}>{file.name}</SectionTitle>
+      <pre className={cn(CODE_BOX, "p-1")}>
+        {file.lines.map((line, i) => {
+          const numbered = line.old != null || line.next != null;
+          const changed = numbered && (line.old == null || line.next == null);
+          return <React.Fragment key={i}>
+            <span aria-hidden="true" className="inline-block w-[10ch] select-none text-faint">
+              <span className="inline-block w-[4ch] text-right">{line.old ?? ""}</span>{" "}
+              <span className="inline-block w-[4ch] text-right">{line.next ?? ""}</span>{" "}
+            </span>
+            <span className={cn(changed && (line.old == null ? "bg-ok/10" : "bg-bad/10"))}>
+              {numbered ? <><span className={patchTone(line.text)}>{line.text[0]}</span>
+                <span>{syntaxRuns(line.text.slice(1)).map((run, j) => <span key={j} className={run.tone || undefined}>{run.text}</span>)}</span>
+              </> : <span className={patchTone(line.text) || undefined}>{line.text}</span>}
+              {"\n"}
+            </span>
+          </React.Fragment>;
+        })}
+      </pre>
+    </Card>)}
+  </div>;
 }
 
 export { Patch, patchTone };

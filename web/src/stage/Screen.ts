@@ -37,7 +37,7 @@ import {
 } from "../logic/protocol.ts";
 import type { ClientMsg, Color, CursorShape, FrameUpdate, Mods } from "../protocol/generated/protocol.ts";
 
-const DEFAULT_FONT_PX = 15;
+const DEFAULT_FONT_PX = 14;
 
 /**
  * One cell as the buffer holds it.
@@ -84,6 +84,8 @@ export interface ScreenOptions {
    * sample at all.
    */
   preview?: boolean;
+  /** Live preview panes can stream without taking focus from their fleet list. */
+  autoFocus?: boolean;
   /** Starting font size in CSS pixels. `setFontPx` moves it afterwards. */
   fontPx?: number;
 }
@@ -197,7 +199,7 @@ export class Screen {
 
     this._onResize();          // establishes cols/rows and emits the first resize
     this._remeasureWhenFontsReady();
-    if (!this.preview) queueMicrotask(() => this.focus());
+    if (!this.preview && opts.autoFocus !== false) queueMicrotask(() => this.focus());
   }
 
   /// Re-read the palette and repaint.
@@ -260,7 +262,7 @@ export class Screen {
     // Monospace advance width. "M"/"W" are full advance in a monospace font.
     const w = c.measureText("MMMMMMMMMM").width / 10;
     this.cellW = Math.max(1, Math.round(w * 100) / 100);
-    this.cellH = Math.round(this.fontPx * 1.34);   // comfortable line box
+    this.cellH = Math.round(this.fontPx * (18 / 14)); // terminal cell rhythm
   }
 
   // A measurement taken before the font stack has loaded comes from whatever

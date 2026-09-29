@@ -7,6 +7,502 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **SSH connections return on the first launch after an update (`1.3.0-dev.3.beta.9`).** Each
+  forwarding attempt now gets its own socket directory. Previously, updating
+  preserved the app's process ID and reused a socket path that OpenSSH's
+  shared connection still remembered, leaving remote projects missing until
+  the app was opened again. Socket names also stay short enough for macOS
+  temporary directories. The beta.8 release was cancelled before publication.
+
+- **Browser navigation parity (`1.3.0-dev.3.beta.9`).** BOOTH chat clicks focus the live preview and
+  attention entries reveal chats inside folded projects. Enter opens the
+  selected project or chat, and `A` chooses an agent. Project tabs scroll with
+  the mouse wheel and follow keyboard selection, while BOOTH and Views stay
+  in place. Narrow screens keep the fleet and Views accessible; Alt+Space and
+  prefix Space open the view chooser.
+
+- **Help and FAQ (`1.3.0-dev.3.beta.7`).** Added a FAQ in terminal and web Help
+  covering copying, clipboard troubleshooting, pasting text and images, focus,
+  scrolling, NEEDS YOU, leaving sessions running, and choosing agents and views.
+  Corrected outdated BOOTH navigation and Docs/Help instructions and filled in
+  missing terminal shortcuts. Copy instructions reflect each client's behavior.
+
+- **Views cleanup (`1.3.0-dev.3.beta.6`).** Removed the unreliable Usage view
+  from terminal and web navigation, including its terminal shortcuts and the
+  web command palette.
+  The Views chooser is wider and shows the shortcut beside each view.
+
+- **BOOTH attention and chat controls (`1.3.0-dev.3.beta.6`).** Restored the
+  **NEEDS YOU** tray in the terminal and web clients. Agents
+  needing attention are gathered above the fleet again, with a fixed empty
+  state and clickable previews. The newer workspace navigation controls remain.
+  Individual chats now have an `[x]` close button in both the tray and fleet.
+
+- **BOOTH navigation cleanup (`1.3.0-dev.3.beta.5`).** Removed the duplicate
+  top status tray and folded-project status strips. Workspace rows now expose
+  an explicit `[open]` button; clicking the row selects it, while the chevron
+  folds its chats. The selected chat stays highlighted when its preview has
+  keyboard focus. The terminal's `[+ agent]` hit area now uses the same layout
+  and default-agent label as the painted button.
+
+- **Agent launch discovery across desktop environments.** A daemon started by
+  a macOS app no longer needs the interactive shell's `PATH` to spawn Claude,
+  Codex or OpenCode: it recognizes their standalone installer directories and
+  the CLI binaries bundled by their desktop apps. OpenCode discovery covers
+  its native and desktop layouts on Windows too, as well as `~/.opencode/bin`
+  on Unix and WSL. Other common user bin directories (Cargo, pnpm, Volta,
+  asdf, mise and npm-global) are repaired into pane environments, and a failed
+  PTY spawn now reports the effective repaired `PATH` it actually searched.
+
+- **BOOTH controls and statuses (`1.3.0-dev.3.beta.2`).** A faint tree spine
+  connects machines, projects and agents. Collapsed COMPUTE machines use one
+  summary line; expanding reuses the SYSTEM gauge stack. Double-click a machine
+  or project name to fold/unfold its children. Clicking an agent chat or tray
+  entry gives its preview keyboard focus. Simple status marks replace the
+  animated figures, with working dots advancing every 1.2 seconds.
+
+- Removed the Windows web launcher. Native Windows TUI downloads are labelled
+  experimental alpha following reports of frequent crashes; Windows CI and
+  the existing Unix web bridge remain supported.
+
+### Added
+
+- **OpenCode is a built-in agent.** It now appears in the agent picker without
+  configuration and launches with an unattended permission override. Its CLI
+  cannot name a session on first launch, so daemon restart restore repaints its
+  saved terminal output and starts a fresh conversation, as Codex does.
+
+- **Windows TUI experimental alpha (build `1.3.0-dev.3.beta.1`).** Native ConPTY panes, a persistent
+  background daemon, private named-pipe IPC, Windows shell/agent launchers,
+  clipboard and URL support, and SSH connections to Unix hosts. Windows uses
+  font-compatible graphical symbols by default; `[ui] glyphs = "unicode"`
+  restores the original symbols. Console UTF-8 and deferred wrapping prevent
+  encoding and bottom-row scrolling problems. Unix rendering defaults and
+  terminal recovery are preserved.
+- Windows builds, native console/ConPTY tests and downloadable Windows alpha artifacts
+  in the `develop` CI pipeline; Windows packages in the release matrix.
+
+
+- **Each workspace remembers the space it was last on.** The page was a property
+  of the *client* — one `view.page`, carried across every tab — so leaving a
+  project you were reading the history of for one you were reading the files of
+  put you on the history of the second. That is the wrong owner: every space is
+  a way of looking at one project, so which way you were looking at a project is
+  a fact about the project.
+
+  Open butai on GIT, switch to caliper which was on FILES, switch back, and
+  butai is on GIT again. It survives a detach and a restart: it is written to a
+  new `[views]` table in `~/.butai/config.toml`, keyed by the machine the
+  project is on and the directory it is open in, so the same path checked out on
+  a laptop and on `gpu-box` keeps two answers. Arriving restores the page *and*
+  loads it, through the same funnel a keypress goes through — a project left on
+  FILES comes back with its directory listed.
+
+  BOOTH, SETTINGS and HELP are never remembered, and going to a workspace while
+  one of them is up does not move the screen off it. None of the three is a view
+  of a workspace, and landing in the settings page because that is where you
+  were when you last left a project would be exactly wrong. A page change is
+  written a couple of seconds later rather than on the keypress, the table is
+  capped at 64 projects with the least recently visited falling off the end, and
+  two clients running at once write one line each without erasing the other's.
+  [docs/configuration.md](docs/configuration.md#views) has the table.
+
+- **The FILES browser is a Finder-style trail of columns.** It was one directory
+  and one cursor, and descending into a folder replaced both. That made every
+  folder a one-way trip you could only reverse by remembering you had: nothing
+  on screen said where you were or how you got there, and the `..` row — added
+  to say *that* up existed — still could not say what was up there.
+
+  Every directory on the path from the workspace root to where you are is now a
+  column of its own, side by side, with the row you came through still marked in
+  each. Where you are is the shape of the whole thing rather than a line of text
+  you have to read.
+
+  ```
+  ┌ crates ───────────┬ butai-client ─────┬ src ────────[find]┐
+  │  butai           ▸│  src             ▸│  chrome          ▸│
+  │● butai-client    ▸│  Cargo.toml       │  hit.rs           │
+  │  butai-server    ▸│                   │● workbench.rs     │
+  └───────────────────┴───────────────────┴───────────────────┘
+  ```
+
+  `←`/`h` and `→`/`l` walk the trail, and the columns to the right of the cursor
+  are **kept, not dropped** — so `←` then `→` is two local moves and no round
+  trip, which over ssh is the difference between browsing and waiting. Moving
+  the cursor is what drops them, and that is the point rather than a side
+  effect: those columns are what the *old* selection contained, so leaving them
+  under a new one would draw a path that does not exist.
+
+  The browser grows a column at a time and stops at half the band, so a trail
+  walked six deep still leaves the file the room; on a terminal too narrow for a
+  browser and a file at once it goes to nothing rather than squeezing the thing
+  you came to read. The trail scrolls left as it grows, so the column you are
+  working in is the one that stays on screen.
+
+  **`space` peeks.** It reads the file the cursor is on without handing it the
+  keyboard, so the next `j` walks to the next name and shows you that one
+  instead — a way to read down a directory a file at a time without committing
+  to any of them. `enter` is the same read with the keyboard going to the file,
+  and `←` from inside the file hands it back. Both clients bind all four, out of
+  the same verb table.
+
+- **A minimap down the right of the open file.** A file is read through a window
+  a few dozen rows tall, and nothing on screen said how big the thing behind it
+  was or where in it you were. The scrollbar answer is "somewhere between the
+  top and the bottom"; this answers with the shape of the code — where the blank
+  lines are, where a comment block sits, where the deeply indented middle of a
+  function is — so a jump is aimed at something you recognise rather than at a
+  fraction.
+
+  Sixteen cells cannot hold a line of code and it does not try: each cell stands
+  for a rectangle of the file, drawn as one shaded block whose density is how
+  much ink is in that rectangle and whose colour is what that ink mostly *was*.
+  A comment block is a muted slab, a run of strings is green, an indent is the
+  blank left edge. Click anywhere on it to jump, and what you clicked lands in
+  the middle of the window rather than on its top row — you aimed at a shape in
+  order to read what is around it.
+
+  It takes all sixteen cells or none. Below a floor the scale stops meaning
+  anything, and a minimap you cannot read is sixteen cells of code you no longer
+  have — so a narrow terminal, or a trail walked several deep, keeps the file.
+
+  The web client draws the same picture from what it has: it prints files as
+  plain text rather than highlighting them, so its texture is one colour at
+  varying weight instead of a palette of token colours. Inventing a second
+  highlighter there would have been a lot of code for a picture sixty pixels
+  wide.
+
+- **`BUTAI_HOME`, so a build you are still deciding about can be run against
+  real work.** There was nowhere to put an unfinished butai. A build from the
+  tree either replaced the installed binary or fought the running daemon for
+  `~/.butai/butai.sock`, and the only isolation on offer was a fake `$HOME` —
+  which is the right tool for a test and the wrong one for a build you mean to
+  *use*, because it takes away the ssh config, the shell profile, the git
+  identity and the repositories that make trying it worth anything.
+
+  One variable now moves butai's state and nothing else: socket, lock, config,
+  themes, logs, `session.json`, `panes/`, `scratch/`.
+
+  ```sh
+  BUTAI_HOME=~/.butai-dev target/release/butai
+  ```
+
+  Your own daemon keeps running beside it and the two never meet. It is read in
+  one place, `paths::butai_dir`, so every path follows it at once — no
+  combination of variables can leave a daemon holding one butai's socket and
+  another's session store. Panes inherit it, so a `butai` shelled out inside a
+  dev pane reaches the dev daemon.
+
+  **It outranks `$BUTAI_SOCKET`,** which is the part that took a second attempt.
+  A daemon exports `$BUTAI_SOCKET` into every pane it creates, so any command
+  run inside butai already has one pointing at the daemon drawing that pane —
+  and the socket variable used to be read first. `BUTAI_HOME=~/.butai-dev butai`
+  typed in an ordinary butai pane therefore did the exact opposite of what it
+  said: the dev daemon tried to bind the *real* socket, refused because it was
+  taken, and the client attached to the real daemon with an unused state
+  directory sitting beside it. The order is now `--socket`, then `BUTAI_HOME`,
+  then `BUTAI_SOCKET` — `BUTAI_HOME` beats what butai exports at you and yields
+  to what you typed. `--socket` also stopped being a clap `env` argument, which
+  is what had been filling it in from the environment before anything else could
+  be heard.
+
+- **A `develop` branch, and dev releases separate from stable ones.** Feature
+  branches land on `develop`; `develop` lands on `main` when it is worth a
+  stable release, and `main` moves for nothing else — the README's install line
+  fetches `scripts/install.sh` from `main` by raw URL, so what is on `main` is
+  what a stranger's `curl | sh` runs today.
+
+  One tag shape decides the track, and decides it by itself: `v1.3.0-dev.1` is
+  published as a GitHub **prerelease**, `v1.3.0` as a release. That single flag
+  is the whole separation, and it works because of something already true —
+  `releases/latest` excludes prereleases, and `releases/latest` is the only
+  endpoint `butai-update` asks and `scripts/install.sh` reads. So a dev tag is
+  invisible to every stable install without either of them filtering anything,
+  and reaching one is deliberate: `BUTAI_VERSION=v1.3.0-dev.1`. That is also how
+  a remote machine gets a dev build, which is the case that matters — a
+  workbench attached over `ssh host butai proxy` is talking to a daemon on the
+  far side, and the far side is the one that has to be running the code.
+
+  A prerelease takes its notes from `## [Unreleased]` and does not fail on a
+  thin one; a stable tag with no section for its version still fails, as it did.
+  CI now gates `develop` the way it gates `main`.
+
+- **`[update] channel = "dev"`, so a dev build keeps itself current.** The dev
+  track published builds nobody could follow. `releases/latest` is the endpoint
+  that makes a prerelease invisible to a stable install, and it was the only one
+  either half asked — so a machine on `1.3.0-dev.1` was offered `1.3.0-dev.2`
+  never and `1.3.0` eventually, and moving between dev builds meant running the
+  installer by hand each time.
+
+  Underneath it, the version comparison learned what a prerelease is. It used to
+  cut the suffix and compare the three integers, which made every `-dev.N` of a
+  release *the same version* as every other — the reason a dev channel could not
+  have worked even with the right endpoint. It is semver's ordering now:
+  `1.3.0-dev.10` is ahead of `1.3.0-dev.9`, and the `1.3.0` they were leading to
+  is ahead of both, so a dev install lands on stable when stable catches up.
+
+  The key is read by **both** halves, and it has to be: the client checks for
+  the binary a person runs, and the daemon checks for itself when `POST
+  /v1/update` asks it to, so a daemon reading the other track would answer
+  "already on the latest" to a machine whose client can see a newer one. It
+  lives in the config of whichever `BUTAI_HOME` an install uses, which is what
+  keeps a dev butai's track out of the stable one beside it.
+  `BUTAI_CHANNEL=dev scripts/install.sh` installs the newest prerelease, and
+  SETTINGS → ABOUT → **release channel** writes the key.
+
+- **A daemon on a different build is asked about, not reported.** The handshake
+  has always noticed — the daemon names its own version in it, and the client is
+  the only thing holding both numbers — and what it did with that was put
+  `daemon is 1.2.0, client is 1.3.0 — restart it: butai kill-server` in the
+  footer. A line naming a command you have to leave butai to run, about a daemon
+  the client has a socket to. On a track that cuts a build every few days, that
+  is a sentence you read and step over.
+
+  It asks now. On this machine the question is a restart and nothing is
+  downloaded — a local daemon is spawned from the client's own binary, so
+  stopping the old one *is* the upgrade, and the workspaces come back the way
+  they do from any `kill-server`. On a tab from another machine it is the
+  update question that already existed, since that daemon fetches its own build
+  and this client's version says nothing about what it would get. Once per
+  session, never over another box, and the footer line is still there when the
+  box cannot go up.
+
+- **`scripts/vet.sh`, which runs every check CI runs and then hands you the
+  build.** `cargo fmt`, `clippy` and `test` under `-D warnings`, the
+  generated-bindings diff, the four `bun` steps and `testsuite/run.sh` — each
+  reported as passed, failed or skipped, and skipped cleanly when a tool is
+  absent rather than failed. A named branch is checked out `--detach` into a
+  throwaway worktree; no argument means this tree, uncommitted changes included,
+  which is the case worth optimising for.
+
+  `--run` is the part CI cannot do: it builds the branch and starts a daemon on
+  it under `BUTAI_HOME=~/.butai-dev`, seeded once with a **copy** of your real
+  `config.toml` and `themes/`. A copy and not a symlink, because the client
+  writes back to `config.toml` — answering no to an update prompt lands a
+  `declined_version` in it — and a build you are still vetting should not be
+  able to edit the config your real butai reads.
+
+- **`scripts/cut.sh <version>`.** The version appears four times in the root
+  `Cargo.toml`: `[workspace.package] version` and the three internal `butai-*`
+  pins, which carry a `version` beside their `path` so `cargo publish` has
+  something to rewrite. Four strings that have to agree, edited by hand, is how
+  a release ships with a crate still pinned to the last one. This rewrites all
+  four, refreshes `Cargo.lock`, and stops — the commit and the tag are yours,
+  being the two steps that are hard to take back.
+
+- **BOOTH lists projects, not just agents — and you can start work in one from
+  there.** The page could show you every agent on every machine and let you
+  watch them; it could not let you act on the answer. Reaching a project meant
+  `[open]` to it, `a` on the rail, then back — and a project you had not started
+  anything in did not appear at all, because the rows were built by walking the
+  agent list and emitting a header whenever the workspace changed.
+
+  The rows come from the machine and project lists now, so a project with
+  nothing running has a row and a connected machine with nothing open has one
+  too. `a` starts that project's agent and `A` picks which — the AGENTS rail's
+  own two verbs, bound here unchanged, acting on the project the cursor is in
+  rather than on the tab you are looking at. The new agent appears in the fleet
+  and the preview points at it; the page does not move.
+
+  A project's `[+ claude]` button is the same act under the pointer, and it names
+  what it will start for the reason the rail's does: a button that spawns on a
+  single click with nothing in between is the only place you can see what that
+  click is about to do.
+
+- **A project's `.butai.toml` says which agent it uses.** `[agents] autostart`
+  already declared what a workspace starts when it opens; it is now published on
+  the workspace and read whenever a client offers to start one. So the answer to
+  "which agent does this project use" is two steps — the project's own
+  declaration, then the client's `default_agent` pin — and most projects need no
+  new configuration at all. The preference lives with the project, travels to
+  the machine it runs on, and is shared with whoever else opens it, which a
+  client-side pin keyed by directory would not.
+
+- **Pressing a project's name puts the cursor on it, and nothing more.** One rule
+  for the whole fleet: text looks, buttons act. A click meaning "let me look at
+  this" must not throw the workbench onto somebody else's project, and that is
+  as true of a project row as of an agent row — a project row previews the agent
+  in it that most needs you, so pressing its name is the ordinary ask to see
+  that. `enter` goes to a project; `[open]` goes to an agent.
+
+- **`[x]` closes a workspace from BOOTH**, and `x` with the cursor on a project
+  row does the same. It ends what the row *is*: on an agent that is the session
+  and it does not ask, because an agent is a process whose transcript is on
+  disk; on a project it is the workspace and everything running in it, so it
+  asks — in the tab bar's own box and its own words, since that is the same act
+  reached from somewhere else.
+
+  The button is drawn on the cursor's row and nowhere else, which is the tab
+  bar's rule for its own `[x]`: a button that ends a workspace has to be one you
+  aimed at, not one sitting under a row you were passing.
+
+- **`z` and `Z` fold BOOTH's fleet**, with the DIFF page's keys and its marks
+  (`v` open, `>` folded) — this workbench already had a fold idiom and a second
+  one for the same concept would be drift. `Z` leaves an index of every machine,
+  every project, and what is running in each. A folded project draws its agents'
+  sprites where their rows were, so folding costs you the titles and the buttons
+  and not the states.
+
+- **SETTINGS → MACHINES is your machines, not two lines about a key.** The group
+  was `[general] remote_auto_attach` and a row saying `[[remote]]` blocks
+  existed. Everything you might actually want to know about a machine — whether
+  it is connected, what it is running, what build it is on, why it is *not* here
+  — was spread across the tab bar, the machines picker and the config file, and
+  nothing put the machines you have configured next to the machines you are
+  talking to.
+
+  Each machine is a block now, under its own name. The name row says what it is
+  doing and what it is carrying: `connected — 3 agents, 2 workspaces`, `away —
+  last seen with 3 agents, 2 workspaces`, `connecting…`, or `not connected —`
+  and the last dial failure, which is the whole answer to "why is that machine
+  not here". Under it, `version` — read off the daemon's handshake, because no
+  REST route reports one, and carrying `— 1.3.1 available` when this client's
+  update check has seen a newer build — and `where`, the ssh destination or the
+  socket already forwarded here.
+
+  Then the two or three things you can do about it: `update`, `disconnect`,
+  `connect`, `forget`, and `add a machine` at the bottom, which opens the picker
+  `alt-h` opens rather than growing a second destination prompt of its own.
+  **None of them is a toggle**, and that is the decision the section turned on.
+  Every other row on the page answers a question the file also answers, and its
+  value is that answer; connecting a machine has no such value. A toggle would
+  have to read `off` for "not connected" and flip several seconds later when an
+  ssh landed, or not flip at all when it did not — and a toggle that lies about
+  whether it took is worse than a row that plainly says what it will do. So an
+  action row's value is the sentence describing the act, and the footer offers
+  the row's own verb rather than the word "act".
+
+  A machine is only offered the rows that could work on it. One that is not
+  answering gets `connect` and `forget` instead of `update` and `disconnect`,
+  because those two are requests to a daemon that has to answer them and a row
+  that can only ever report a refusal reads as broken. One reached over a
+  forward this client did not open says `on a forward of its own` where its
+  `disconnect` would be — there is no ssh of ours to kill — which is the rule
+  the machines picker already followed. The daemon on this machine gets `update`
+  alone, and that `update` is the client's own, since a local daemon is spawned
+  from the binary you are running.
+
+  `disconnect` drops the link **and** removes the `[[remote]]` block, in the
+  order the machines picker does them: one that left the block behind came back
+  on the next attach and read as having quietly undone itself. `forget` is that
+  second half on its own, for a machine that is not here to disconnect.
+  `update` on another machine is `POST /v1/update`, refused unless that machine
+  set [`[update] allow_remote`](docs/configuration.md#update) — the ordinary
+  answer rather than a fault, so the flash names the machine and the key instead
+  of showing you a `400`. And `r` re-reads the blocks and asks every connected
+  daemon its version again: this is the one page whose facts another machine can
+  change while you are looking at them, so it is the one page with a way to ask
+  again. [docs/workbench.md](docs/workbench.md#machines) has the rows.
+
+### Changed
+
+- **BOOTH's compute column is one row per machine, and it names what is wrong.**
+  It drew the SYSTEM rail's whole gauge stack per machine — twelve to twenty rows
+  for a workstation, which is right for the rail (it describes the one machine
+  you are working on) and wrong on a page whose question is which of four
+  machines is in trouble. Four machines did not fit.
+
+  A machine is a short block now: a summary line — what it is, how many agents
+  it is running, and its worst reading, named — and under it a row each for CPU,
+  RAM, the GPU where the machine has one, and the fullest of the disks the rail
+  is configured to watch, with their own meters. Five rows a machine, six with a
+  GPU: four of them fit in a third of the seventy-six the column has, where the
+  stack cost more than the screen had.
+  A click expands one back to the full stack, drawn by the same renderer the
+  rail uses, so the two cannot come to two opinions of what 41% means.
+
+  **The summary answers "is this machine busy", and disk fullness is not that.**
+  It was the worst of four readings, but three of the four are rates and disk
+  used/total is a level: with the default `disks = "all"` — the three largest
+  local filesystems — a 90%-full archive disk pinned every machine to a red
+  `DSK 90%` for ever, with the CPU idle, and the column stopped answering the
+  question it exists for. The summary is now the worst of the rates, and a disk
+  takes it over only above 95%, where it really is the emergency the original
+  rule was written for. The level is never hidden: it is on the DSK row
+  unconditionally. A mount whose reading has gone stale no longer raises a
+  full-saturation alarm either, which is the rule the SYSTEM rail already kept.
+
+- **BOOTH's cursor walks rows rather than agents**, since a machine and a project
+  are now things you can sit on. The agent under it is derived — one function for
+  what `x` and the menu act on, one for what the middle column shows. On a
+  project row the pane shows the agent in it that most needs you, so walking the
+  fleet is a fly-over of each project's screen.
+
+- The TUI groups the fleet's projects by *id* rather than by name, as the web
+  client already did. Two machines routinely have a project of the same name
+  open, and one machine may have two.
+
+### Removed
+
+- **The `..` row, from both clients.** It existed because descending read as a
+  one-way trip and something had to say up existed. The trail says it — the
+  directory you came from is the column to the left, still listed — so `..`
+  became a row in every column whose only meaning was "the column immediately
+  left of this one", which is the sort of thing you have to learn not to click.
+  `backspace` still walks up, and so does `←`.
+
+### Fixed
+
+- **BOOTH's `[+ claude]` was four cells left of where it was drawn.** The painter
+  asked "is this the cursor's row" as `row == booth_sel && focused`; the hit test
+  asked it without the focus half. `[x]` is drawn only on the focused cursor row
+  and costs four cells, so with the keyboard anywhere but the fleet — after a
+  click into the pane, say — the hit test reserved space for an `[x]` that was
+  not on screen and every field on the row shifted under the pointer. Of the ten
+  cells you could see as `[+ claude]`, six started an agent, one folded the
+  project and three opened the close-workspace confirm. The project's *name* was
+  drifting by the same four cells, so a long name's tail folded the row instead
+  of going there. Both sides now ask one function, which is the rule the rest of
+  the row already followed: the painter draws from a layout and the hit test
+  reads the same one, so a press cannot land on a field the row did not draw.
+
+- **BOOTH's compute column could not be expanded.** `hit::on_compute` and
+  `Folds::toggle_expanded` were both written, and neither had a caller outside a
+  unit test — so the `>` on a machine was a button that did nothing, and the
+  documented way back to the full gauge stack did not exist. The click is wired.
+  The `z` half of the documented gesture never existed either: `z` is zoom, and
+  on the fleet it folds. The docs said so and no longer do.
+
+- **Starting an agent from BOOTH pointed the stage at a different agent.** The
+  spawn set `view.staged`, which BOOTH does not read — its middle column follows
+  the fleet cursor, and the cursor was still on the project row, where the
+  preview shows whichever agent most needs you. On a project that already had
+  one, `[+ claude]` started an agent and showed you a sibling. The new pane is
+  now followed onto its own row as soon as the daemon lists it, the project is
+  unfolded if it was folded, and the keyboard goes to the stage so you can type
+  into what you just started. The page still does not move. `A` was worse than
+  this and is fixed with it: it left BOOTH entirely and dropped you on the
+  AGENTS page of whatever tab happened to be active.
+
+- **The client repainted four times a second whether or not anything moved.**
+  Every frame rebuilt each row list, allocated a buffer, rendered every cell and
+  scanned every cell for URLs; only the terminal write was cheap, because the
+  diff came out empty. The renderer has always computed whether it drew anything
+  that animates — `marquee` reports a title actually scrolling, sprites report a
+  figure actually moving — and `paint` discarded the answer. An idle workbench
+  now paints twelve times a minute instead of two hundred and forty. Two further
+  things fell out of wiring it: agent sprites were being drawn at 4 Hz while
+  their phase counter ran at 8.3 Hz, so every second frame was dropped, and a
+  client that had lost its daemon repainted at 4 Hz indefinitely — that retry
+  needs 1 Hz, and now takes it.
+
+- **`scripts/install.sh` stopped the wrong daemon when `BUTAI_HOME` was set.**
+  It read `BUTAI_SOCKET` and nothing else to find the daemon it was replacing,
+  so installing a second butai with `BUTAI_HOME=~/.butai-dev` — the supported
+  way to run one beside your own — stopped the real daemon on the way past. It
+  now resolves the socket the way `paths.rs` does: `BUTAI_HOME` first, then
+  `BUTAI_SOCKET`, then `~/.butai`.
+
+- **Closing a workspace sent the DELETE to the machine the *active tab* was on.**
+  From the tab bar those are the same daemon by construction, so it never bit;
+  from BOOTH's fleet they are routinely not, and a `SessionId` is only unique on
+  its own daemon — so closing a `gpu-box` project would have closed whatever
+  held that id at home. `ConfirmKind::CloseWorkspace` carries the machine now,
+  the same way `MenuTarget::Agent` already did after `x` on a fleet row had the
+  identical bug.
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

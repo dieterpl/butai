@@ -25,10 +25,19 @@
 //    two `setState` calls with no daemon in them at all. Both arrive on a page's
 //    *actions* interface, because from the page they are one gesture.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type { PageName, PageProps } from "./Shell.tsx";
 import { api } from "../logic/api.ts";
-import { allAgentRows } from "../logic/fleet.ts";
+import {
+  HomeRowKind,
+  allAgentRows,
+  fleetSpaces,
+  homePreview,
+  homeRows,
+  machineRows,
+  toggleAllSpaces,
+  toggleFold,
+} from "../logic/fleet.ts";
 import { daemonOf, qid, type Qid, type QualifiedWorkspace } from "../logic/events.ts";
 import {
   ChangesRow,
@@ -37,9 +46,9 @@ import {
   changesHelpVerbs,
   homeVerbs,
   procsVerbs,
+  keyName,
   type Verb,
 } from "../logic/verbs.ts";
-import type { UsageDto } from "../protocol/generated/protocol.ts";
 
 import { WorkPage, type WorkActions, type WorkView } from "../pages/WorkPage.tsx";
 import { HomePage, type HomeActions, type HomeCallbacks } from "../pages/HomePage.tsx";
@@ -47,7 +56,6 @@ import { GitPage, type GitActions } from "../pages/GitPage.tsx";
 import { FilesPage, type FilesActions } from "../pages/FilesPage.tsx";
 import { DockerPage, FOLLOWER, type DockerActions } from "../pages/DockerPage.tsx";
 import { SettingsPage } from "../pages/SettingsPage.tsx";
-import { UsagePage } from "../pages/UsagePage.tsx";
 import { HelpPage } from "../pages/HelpPage.tsx";
 
 // ---------------------------------------------------------------------------
@@ -174,53 +182,23 @@ function pressWork(p: PageProps, act: WorkActions, surface: string, key: string)
   }
 }
 
-// ---------------------------------------------------------------------------
-// USAGE
-// ---------------------------------------------------------------------------
-
-/**
- * `GET /api/usage`, on the page that shows it.
- *
- * Not in `world.ts`, deliberately. The world is what every page reads and what
- * the event stream keeps current; usage is one page's data, has no event, and
- * costs a round trip to each machine's agent CLIs — polling it for pages that
- * never draw it would be work nobody asked for. Fetched when USAGE is opened and
- * refreshed on demand.
- *
- * `daemon` is the *active* machine, not the primary. An account limit is a fact
- * about the box the CLI logs in from, so a bridge serving two machines would
- * otherwise report the wrong account confidently — the terminal reads the active
- * daemon for the same reason (`workbench.rs`'s `refresh_usage`).
- */
-function useUsage(daemon: string | null): [UsageDto | null, boolean, () => void] {
-  const [usage, setUsage] = useState<UsageDto | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [nonce, setNonce] = useState(0);
+// The two live-terminal pages share the same rule: bare keys belong to the
+// program while its input sink is focused, and to the selected rail otherwise.
+function useRailKeys(run: (key: string) => boolean) {
   useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    (daemon ? api.usage(daemon) : api.usage())
-      .then((u) => {
-        if (alive) {
-          setUsage(u);
-          setLoaded(true);
-        }
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-    return () => {
-      alive = false;
+    const listener = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey ||
+          document.querySelector('[role="dialog"]') ||
+          target?.closest('[data-slot="stage"], input, textarea, select, [contenteditable="true"]')) return;
+      if (run(keyName(e))) { e.preventDefault(); e.stopPropagation(); }
     };
-  }, [daemon, nonce]);
-  return [usage, loaded, () => setNonce((n) => n + 1)];
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  });
 }
-
-function Usage(p: PageProps) {
-  const daemon = p.ws ? (p.ws.daemon ?? daemonOf(p.ws.id)) : null;
-  const [usage, loaded, refresh] = useUsage(daemon);
-  const entry = p.world.daemons.find((d) => d.key === daemon) ?? p.world.daemons.find((d) => d.primary);
-  return <UsagePage usage={usage} loaded={loaded} machine={entry?.label ?? null} onRefresh={refresh} />;
+function focusTerminal() {
+  document.querySelector<HTMLElement>('[data-slot="stage"] textarea, [data-slot="stage"] canvas')?.focus();
 }
 
 // ---------------------------------------------------------------------------
@@ -254,11 +232,47 @@ function Work(p: PageProps) {
       // daemon was asked. A page that took them as two gestures would be a page
       // that can show a diff for a row it has not selected.
       p.on.setPath(what.path);
+      p.on.setFocus("changes");
       withWs(p, (w) => p.actions.openDiff(w, what));
     },
     showCommit: (id) => withWs(p, (w) => p.actions.showCommit(w, id)),
-    press: (surface, key) => pressWork(p, act, surface, key),
+    press: (surface, key) => { if (key === "g" && surface === "changes") p.on.gitMenu(); else pressWork(p, act, surface, key); },
   };
+
+  useRailKeys(key => {
+    const surface = p.focus;
+    if (key === "tab") {
+      const surfaces = ["agents", "procs", "changes"];
+      p.on.setFocus(surfaces[(surfaces.indexOf(surface) + 1) % surfaces.length]!);
+      return true;
+    }
+    if (key === "esc") { p.on.setFocus("agents"); return true; }
+    if (key === "j" || key === "k" || key === "arrowdown" || key === "arrowup") {
+      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+      if (surface === "agents" || surface === "procs") {
+        const rows = surface === "agents" ? p.ws?.agents ?? [] : (p.ws?.processes ?? []).filter(x => !x.name.startsWith("logs:"));
+        const at = rows.findIndex(x => x.pane === p.view.pane);
+        const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
+        if (next) p.on.setPane(next.pane);
+      } else if (surface === "changes") {
+        const ch = p.ws?.changes;
+        const rows = ch ? [...ch.conflicted, ...ch.unstaged, ...ch.staged] : [];
+        const at = rows.findIndex(x => x.path === p.view.path);
+        const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
+        if (next) p.on.setPath(next.path);
+      } else return false;
+      return true;
+    }
+    if (key === "enter" && (surface === "agents" || surface === "procs" || surface === "stage")) {
+      p.on.setFocus("stage"); focusTerminal(); return true;
+    }
+    if (key === "enter" && surface === "changes") {
+      pressWork(p, act, surface, "d"); return true;
+    }
+    if (key === "g" && surface === "changes") { p.on.gitMenu(); return true; }
+    if (!verbFor(surface, key, p.view.pin)) return false;
+    pressWork(p, act, surface, key); return true;
+  });
 
   const row = changesRowOf(p.ws, p.view.path);
   const view: WorkView = {
@@ -267,6 +281,11 @@ function Work(p: PageProps) {
     pin: p.view.pin,
     busy: p.view.busy,
     rails: p.view.rails,
+    zen: p.view.zen,
+    procsHeight: p.view.procsHeight,
+    systemHeight: p.view.systemHeight,
+    leftRail: p.view.leftRail,
+    rightRail: p.view.rightRail,
     ...(row ? { changesRow: row } : {}),
   };
 
@@ -276,11 +295,12 @@ function Work(p: PageProps) {
       ws={p.ws}
       actions={act}
       focus={p.focus}
-      on={{ selectPane: (pane) => p.on.setPane(pane), rails: (open) => p.on.setRails(open) }}
+      on={{ selectPane: (pane) => { p.on.setPane(pane); p.on.setFocus(p.ws?.agents.some(a => a.pane === pane) ? "agents" : "procs"); }, rails: (open) => p.on.setRails(open) }}
       view={view}
       theme={p.term}
       fontPx={p.view.fontPx}
       stage={p.stage}
+      patch={p.patch}
     />
   );
 }
@@ -290,15 +310,33 @@ function Work(p: PageProps) {
 // ---------------------------------------------------------------------------
 
 function Home(p: PageProps) {
-  // The same rows the page draws, from the same pure function: the cursor counts
-  // rows of exactly that list, so deriving it twice is the one thing here that
-  // must not drift — which is why `fleet.ts` is pure and neither side keeps a
-  // copy.
+  // The same rows the page draws, from the same pure functions: the cursor
+  // counts rows of exactly that list, so deriving it twice is the one thing
+  // here that must not drift — which is why `fleet.ts` is pure and neither side
+  // keeps a copy.
   const rows = allAgentRows(p.world.workspaces, p.world.daemons);
-  const cursor = rows[Math.min(p.view.sel, Math.max(0, rows.length - 1))] ?? null;
+  const machines = machineRows(p.world.daemons, rows);
+  const spaces = fleetSpaces(p.world.workspaces, p.world.daemons, rows, p.view.pin);
+  const list = homeRows(spaces, machines, p.view.folds);
+  const at = Math.min(p.view.sel, Math.max(0, list.length - 1));
+  const row = list[at] ?? null;
+  const previewed = homePreview(list, at);
+  const cursor = previewed == null ? null : (rows[previewed] ?? null);
 
   const on: HomeCallbacks = {
     walk: (sel) => p.on.setSel(sel),
+    preview: (agent) => {
+      const folds = { ...p.view.folds, machines: new Set(p.view.folds.machines), spaces: new Set(p.view.folds.spaces) };
+      const machine = machines.find(m => m.daemon === agent.daemon);
+      if (machine) folds.machines.delete(machine.label);
+      folds.spaces.delete(agent.ws);
+      const revealed = homeRows(spaces, machines, folds);
+      const next = revealed.findIndex(r => r.kind === HomeRowKind.Agent && r.row.pane === agent.pane);
+      if (next < 0) return;
+      p.on.setFolds(folds);
+      p.on.setSel(next);
+      requestAnimationFrame(focusTerminal);
+    },
     // Both halves are needed and both are the shell's: the workspace to switch
     // to and the pane to stage may be on a machine that is not the active tab's.
     open: ({ ws, pane }) => {
@@ -306,14 +344,79 @@ function Home(p: PageProps) {
       p.on.setPane(pane);
       p.on.setPage("work");
     },
+    // A project has no pane to stage, so this goes there and leaves the
+    // workspace showing whatever it had.
+    go: (ws) => {
+      p.on.setWsId(String(ws));
+      p.on.setPage("work");
+    },
+    fold: (folds) => p.on.setFolds(folds),
+    // Starting an agent leaves you on HOME: the new row appears in the fleet
+    // and the preview points at it, which is the whole of what you wanted to
+    // see. A named `[+ claude]` is already the answer to "which agent?", so it
+    // goes straight to spawn just like the terminal BOOTH does. Sending it
+    // through `spawnPick` first made this button depend on a second roster
+    // request and could replace the promised one-click action with a picker.
+    start: (space) => {
+      if (space.preferred) void p.actions.spawn(space.ws, space.preferred);
+      else void p.actions.spawnPick(space.ws, false, null);
+    },
+    close: (space) => {
+      void p.actions.closeWorkspace(space.ws, space.name);
+    },
+    closeChat: (row) => {
+      void p.actions.kill(row.ws, row.pane, row.agent.title);
+    },
   };
 
   const act: HomeActions = {
     press: (surface, key) => {
       const verb = verbFor(surface, key, p.view.pin);
+      // `enter` reads the row: an agent goes to that agent, a project goes to
+      // that workspace, a machine folds — one key, and the row says which.
       if (verb?.id === VerbId.OpenAgent) {
-        if (cursor) on.open({ ws: cursor.ws, pane: cursor.pane });
-        else p.actions.toast("no agent selected");
+        if (row?.kind === HomeRowKind.Space) on.go(row.space.ws);
+        else if (cursor && row?.kind === HomeRowKind.Agent) on.open({ ws: cursor.ws, pane: cursor.pane });
+        else p.actions.toast("nothing to open here");
+        return;
+      }
+      if (verb?.id === VerbId.NewAgent || verb?.id === VerbId.PickAgent) {
+        const space = row?.kind === HomeRowKind.Space ? row.space : spaces.find(s => s.ws === cursor?.ws);
+        if (space && verb.id === VerbId.PickAgent) void p.actions.spawnPick(space.ws, true, null);
+        else if (space) on.start(space);
+        else p.actions.toast("put the cursor on a project to start an agent");
+        return;
+      }
+      // `x` ends the thing the row *is*: on an agent that is the session, and
+      // on a project it is the workspace and everything running in it.
+      // Chat and workspace close actions both ask before ending anything.
+      if (verb?.id === VerbId.Kill) {
+        if (row?.kind === HomeRowKind.Space) on.close(row.space);
+        else if (cursor) void p.actions.kill(cursor.ws, cursor.pane, cursor.agent.title);
+        else p.actions.toast("nothing selected");
+        return;
+      }
+      if (verb?.id === VerbId.Fold) {
+        const f = p.view.folds;
+        if (row?.kind === HomeRowKind.Machine) {
+          on.fold({ ...f, machines: toggleFold(f.machines, row.label ?? "") });
+        } else if (row?.kind === HomeRowKind.Space) {
+          on.fold({ ...f, spaces: toggleFold(f.spaces, row.space.ws) });
+        } else if (row?.kind === HomeRowKind.Agent) {
+          // `z` on an agent folds the project it is *in*, and takes the cursor
+          // up to that row — the only move that leaves the cursor on something
+          // you can still see.
+          const header = list.slice(0, at).findLastIndex((r) => r.kind === HomeRowKind.Space);
+          const space = header >= 0 ? list[header] : null;
+          if (space && space.kind === HomeRowKind.Space) {
+            p.on.setSel(header);
+            on.fold({ ...f, spaces: toggleFold(f.spaces, space.space.ws) });
+          }
+        }
+        return;
+      }
+      if (verb?.id === VerbId.FoldAll) {
+        on.fold(toggleAllSpaces(p.view.folds, spaces));
         return;
       }
       if (verb?.id === VerbId.Help) {
@@ -324,12 +427,29 @@ function Home(p: PageProps) {
     },
   };
 
+  useRailKeys(key => {
+    if (["j", "k", "arrowdown", "arrowup"].includes(key)) {
+      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+      p.on.setSel(Math.max(0, Math.min(list.length - 1, at + delta)));
+      return true;
+    }
+    if (key === "tab") { focusTerminal(); return true; }
+    if (key === "enter" && row?.kind === HomeRowKind.Machine) {
+      on.fold({ ...p.view.folds, machines: toggleFold(p.view.folds.machines, row.label ?? "") });
+      return true;
+    }
+    if (!verbFor("home", key, p.view.pin)) return false;
+    act.press("home", key); return true;
+  });
+
   return (
     <HomePage
       world={p.world}
       actions={act}
       on={on}
-      sel={p.view.sel}
+      sel={at}
+      folds={p.view.folds}
+      pin={p.view.pin}
       pane={cursor ? cursor.pane : null}
       theme={p.term}
       fontPx={p.view.fontPx}
@@ -495,7 +615,7 @@ function isNamed(ws: QualifiedWorkspace | null, pane: Qid, name: string): boolea
 }
 
 // ---------------------------------------------------------------------------
-// SETTINGS, USAGE's siblings
+// SETTINGS
 // ---------------------------------------------------------------------------
 
 function Settings(p: PageProps) {
@@ -503,7 +623,7 @@ function Settings(p: PageProps) {
     <SettingsPage
       world={p.world}
       actions={p.actions}
-      on={{ close: () => p.on.setPage("work") }}
+      on={{ close: () => p.on.closeUtility() }}
       facts={p.facts}
       ws={p.ws}
       focus={p.focus}
@@ -517,7 +637,7 @@ function Help(p: PageProps) {
       prefix={p.view.prefix}
       topic={p.view.topic}
       onTopic={(slug) => p.on.setTopic(slug)}
-      onClose={() => p.on.setPage("work")}
+      onClose={() => p.on.closeUtility()}
     />
   );
 }
@@ -529,7 +649,6 @@ export const PAGE_TABLE: Record<PageName, (p: PageProps) => React.ReactNode> = {
   files: Files,
   docs: Docs,
   docker: Docker,
-  usage: Usage,
   settings: Settings,
   help: Help,
 };

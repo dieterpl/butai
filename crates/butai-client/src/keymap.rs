@@ -215,7 +215,6 @@ pub fn parse_action(s: &str) -> Result<Action, ParseError> {
                 // and nothing else did, so it could be neither rebound nor
                 // reached from `:`.
                 Some("git") => ViewVerb::Space(Page::Git),
-                Some("usage") => ViewVerb::Space(Page::Usage),
                 // `home` is the name this page had until it was named for what
                 // you do on it. Kept as an alias rather than removed: it is in
                 // users' keymaps, and a config that stops parsing is a worse
@@ -432,7 +431,6 @@ pub(crate) fn default_bindings() -> HashMap<KeyEvent, Action> {
         // On the Alt layer's letter, which is `r` for the same reason there:
         // `g` is the CHANGES rail, and the two git surfaces must not share one.
         ("r", "space git"),
-        ("u", "space usage"),
         ("w", "space work"),
         (",", "space prev"),
         (".", "space next"),

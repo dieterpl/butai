@@ -401,13 +401,48 @@ fn sysctl_string(name: &str) -> Option<String> {
 }
 
 /// Platforms without a CPU/RAM sampler: the SYSTEM rail simply reads zero.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_cpu() -> Option<(u64, u64)> {
     None
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_ram_gb() -> Option<(f32, f32)> {
     None
+}
+
+#[cfg(windows)]
+fn read_cpu() -> Option<(u64, u64)> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let (mut idle, mut kernel, mut user): (FILETIME, FILETIME, FILETIME) =
+        unsafe { std::mem::zeroed() };
+    // Windows includes idle time in kernel time. Counters use 100ns units.
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    let total = ticks(kernel).saturating_add(ticks(user));
+    Some((total.saturating_sub(ticks(idle)), total))
+}
+#[cfg(windows)]
+fn read_ram_gb() -> Option<(f32, f32)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } == 0 {
+        return None;
+    }
+    let gib = 1024.0 * 1024.0 * 1024.0;
+    Some((
+        (memory.ullTotalPhys.saturating_sub(memory.ullAvailPhys) as f64 / gib) as f32,
+        (memory.ullTotalPhys as f64 / gib) as f32,
+    ))
+}
+#[cfg(windows)]
+fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
+    let threads =
+        std::thread::available_parallelism().ok().and_then(|n| u16::try_from(n.get()).ok());
+    (std::env::var("PROCESSOR_IDENTIFIER").ok(), None, threads)
 }
 
 /// One interface as the kernel currently reports it: cumulative byte counters
@@ -669,6 +704,7 @@ fn short_gpu_name(full: &str) -> String {
 /// The rail has fourteen cells beside the CPU value at the default width, so
 /// this is aggressive by design: the core count and the clock are already on
 /// screen or not worth the room, and the marketing words never were.
+#[cfg(any(unix, test))]
 fn short_cpu_name(full: &str) -> String {
     // Everything from the clock suffix on is noise: "CPU @ 2.60GHz".
     let head = full.split(" @ ").next().unwrap_or(full);
@@ -736,7 +772,7 @@ fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
     (model, cores, threads)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_cpu_id() -> (Option<String>, Option<u16>, Option<u16>) {
     (None, None, None)
 }
@@ -797,6 +833,7 @@ fn read_swap_gb() -> (f32, f32) {
 /// from this list is still dropped further down by [`read_disks`]'s `total > 0`
 /// test. What naming them buys is not making the syscall at all — and on a
 /// systemd machine that is thirty-odd mounts per reading.
+#[cfg(any(unix, test))]
 fn disk_kind(fstype: &str, source: &str) -> Option<DiskKind> {
     const PSEUDO: &[&str] = &[
         "proc",
@@ -864,6 +901,7 @@ fn disk_kind(fstype: &str, source: &str) -> Option<DiskKind> {
 
 /// One `statvfs` result as `(used, total)` GiB, or `None` for a filesystem
 /// with no capacity to report.
+#[cfg(unix)]
 fn vfs_gb(vfs: &rustix::fs::StatVfs) -> Option<(f32, f32)> {
     // `f_frsize` is the fragment size, and the unit `f_blocks` and `f_bavail`
     // are counted in. `f_bsize` is the *preferred I/O* size and is not the same
@@ -904,7 +942,13 @@ async fn statvfs_sweep(mounts: Vec<String>) -> Vec<Option<(f32, f32)>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_blocking(move || {
         for (i, m) in mounts.iter().enumerate() {
+            #[cfg(unix)]
             let cap = rustix::fs::statvfs(m.as_str()).ok().as_ref().and_then(vfs_gb);
+            #[cfg(windows)]
+            let cap = {
+                let _ = m;
+                None
+            };
             // The sampler stopped waiting; nothing left to report to.
             if tx.send((i, cap)).is_err() {
                 return;
@@ -995,12 +1039,13 @@ fn mount_table() -> Vec<(String, String, String, DiskKind)> {
 /// a great deal that does not: `/System/Volumes/VM`, `Preboot`, `Update`,
 /// `xarts`, `iSCPreboot`, `Hardware` and `Data` are all mounted on an ordinary
 /// machine, all `nobrowse`, and all report the boot container's own size.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 struct MacMount {
     source: String,
     mount: String,
     fstype: String,
     nobrowse: bool,
+    readonly: bool,
 }
 
 /// The container behind an APFS volume's device node, or the node unchanged.
@@ -1014,7 +1059,7 @@ struct MacMount {
 /// Only APFS is collapsed this way. `/dev/disk4s1` and `/dev/disk4s2` are two
 /// partitions of one USB stick, each sized on its own, and they share this
 /// prefix while sharing no capacity at all.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn apfs_container(source: &str) -> &str {
     const DEV: &str = "/dev/disk";
     let Some(rest) = source.strip_prefix(DEV) else { return source };
@@ -1032,14 +1077,16 @@ fn apfs_container(source: &str) -> &str {
 /// `/proc`: every decision here is about text and flags, and checked against
 /// the machine's own table an assertion only fires if that host happens to
 /// have the mounts which trigger it.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn select_mounts(rows: Vec<MacMount>) -> Vec<(String, String, String, DiskKind)> {
     let mut out: Vec<(String, String, String, DiskKind)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for m in rows {
         // macOS's own word for "not a disk the user has", and the whole
         // difference between one row for the boot disk and seven.
-        if m.nobrowse {
+        // Installer images have no writable capacity to watch. Keep the sealed
+        // boot volume: its APFS container also holds the writable Data volume.
+        if m.nobrowse || (m.readonly && m.mount != "/") {
             continue;
         }
         let Some(kind) = disk_kind(&m.fstype, &m.source) else { continue };
@@ -1108,6 +1155,7 @@ fn mount_table() -> Vec<(String, String, String, DiskKind)> {
                 mount: c_str_field(&fs.f_mntonname),
                 fstype: c_str_field(&fs.f_fstypename),
                 nobrowse: fs.f_flags & libc::MNT_DONTBROWSE as u32 != 0,
+                readonly: fs.f_flags & libc::MNT_RDONLY as u32 != 0,
             })
             .collect(),
     )
@@ -1188,7 +1236,7 @@ async fn read_disks(
 async fn read_gpu_nvidia() -> Vec<GpuReading> {
     let out = tokio::time::timeout(
         Duration::from_secs(1),
-        tokio::process::Command::new("nvidia-smi")
+        butai_protocol::local::background_async_command("nvidia-smi")
             .args([
                 "--query-gpu=utilization.gpu,memory.used,memory.total,name,temperature.gpu,power.draw",
                 "--format=csv,noheader,nounits",
@@ -1262,7 +1310,7 @@ fn amd_hwmon_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 async fn read_docker() -> Option<Vec<Container>> {
     let out = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::process::Command::new("docker")
+        butai_protocol::local::background_async_command("docker")
             .args([
                 "ps",
                 "-a",
@@ -1302,10 +1350,9 @@ async fn read_docker() -> Option<Vec<Container>> {
 mod tests {
     use super::*;
 
-    // Both Linux (procfs) and macOS (mach) have a real sampler; other targets
-    // read zero and are skipped.
+    // Linux (procfs), macOS (Mach) and Windows (Win32) have real samplers.
     #[test]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn cpu_and_ram_readable() {
         let (busy, total) = read_cpu().expect("cpu counters readable");
         assert!(total >= busy);
@@ -1505,13 +1552,13 @@ tmpfs /dev/shm tmpfs rw 0 0
         assert!(snaps.iter().all(|(_, _, _, k)| *k == DiskKind::Layer));
     }
 
-    #[cfg(target_os = "macos")]
     fn mac_mount(source: &str, mount: &str, fstype: &str, nobrowse: bool) -> MacMount {
         MacMount {
             source: source.to_string(),
             mount: mount.to_string(),
             fstype: fstype.to_string(),
             nobrowse,
+            readonly: false,
         }
     }
 
@@ -1524,7 +1571,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// is the same reason [`one_disk_is_one_row_however_often_it_is_mounted`]
     /// uses a written-down one.
     #[test]
-    #[cfg(target_os = "macos")]
     fn the_boot_container_is_one_row_and_the_hidden_volumes_are_none() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk3s1s1", "/", "apfs", false),
@@ -1553,7 +1599,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// capacity — collapsing the other would report a 64 GB stick's two halves
     /// as one and lose whichever was listed second.
     #[test]
-    #[cfg(target_os = "macos")]
     fn only_apfs_volumes_collapse_onto_their_container() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk5s1", "/Volumes/Backup", "apfs", false),
@@ -1575,7 +1620,6 @@ tmpfs /dev/shm tmpfs rw 0 0
     /// is the one the rail prints — `/System/Volumes/Update` standing in for
     /// the boot disk is the same number under a name nobody recognises.
     #[test]
-    #[cfg(target_os = "macos")]
     fn the_root_volume_names_its_container_whenever_it_appears() {
         let got = select_mounts(vec![
             mac_mount("/dev/disk3s4", "/System/Volumes/Update", "apfs", false),
@@ -1587,7 +1631,6 @@ tmpfs /dev/shm tmpfs rw 0 0
 
     /// The volume suffix is cut, the disk number is not.
     #[test]
-    #[cfg(target_os = "macos")]
     fn a_container_is_the_disk_number_not_the_volume() {
         assert_eq!(apfs_container("/dev/disk3s1s1"), "/dev/disk3");
         assert_eq!(apfs_container("/dev/disk10s2"), "/dev/disk10");
@@ -1595,6 +1638,25 @@ tmpfs /dev/shm tmpfs rw 0 0
         assert_eq!(apfs_container("/dev/disk3"), "/dev/disk3");
         assert_eq!(apfs_container("//paul@10.0.0.1/nvme"), "//paul@10.0.0.1/nvme");
         assert_eq!(apfs_container("map auto_home"), "map auto_home");
+    }
+
+    #[test]
+    fn mac_readonly_installer_volumes_do_not_compete_with_storage() {
+        let mut root = mac_mount("/dev/disk3s1s1", "/", "apfs", false);
+        root.readonly = true;
+        let mut installer = mac_mount("/dev/disk6s1", "/Volumes/Installer", "hfs", false);
+        installer.readonly = true;
+        let mut apfs_image = mac_mount("/dev/disk7s1", "/Volumes/App", "apfs", false);
+        apfs_image.readonly = true;
+        let got = select_mounts(vec![
+            installer,
+            root,
+            apfs_image,
+            mac_mount("/dev/disk5s1", "/Volumes/Backup", "apfs", false),
+            mac_mount("//host/share", "/Volumes/share", "smbfs", false),
+        ]);
+        let mounts: Vec<_> = got.iter().map(|(_, mount, _, _)| mount.as_str()).collect();
+        assert_eq!(mounts, ["/", "/Volumes/Backup", "/Volumes/share"]);
     }
 
     /// A mount that does not answer keeps the numbers it had and says so.

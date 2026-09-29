@@ -96,7 +96,7 @@ pane ls` and `butai pane ls --json` are the same command.
 | flag | type | default | effect |
 |---|---|---|---|
 | `--json` | bool | off | emit JSON instead of human text |
-| `--socket <PATH>` | path | `$BUTAI_SOCKET`, else `~/.butai/butai.sock` | which daemon to talk to |
+| `--socket <PATH>` | path | `$BUTAI_HOME`'s socket, else `$BUTAI_SOCKET`, else `~/.butai/butai.sock` | which daemon to talk to |
 | `-w`, `--ws <WS>` | workspace id or name | `$BUTAI_WORKSPACE` | default workspace scope |
 | `-q`, `--quiet` | bool | off | print nothing on success; the exit code is the answer |
 | `-h`, `--help` | | | print help (`--help` is long form, `-h` the summary) |
@@ -570,6 +570,11 @@ the same place; this one is for a shell prompt, and differs in four ways.
 * **It does not open a workbench.** It stops after the swap, with the daemon
   down. The next `butai` starts it on the new build.
 
+It follows `[update] channel` from the config of *this* install — `stable` by
+default, or `dev` for the prereleases cut from `develop`. `--daemon` follows the
+channel configured on the far machine instead, since that is the install being
+replaced. See [configuration.md](configuration.md#update).
+
 ```
 butai 1.1.0 is available — you have 1.0.0
   butai-1.1.0-x86_64-unknown-linux-musl.tar.gz
@@ -805,7 +810,8 @@ process fell over.
 
 | variable | read by | effect |
 |---|---|---|
-| `BUTAI_SOCKET` | `--socket` default, and the socket-path helper | which daemon to talk to |
+| `BUTAI_HOME` | the socket-path helper | moves the whole `~/.butai` tree, socket included — and **outranks `BUTAI_SOCKET`** |
+| `BUTAI_SOCKET` | the socket-path helper | which daemon to talk to |
 | `BUTAI_WORKSPACE` | `--ws` default, `whoami` | default workspace scope |
 | `BUTAI_PANE` | target resolution, `whoami` | the caller's own pane; its **absence** is the test for "not inside butai" |
 | `BUTAI` | the nesting guard | socket of the daemon this pane belongs to |
@@ -837,13 +843,23 @@ Agent, process and plain shell alike:
 
 `[[agents]] env` entries are applied *after* these, so an agent's own config can
 override any of them. Because `--ws` defaults to `$BUTAI_WORKSPACE` and
-`--socket` to `$BUTAI_SOCKET`, a command run inside a pane already acts on its own
-workspace, on its own daemon, with nothing configured.
+`--socket` falls back to `$BUTAI_SOCKET`, a command run inside a pane already
+acts on its own workspace, on its own daemon, with nothing configured.
+
+**`$BUTAI_HOME` outranks `$BUTAI_SOCKET`**, which is the one bit of that order
+worth knowing. `$BUTAI_SOCKET` is exported into every pane, so a command run
+inside butai always has one whether or not anybody wanted it; `$BUTAI_HOME` only
+ever appears because somebody typed it. So `BUTAI_HOME=~/.butai-dev butai`, run
+in a pane of your ordinary butai, reaches the dev daemon rather than the one
+drawing the pane. `--socket` still beats both — it was typed for this command in
+particular.
 
 ### Set on the spawned daemon
 
 An auto-spawned daemon is started with `BUTAI_SOCKET` set to the socket the
 client asked for, which is how a non-default socket propagates without a flag.
+`BUTAI_HOME` needs no such handling: the daemon is a child, so it inherits the
+one the client was resolving against, and the two cannot disagree.
 
 ## Recipes
 

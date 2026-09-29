@@ -77,7 +77,7 @@ import { api } from "../logic/api.ts";
 import { GIT_COLS } from "../logic/dom.ts";
 import { localId, type Qid, type QualifiedGitOp, type QualifiedWorkspace } from "../logic/events.ts";
 import { MAX_LANES, glyphs, graphRows, graphWidth } from "../logic/graph.ts";
-import { GitRow, VerbId, click, gitFooter, gitRowVerbs, keyText, type TargetId, type Verb } from "../logic/verbs.ts";
+import { GitRow, VerbId, click, keyName, gitFooter, gitRowVerbs, keyText, type TargetId, type Verb } from "../logic/verbs.ts";
 import type {
   BranchDto,
   BranchesDto,
@@ -700,6 +700,34 @@ export function GitPage(props: GitPageProps) {
     FOOTER_ROWS,
     (v) => liveRuns[v.id] ?? pageRuns[v.id] ?? null,
   );
+
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey ||
+          document.querySelector('[role="dialog"]') ||
+          (e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const key = keyName(e);
+      if (key === "tab") {
+        const columns: GitColumn[] = ["refs", "history", "body"];
+        on.focus(columns[(columns.indexOf(column) + 1) % columns.length]!);
+      } else if (["j", "k", "arrowdown", "arrowup"].includes(key)) {
+        const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+        if (column === "body") document.querySelector<HTMLElement>('[data-slot="patch"]')?.scrollBy({ top: delta * 18 });
+        else {
+          const count = column === "refs" ? walkable.length : log.commits.length;
+          setSel(current => ({ ...current, [column]: Math.max(0, Math.min(count - 1, current[column] + delta)) }));
+        }
+      } else {
+        const verb = gitFooter(kindOf(liveRow)).find(v => v.key === key);
+        const run = verb && (liveRuns[verb.id] ?? pageRuns[verb.id]);
+        if (!run) return;
+        run();
+      }
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  });
 
   // The lanes over the *whole* page, not the visible slice: a lane opened by a
   // merge above the fold still has to be drawn passing through the rows on

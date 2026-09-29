@@ -49,7 +49,6 @@ The same set on the same letters, reaching the workbench from anywhere.
 | docs | `alt-m` | `C-b m` | a project's own markdown |
 | docker | `alt-c` | `C-b c` | `alt-d` is detach, so containers take `c` |
 | git | `alt-r` | `C-b r` | the repository: its refs, its history, its working tree |
-| usage | `alt-u` | `C-b u` | which agent account stops you first. On a Mac, Option-u is the diaeresis dead key, so use `C-b u` there |
 | work | the space key again | `C-b w` | each space key toggles back |
 | walk the spaces | `alt-,` `alt-.` | `C-b ,` `C-b .` | |
 | the spaces menu | `alt-space` | `C-b space` | every space with its badge — what the tab bar's own control opens |
@@ -102,9 +101,9 @@ interface. It also carries **disconnect host** on a remote tab, which is the one
 row of it that has a second way in: `alt-h` lists the machines you are connected
 to, and choosing one drops it.
 
-`x` and `m` also answer on **BOOTH's fleet**, and there they act on the row's own
-machine and project rather than on the tab you are looking at — the one list in
-the workbench where those are routinely not the same thing.
+`x`, `m`, `a` and `A` also answer on **BOOTH's fleet**, and there they act on the
+row's own machine and project rather than on the tab you are looking at — the one
+list in the workbench where those are routinely not the same thing.
 
 The SYSTEM gauges are the one part of the left rail the cursor cannot walk, so
 their monitor is keyed rather than entered: `C-b S` is `htop`, `C-b Y` is
@@ -180,14 +179,38 @@ over the DIFF space, so you keep the refs and the history you opened it from,
 and the diff keys above work there. The rail is unchanged and still owns the
 commit box and the sync buttons, which is what `C` goes to.
 
-**BOOTH** — `j` `k` walk the fleet · `enter` go to that agent, on its machine ·
-`tab` the preview · `x` end the session · `m` the row's menu. Six keys and no
-more: the rest of the rails' table is about a project, and this page is not in
-one. The NEEDS YOU tray answers the pointer as the fleet does — a click puts the
-cursor on the agent the copy stands for.
+**BOOTH** — `j` `k` walk the rows · `enter` go there: an agent's workspace on its
+machine, or the project the cursor names · `a` start that project's agent · `A`
+pick which · `x` end what the row is: the session on an agent, the workspace and
+everything in it on a project (which asks) · `z` fold this machine or project ·
+`Z` fold every project · `tab` the preview · `m` the row's menu.
 
-**FILES / DOCS** — `j` `k` move · `enter` open or descend · `backspace` up ·
-`/` find · `e` edit · `C-s` save · `esc` stop editing · `x` delete · `q` close.
+Ten keys, and every one of them is a key this workbench already had: `a` and `A`
+are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`
+folded) and all. It used to be six, and the reason given was that the rest of the
+rails' table is about a project and this page is not in one — which stopped being
+true when its rows became projects.
+
+Clicking an agent in FLEET or NEEDS YOU selects its preview and gives the stage
+keyboard focus. Clicking a machine/project keeps focus on the fleet; double-click
+its name within 400ms to fold/unfold it. The chevron and `z` also fold/unfold.
+The NEEDS YOU tray moves the cursor to the row the copy stands for. An agent folded away inside its project
+has no row to move to, so its copy names nothing rather than selecting whatever
+sits at that index; the tray is still the shortest way to it, through unfolding.
+
+**FILES / DOCS** — `j` `k` move · `←` `h` up a level · `→` `l` into · `space`
+peek · `enter` open · `backspace` up · `/` find · `e` edit · `C-s` save · `esc`
+stop editing · `x` delete · `q` close.
+
+The browser is a trail of columns — every directory on the way to where you are,
+side by side — so `←` and `→` walk it and the columns to the right of the cursor
+are kept: `←` then `→` asks the daemon nothing. From inside the file, `←` hands
+the keyboard back to the browser.
+
+`space` and `enter` both read the file the cursor is on, and differ only in where
+they leave the keyboard: `enter` gives it to the file, `space` keeps it in the
+browser so the next `j` walks to the next name and shows you that one. That is
+what makes `space` a peek rather than a second `enter`.
 
 `x` deletes the file the cursor is on, and it asks first — the box names the
 path and opens on "no", as discarding does. It is the one key here that git
@@ -198,12 +221,12 @@ key does nothing on one.
 **DOCKER** — `enter` follow the logs · `r` restart · `x` stop · `s` a shell in
 the container · `q` close.
 
-**USAGE** — `j` `k` walk the CLIs · `r` re-read. Three keys and no more: the
-page reports a state of the world it does not own — an account's standing lives
-with the provider — so there is nothing on it to change from here.
-
-**SETTINGS** — `j` `k` rows · `tab` groups · `enter` open a list or choose ·
-`space` toggle · `-` `+` resize a rail · `0` back to automatic · `esc` leave.
+**SETTINGS** — `j` `k` rows · `tab` groups · `enter` open a list, choose, or
+carry out an action row · `space` toggle · `-` `+` resize a rail · `0` back to
+automatic · `r` re-read MACHINES · `esc` leave. `enter` does more here than
+anywhere else because the MACHINES section holds rows that *act* rather than
+hold a value — `connect`, `disconnect`, `forget`, `update` — and an action has
+no value a toggle could report while an ssh is still landing.
 
 **Overlays** — `j` `k` move · `enter` choose · `esc` or `q` dismiss · `y` / `n`
 answer a confirmation. In the agent picker, `d` pins the highlighted agent as
@@ -240,7 +263,7 @@ F5 = "process build cargo build"      # C-a F5
 The vocabulary:
 
 ```
-space work|files|docker|docs|git|usage|booth|next|prev|menu
+space work|files|docker|docs|git|booth|next|prev|menu
 workspace 1..9|next|prev|new|close
 focus agents|processes|changes|fleet|stage
 agent [NAME]            spawn one, or pick from the list

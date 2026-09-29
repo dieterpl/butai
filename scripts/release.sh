@@ -47,7 +47,6 @@ armv7-unknown-linux-gnueabihf
 aarch64-apple-darwin
 x86_64-apple-darwin
 "
-TARGETS="${TARGETS:-$ALL_TARGETS}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -58,6 +57,9 @@ VERSION="$(cargo metadata --no-deps --format-version 1 \
 [ -n "${VERSION:-}" ] || die "could not determine version from cargo metadata"
 
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+# Windows defaults to its native target; Unix retains the full Unix matrix.
+case "$HOST_TRIPLE" in *-windows-*) ALL_TARGETS="$HOST_TRIPLE" ;; esac
+TARGETS="${TARGETS:-$ALL_TARGETS}"
 
 echo ">> butai release v$VERSION"
 echo ">> host:    $HOST_TRIPLE"
@@ -73,6 +75,7 @@ needs_cross() {
   # Either Mac can link both Apple arches; cross has no darwin images at all.
   case "$HOST_TRIPLE:$target" in
     *-apple-darwin:*-apple-darwin) return 1 ;;
+    *-windows-*:*-windows-*) return 1 ;;
   esac
   return 0
 }
@@ -84,6 +87,9 @@ for target in $TARGETS; do
 
   if needs_cross "$target"; then
     case "$target" in
+      *-windows-msvc)
+        die "$target must be built on Windows with the MSVC build tools (or use the release workflow)."
+        ;;
       *-apple-darwin)
         die "$target must be built on a Mac — cross has no darwin image, and an
        unsigned arm64 binary will not exec. Run this script on macOS, or let
@@ -101,7 +107,9 @@ for target in $TARGETS; do
 
   "${builder[@]}" build --release --target "$target" -p "$BIN"
 
-  bin_path="$TARGET_DIR/$target/release/$BIN"
+  executable="$BIN"
+  case "$target" in *-windows-*) executable="$BIN.exe" ;; esac
+  bin_path="$TARGET_DIR/$target/release/$executable"
   [ -f "$bin_path" ] || die "expected binary not found at $bin_path"
 
   # Stage: binary + docs, then tar it up.

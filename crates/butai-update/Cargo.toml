@@ -16,7 +16,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-rustix.workspace = true
 
 # The only outbound network in the whole tree: HTTPS to the GitHub release, the
 # checksum it publishes, and the one file worth taking out of the tarball.
@@ -27,3 +26,6 @@ flate2.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true

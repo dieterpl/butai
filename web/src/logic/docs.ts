@@ -1,26 +1,7 @@
-// The DOCS page's model: which of a project's files are its writing, and the
-// built-in reference that sits above them.
-//
-// `Page::Docs` is "the Files page filtered to markdown: a project's own
-// writing, without the code it is about", so there is no second tree here and
-// there must not be one — `butai-files.js` draws both, and this is only the two
-// things that make one of them DOCS: the filter, and the `reference` folder.
-//
-// ## The reference is generated, and that is why there is only one of it
-//
-// `docs/keys.md` says the in-app reference lives on this page. Stage 6 built a
-// `?` that is *generated from the verb tables*, which is the property worth
-// keeping: a surface cannot fall out of it while its keys keep working. So the
-// reference here is not a second document, it is that same `reference()` laid
-// out as markdown pages — one topic per section — and `?` opens this page on
-// the first of them, exactly as the terminal's `ViewVerb::Help` opens
-// `Flow::Reference(HELP_TOPIC)`.
-//
-// Two references that agree today are two references; one generator rendered in
-// one place cannot disagree with itself.
-//
-// Nothing here touches the DOM or the network — the filter, the topics and the
-// markdown reader are pure.
+// Shared models for project Docs and the separate Help page. Help renders
+// reference() as Markdown topics, including its FAQ and generated key tables.
+// The virtual reference paths remain compatible with file-reader callers.
+// Nothing here touches the DOM or network.
 
 import { reference, type ReferenceSection } from "./verbs.ts";
 import type { TreeEntry } from "../protocol/generated/protocol.ts";

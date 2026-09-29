@@ -959,7 +959,7 @@ ALT = lambda ch: ESC + ch  # noqa: E731
 SHOTS = {
     "workbench": ([], [], "the workbench"),
     "changes-diff": ([ALT("g"), "j", "d"], [ESC, ALT("a")], "a diff on the stage"),
-    "booth": ([ALT("0")], [ALT("0")], "BOOTH"),
+    "booth": ([ALT("0"), "j", "j"], [ALT("0")], "BOOTH"),
     "help": (["?"], [ESC], "the help page"),
     "settings": ([ALT("s")], [ESC], "settings"),
 }

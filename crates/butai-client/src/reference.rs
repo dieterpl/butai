@@ -52,22 +52,102 @@ pub fn index_of(slug: &str) -> usize {
 /// are, then the things in the rails, then the work, then the machinery.
 pub const TOPICS: &[Topic] = &[
     Topic {
+        name: "FAQ",
+        slug: "faq",
+        body: "\
+# FAQ
+
+## How do I copy text?
+
+Drag across the text with the left mouse button, then release. butai copies
+the selection automatically; you do not need a copy shortcut. In Files,
+line numbers are left out. Hold Alt while dragging if the running program
+uses the mouse itself.
+
+Ctrl+C is sent to the focused program and can interrupt it. It does not
+copy butai's selection.
+
+## Why did copying not reach my clipboard?
+
+On Linux and macOS, your terminal must allow application clipboard writes
+(OSC 52), including over SSH. In tmux, `set -g set-clipboard on` may be
+needed in your tmux configuration. Native Windows uses the Windows clipboard.
+
+As a fallback, hold Shift and drag to use your terminal's own selection,
+then use its Copy command. Its shortcut is often Ctrl+Shift+C on Linux or
+Windows, or Cmd+C on macOS; check your terminal's settings.
+
+## How do I paste text or an image?
+
+Click the chat or shell you want to type into, then use your terminal's Paste
+command: often Ctrl+Shift+V on Linux or Windows, or Cmd+V on macOS. Text also
+pastes into an open prompt or a file in edit mode.
+
+For an image, use `alt-v` or `{prefix} v`. butai saves the image in the
+workspace and pastes its path into the pane. The clipboard is read on the
+machine running this client, including when the workspace is on an SSH host.
+
+## Why are my keys typing into the chat?
+
+The stage has keyboard focus. Use `alt-a` for the AGENTS rail, `alt-p` for
+PROCESSES, or `alt-w` for BOOTH's fleet. From a rail, Enter focuses its
+selected pane. In BOOTH, clicking a chat focuses its live preview.
+
+If your terminal takes an Alt shortcut, use the prefix shown in Keys
+(Ctrl+B by default).
+Press `{prefix}`, release it, then the next key; `{prefix} ?` opens Help
+even while a chat is focused. Press the prefix twice to send it to the chat.
+
+## How do I read earlier output?
+
+Use the wheel over the pane, or `{prefix} PgUp` and `{prefix} PgDn` for its
+scrollback. The wheel over a rail acts on that rail instead. In Help,
+`j`/`k` scroll, Tab changes topic, and Esc returns to your previous page.
+A running program that handles the mouse may handle the wheel itself.
+
+## What is NEEDS YOU in BOOTH?
+
+It gathers chats needing attention across connected machines, even when
+their projects are folded in FLEET. Click one to read and reply in the
+preview. Waiting means the agent needs input; finished means it produced
+a result. Use `[open]` to go to the chat's project. Clicking a project name
+selects its preview; the chevron folds or unfolds its chats.
+
+## Can I leave without ending my chats?
+
+Yes. `alt-d` or `{prefix} d` detaches this client; the daemon keeps the
+panes running. Run `butai` again to reconnect.
+
+The `[x]` beside a chat, or `x` on its fleet row, ends that chat immediately.
+Closing a workspace with `alt-x` ends everything in it and asks first.
+
+## How do I start another agent or change views?
+
+Use `alt-n` to open a project. With the AGENTS rail or a BOOTH project row
+focused, `a` starts the pinned agent and `A` lets you choose another.
+`alt-enter` opens the agent picker from inside a running pane.
+
+`alt-space` opens Views and shows each view's shortcut. `alt-o` opens Files;
+`alt-m` opens the project's Docs. Help is its own page: use `[help]`, `?`
+off the stage, or `{prefix} ?` from anywhere.
+",
+    },
+    Topic {
         name: "Getting around",
         slug: "getting-around",
         body: "\
 # Getting around
 
-The workbench has a fixed frame: a tab bar along the top, rails down the
-left, and one stage in the middle. Nothing splits, and nothing moves. What
-changes is *which space* the middle is showing.
+The workbench has a tab bar along the top, rails beside the stage, and
+views for agents, files, docs, Docker and git. The view determines what
+the middle shows; layout and zen controls adjust room for the rails.
 
 ## Spaces
 
     alt-o       files
-    alt-m       docs — this page
+    alt-m       docs — the project's writing
     alt-c       docker (containers; alt-d is detach)
     alt-r       git — the repository over time
-    alt-u       usage — which account limit stops you first
     alt-, / .   walk the spaces
     alt-space   the menu of them, with what each one is asking for
     alt-e       files, without the toggle back
@@ -97,16 +177,27 @@ asks for a name, makes the folder on that machine and steps into it, leaving
 `[open this folder]` under the cursor. Nothing here needs a shell.
 
 BOOTH is not a view of a workspace, it is the surface that spans them: every
-agent on every machine, with the selected one's screen. That is why it sits
+project on every machine, with the selected one's screen. That is why it sits
 beside the workspace chips rather than in the space list. The name is the
 control booth at the back of a theatre — the one seat that watches every
 stage at once and can key into any single one of them.
 
 The middle column is that agent's live pane, not a picture of one. The keyboard
-starts on the FLEET list, so `j`/`k` walk agents; `tab` or a click hands it to
+starts on the FLEET list, so `j`/`k` walk rows; `tab` or a click hands it to
 the pane and everything you type from then on is the agent's. `alt-w` takes it
 back. `[open]` is the other move — it goes to that agent's project, which
-changes the tab you are on; typing at the preview does not.
+changes the tab you are on; typing at the preview does not. Clicking a project's
+name selects its preview, while its chevron folds or unfolds its chats.
+
+NEEDS YOU gathers chats needing attention above FLEET, including chats in
+folded projects. Click a chat there or in FLEET to focus its live preview.
+The `[x]` on a chat ends that session immediately.
+
+The fleet lists the projects with nothing running in them too, so `a` can start
+one: it spawns that project's own agent — `[agents] autostart` in its
+`.butai.toml`, then your `default_agent` — and `A` picks the type. `z` folds the
+machine or project the cursor is on and `Z` folds every project, which leaves an
+index of the whole fleet.
 
 ## Other machines
 
@@ -144,7 +235,7 @@ on the two bars puts you back on the page you came from.
         body: "\
 # Agents
 
-An agent is a coding CLI — claude, codex, gemini, aider, agy — running on a PTY
+An agent is a coding CLI — claude, codex, opencode, gemini, aider, agy — running on a PTY
 the daemon owns. It appears as a row on the AGENTS rail, and staging it puts
 its screen in the middle.
 
@@ -254,7 +345,7 @@ that is what makes it a terminal and not a preview.
 
     enter       put the cursor on the stage
     alt-esc     take it back off
-    tab         cycle the rails
+    tab         cycle the rails, while off the stage
     {prefix} PgUp / PgDn   scroll its scrollback
 
 The Alt layer is the exception: it always belongs to the workbench, so
@@ -367,17 +458,34 @@ still passes through the rows below it.
 # Files
 
     alt-o       the files space
-    j / k       move
-    enter       open a file, or descend into a directory
-    ..          the row back up
+    j / k       move within a column
+    left  h     up a level, or out of the file
+    right l     into a directory, or open a file
+    space       peek: read a file, keep the keyboard here
+    enter       open a file, and go to it
+    backspace   up a directory
     /           find, across the workspace
     e           edit the open file
     C-s         save
     esc         leave edit mode
     x           delete the file the cursor is on
 
-The tree is on the left and the file on the right. A yellow marker means
-git sees a change in that file, or somewhere under that directory.
+The browser is on the left and the file on the right. A yellow marker
+means git sees a change in that file, or somewhere under that directory.
+
+Every directory on the way to where you are is a column of its own, side
+by side, with the row you came through still marked — so where you are is
+a shape rather than a line of text. `left` and `right` walk it, and the
+columns to the right of the cursor are kept: walking back and forward
+again asks the daemon nothing.
+
+`space` and `enter` both read the file the cursor is on, and differ only
+in where they leave the keyboard. `enter` gives it to the file; `space`
+keeps it here, so the next `j` walks to the next name and shows you that
+one instead. That is what makes it a peek.
+
+Down the right of the file is a minimap: the whole of it as a column of
+texture, with the part you are reading marked on it. Click to jump.
 
 `x` asks first, and the box opens on `no`. It is the only key here that
 git cannot undo — the changes rail's `x` puts a file back to what the
@@ -415,7 +523,7 @@ this page works unchanged against a daemon on another machine.
 Everything on screen is clickable: a rail row, a tab, the spaces button, a
 footer button. The wheel scrolls whatever is under the pointer.
 
-    click           select; click again to stage
+    click           select a row; click a pane to give it the keyboard
     right-click     the menu for an agent, a process or a tab — `m` too
     drag            select text and copy it
     alt-drag        select inside a running program
@@ -469,7 +577,7 @@ prefix layer is for terminals that eat Alt, or fingers that prefer it.
 ## The Alt layer
 
     alt-o m c       files · docs · docker
-    alt-r u         git · usage
+    alt-r           git
     alt-, .         walk the spaces
     alt-space       the menu of spaces
     alt-e           files
@@ -488,6 +596,7 @@ prefix layer is for terminals that eat Alt, or fingers that prefer it.
     alt-v           paste an image
     alt-enter       the agent picker
     alt-d           detach
+    alt-s           settings
 
 ## The prefix layer
 
@@ -499,6 +608,7 @@ pane.
     {prefix} , .        walk the spaces
     {prefix} space      the menu of spaces
     {prefix} 1..9       workspace by number
+    {prefix} 0          BOOTH
     {prefix} [ ]        walk the tab bar
     {prefix} n          open a workspace
     {prefix} X          close this workspace
@@ -563,13 +673,18 @@ eating it.
     f           the links on screen
     ?           this reference
     q           detach
-    tab         cycle the rails
+    tab         cycle the rails, while off the stage
     j k         move
     enter       stage the row, or open what it names
 
-BOOTH's fleet takes `j`, `k`, `enter`, `tab`, and `x` and `m` — which there act
-on the row's own machine and project, not on the tab you are looking at. The
-rest of the list is about a workspace, and BOOTH is not in one.
+BOOTH's fleet takes `j`, `k`, `enter`, `tab`, `x`, `m`, `a`, `A`, `z` and `Z` —
+and each of them acts on the row's own machine and project, not on the tab you
+are looking at. `a`/`A` are the AGENTS rail's verbs and `z`/`Z` are the diff's
+folds; nothing here is a key this workbench did not already have.
+
+`x` ends what the row *is*. On an agent that is the session and it does not ask;
+on a project it is the workspace and everything running in it, and it does. The
+`[x]` on a chat is the same press. Chat close buttons also appear in NEEDS YOU.
 
 ## Everything has one
 

@@ -447,26 +447,50 @@ pub fn open(url: &str) -> Result<(), String> {
     if !SCHEMES.iter().any(|s| url.to_ascii_lowercase().starts_with(s)) {
         return Err(format!("not a link: {url}"));
     }
-    let opener = opener().ok_or_else(|| "no desktop on this machine to open it".to_string())?;
-    let child = std::process::Command::new(opener)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("{opener}: {e}"));
-    match child {
-        Ok(mut child) => {
-            // Reaped on a thread of its own: `xdg-open` can sit there for as
-            // long as the browser takes to start, and the event loop is not
-            // waiting for that. Not reaping it at all would leave a zombie per
-            // link in a process that runs all day.
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok(())
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+        // The URL is data to the Windows shell API, never a command string.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        } as isize;
+        if result <= 32 {
+            return Err(format!("could not open link (Windows error {result})"));
         }
-        Err(e) => Err(e),
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        let opener = opener().ok_or_else(|| "no desktop on this machine to open it".to_string())?;
+        let child = std::process::Command::new(opener)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("{opener}: {e}"));
+        match child {
+            Ok(mut child) => {
+                // Reaped on a thread of its own: `xdg-open` can sit there for as
+                // long as the browser takes to start, and the event loop is not
+                // waiting for that. Not reaping it at all would leave a zombie per
+                // link in a process that runs all day.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -479,10 +503,14 @@ fn opener() -> Option<&'static str> {
     {
         Some("open")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let set = |k| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         (set("DISPLAY") || set("WAYLAND_DISPLAY")).then_some("xdg-open")
+    }
+    #[cfg(windows)]
+    {
+        Some("Windows Shell")
     }
 }
 

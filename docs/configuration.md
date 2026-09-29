@@ -117,7 +117,7 @@ from, and where two mechanisms could name the same thing, this is which wins.
 | Workspace scope for the CLI | `--ws NAME` → `$BUTAI_WORKSPACE` (every pane carries it) |
 | Shell for a pane | `[general] default_shell` → `$SHELL` → `/bin/sh` |
 | Workspace name | `butai new -s NAME` / `butai ws create --name` / `POST /v1/workspaces` `name` → the directory's basename |
-| Agent list | `[[agents]]` if the array exists at all → otherwise the five built-ins |
+| Agent list | `[[agents]]` if the array exists at all → otherwise the six built-ins |
 | Agent argv on a restore | `resume_args` when there is a conversation to reopen → otherwise `args` |
 | A pane's palette | `[theme]` role keys → the named theme's `[colors]` → its `extends` chain → `blueprint-dark` |
 | A key after the prefix | `[keys]` → the shipped prefix table |
@@ -163,6 +163,7 @@ particular is global: `alt-l` resizes every workspace at once and saves to
 [keys]
 [theme]
 [ui]
+[views]
 [[remote]]
 ```
 
@@ -174,7 +175,7 @@ are listed here in the order the source declares them.
 | Key | Type | Default | Read by | What it changes |
 |---|---|---|---|---|
 | `prefix` | string | `"C-b"` | client | The key that opens a prefix binding. Pressing it twice sends one literal through to the pane. Spelling is the key mini-language: `C-`, `M-`, `S-` prefixes over a character or a named key. |
-| `default_agent` | string | unset | client | The agent `a` and `[+ agent]` spawn with no picker in between. Unset asks every time. Stored as a *name*, so it survives reordering `[[agents]]`. |
+| `default_agent` | string | unset | client | The agent `a` and `[+ agent]` spawn with no picker in between. Unset asks every time. Stored as a *name*, so it survives reordering `[[agents]]`. On BOOTH it is the **fallback**: a project's own `[agents] autostart` is asked first — see below. |
 | `remote_auto_attach` | bool | `true` | client | Whether a `butai` run over ssh inside a pane may pull its machine into this tab bar on its own. Off means machines join only through the machines button or a `[[remote]]` block. |
 | `option_as_alt` | bool | `true` on macOS, `false` elsewhere | client | Read macOS's Option-composed characters back as the Alt layer, so Option-o *is* `alt-o`. Only characters the workbench binds are mapped; the cost is that those characters cannot be typed into a pane. |
 | `default_shell` | string | unset | daemon | The shell a terminal pane runs, and the interpreter `[[processes]]` commands go through. Unset falls back to `$SHELL`, then `/bin/sh`. |
@@ -233,15 +234,17 @@ ever fires.
 | `claude` | `--dangerously-skip-permissions --session-id {session_id}` | `--dangerously-skip-permissions --resume {session_id}` |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | — |
 | `gemini` | `--yolo --session-id {session_id}` | `--yolo --resume {session_id}` |
+| `opencode` | —; `OPENCODE_PERMISSION={"*":"allow"}` in its environment | — |
 | `aider` | `--yes-always` | — |
 | `agy` | `--dangerously-skip-permissions` | — |
 
-Each launches with its CLI's auto-approve flag, because agents run unattended in
-rail panes. The empty `resume_args` are deliberate, not gaps: `codex` and `agy`
-assign their own conversation ids and have no way to be told one at launch, and
-`aider`'s history is per directory, so there is nothing per-pane to name. A
-wrong flag here makes the CLI exit on launch, so fill them in yourself only
-after checking against the CLI you actually run.
+Each launches unattended because agents run in rail panes. OpenCode expresses
+that as an inline permission configuration; the other CLIs use auto-approve
+flags. The empty `resume_args` are deliberate, not gaps: `codex`, `opencode`
+and `agy` assign their own conversation ids and have no way to be told one at
+launch, and `aider`'s history is per directory, so there is nothing per-pane to
+name. A wrong flag here makes the CLI exit on launch, so fill them in yourself
+only after checking against the CLI you actually run.
 
 ### `[keys]`
 
@@ -305,6 +308,7 @@ layout, not one workspace's.
 | `system_height` | integer | unset = automatic | capped at 19 | Rows for the SYSTEM gauges. Automatic is a separator plus whatever the machine's gauges need, and 0 in zen mode or below 12 rows of rail. |
 | `net` | `"all"`, `"auto"`, or a list | `"all"` | — | Which interfaces get a NET gauge. |
 | `disks` | `"all"`, `"auto"`, or a list | `"all"` | — | Which mounts get a DSK gauge. |
+| `glyphs` | `"unicode"` or `"ascii"` | `"ascii"` on Windows, `"unicode"` elsewhere | — | Display graphical symbols with the original Unicode glyphs or single-column ASCII alternatives for limited terminal fonts. Text encoding and clipboard content are preserved. |
 | `links` | bool | `true` | — | Whether a URL on screen is marked up as an OSC 8 hyperlink for the terminal butai is drawn on, so its pointer can follow one. Off leaves the text alone; the `f` picker works either way, because it never leaves this client. |
 
 Widths **clamp rather than fall back**, so `left_rail = 900` gives you a
@@ -390,17 +394,20 @@ draw. See [DSK](workbench.md#dsk).
 
 ### `[update]`
 
-Whether butai looks for a newer release of itself, which one you already turned
-down, and whether the daemon may be told to update itself.
+Whether butai looks for a newer release of itself, which releases count, which
+one you already turned down, and whether the daemon may be told to update
+itself.
 
 The one table both halves read — a key at a time. `check` and
-`declined_version` are the **client**'s; `allow_remote` is the **daemon**'s.
-Neither struct declares the other's keys and serde ignores what it does not
-know, so they share the table without either seeing the other's part.
+`declined_version` are the **client**'s; `allow_remote` is the **daemon**'s;
+`channel` is the one they both declare, because both of them check. Neither
+struct declares the other's keys and serde ignores what it does not know, so
+they share the table without either seeing the other's part.
 
 ```toml
 [update]
 check = true                 # default
+channel = "stable"           # default; "dev" takes the prereleases too
 declined_version = "1.1.0"   # written for you; see below
 allow_remote = false         # default
 ```
@@ -408,8 +415,31 @@ allow_remote = false         # default
 | key | type | default | read by | effect |
 |---|---|---|---|---|
 | `check` | bool | `true` | client | Ask GitHub for the latest release at start, and every six hours after. This is the only outbound request a butai client makes; everything else in it talks to a Unix socket. |
+| `channel` | `"stable"` \| `"dev"` | `"stable"` | both | Which releases count as newer. `dev` includes the prereleases cut from `develop`. |
 | `declined_version` | string | unset | client | A release you answered **no** to. Written by the prompt, not by you. |
 | `allow_remote` | bool | `false` | daemon | Let a client attached to this daemon make it update *itself* — `POST /v1/update`, and `butai update --daemon` on top of it. |
+
+**The two channels are two sets of tags, not two ways of asking.** A version
+with a prerelease identifier — the `-` in `1.3.0-dev.1` — is cut from `develop`
+and published as a GitHub prerelease; a bare one is cut from `main`. GitHub
+keeps a prerelease out of `releases/latest`, which is the single question
+`stable` asks, so a stable install cannot be offered a dev build even by
+accident. `dev` reads the release list instead and takes the highest version in
+it — prereleases compare properly there, so `1.3.0-dev.10` is ahead of
+`1.3.0-dev.9`, and the `1.3.0` they were leading to is ahead of both. A dev
+install therefore ends up on stable when stable catches up, which is the same
+build by then.
+
+It belongs to the install rather than the machine, and lands here because the
+config is the only per-install thing there is: a dev butai run with its own
+`BUTAI_HOME` carries this key in its own `config.toml`, and the stable one
+beside it never reads that file. Installing a dev build does not set it —
+`scripts/install.sh` prints the two lines to add. SETTINGS → ABOUT → **release
+channel** writes them for you.
+
+`butai update --daemon` and `POST /v1/update` follow the channel configured on
+the machine the *daemon* is on, not the client's. The daemon is the thing being
+replaced, and its track is a property of the install there.
 
 **`allow_remote` is off by default, and the default is the interesting half.**
 The socket's only access control is the `0700` on its directory, and over an
@@ -483,6 +513,61 @@ asks the far machine where its daemon listens (`butai ls` to make one exist, the
 A block with neither `host` nor `socket` is skipped by both paths and does
 nothing.
 
+### `[views]`
+
+Which space each workspace was last looking at, so going to a workspace goes to
+the view it was left on. Written by the workbench, not by hand.
+
+| Key | Type | Default | Read by | What it changes |
+|---|---|---|---|---|
+| `"<machine>:<path>"` | string | unset | client | The space that workspace opens on: one of `agents`, `files`, `git`, `docker`, `docs`, `usage` — the words the space buttons carry. A workspace with no line here opens on whatever space you arrived with. |
+
+```toml
+[views]
+"local:/media/nvme/Projects/butai" = "git"
+"gpu-box:/srv/diffusion" = "files"
+```
+
+The key is a machine and a directory. `local` is this machine's own daemon, the
+name BOOTH's compute column gives it; anything else is a machine's tab badge, so
+the same path checked out on a laptop and on `gpu-box` is two workspaces with
+two answers. It is not a workspace id: a daemon hands those out fresh every time
+it starts, and a remembered page would come back attached to whichever project
+was numbered `1` that morning. Trailing and doubled slashes are trimmed; `~` and
+symlinks are not resolved, because the path may be on a machine whose `$HOME`
+and whose links are not this one's — in practice the daemon has already
+canonicalised the directory before the client ever sees it.
+
+Six properties are worth knowing:
+
+- **BOOTH, SETTINGS and HELP are never stored**, and neither is DIFF. None of
+  them is a view of a workspace, so none is an answer to "where was this project
+  left" — landing in the settings page because that is where you were when you
+  last left a project would be exactly wrong. A line that says one anyway is
+  ignored, as is a space name from a newer butai: an unknown word costs that one
+  line, never the file.
+- **The table is capped at 64 entries**, oldest first, and a visit moves a
+  project to the back of the queue. So it is the projects you have not looked at
+  in longest that fall off, and opening something once does not leave a line in
+  the file forever.
+- **A page change is written about two seconds later**, not on the keypress —
+  `alt-o` and the cycle keys would otherwise be a file rewrite each. Leaving a
+  workspace and leaving the workbench both write immediately, so nothing waits
+  on a clock that a detach would beat. A `SIGTERM` inside those two seconds
+  loses that one change: a signal handler can put a terminal back, but it cannot
+  write a config file.
+- **A write that fails stays owed.** A config file is unwritable for ordinary
+  and temporary reasons — a full disk, an editor holding it — and the line is
+  still true when it comes back, so it is kept and tried again on a backoff that
+  doubles from five seconds to five minutes rather than being dropped. Nothing
+  is said about it on screen either way: nobody asked for this write, and a
+  read-only home directory must not put a sentence over the footer every time
+  you change page.
+- **Two clients do not erase each other.** Each writes the one line it is about,
+  like every other key here.
+- **Nothing here changes what the daemon does.** A space is chrome, and the
+  daemon draws none.
+
 ### Keys that are no longer read
 
 An old config keeps loading — unknown keys are ignored, never rejected — but
@@ -519,7 +604,19 @@ autostart = ["claude"]
 | `[[processes]] name` | string | *required* | The row's label in the PROCESSES rail. |
 | `[[processes]] cmd` | string | *required* | Run through the workspace shell's `-c`, in the workspace directory. That is `[general] default_shell`, then `$SHELL`, then `/bin/sh` — the same resolution a shell pane uses. |
 | `[[processes]] ready` | string | unset | A **case-sensitive substring** of the process's output that flips the row's status to `ok`. Matched against the raw output stream, across burst boundaries. |
-| `[agents] autostart` | list of strings | `[]` | `[[agents]]` names spawned into the AGENTS rail when the workspace opens, in order. |
+| `[agents] autostart` | list of strings | `[]` | `[[agents]]` names spawned into the AGENTS rail when the workspace opens, in order. **Also what this project's agent *is***: BOOTH's `a` and its `[+ NAME]` button start the first entry, so a project that autostarts `claude` needs no client configuration to offer it. |
+
+**`autostart` is a declaration, not just an instruction.** It is published on the
+workspace (`WorkspaceSummary.autostart`, and the detail record too) and kept after
+the file has been acted on, because "which agent does this project use" is a
+question a client needs answered whenever it offers to start one — not only at
+open. The daemon publishes the list; each client decides what to do with it, the
+same split `net` and `disks` already make.
+
+That is also why the per-project preference lives *here* rather than in the
+client's own config: this file travels with the project to whichever machine it
+runs on, and it is shared with whoever else opens it. A client-side pin keyed by
+directory would be none of those things.
 
 `name` and `cmd` are required in the same sense `[[agents]]`' are: a block
 missing either fails the *whole file's* parse, so one typo costs you every
@@ -567,10 +664,12 @@ exactly as it was.
 | SETTINGS → ABOUT → check for updates, `space` | `[update] check` |
 | Answering **no** to the update prompt | `[update] declined_version` (that release only; `esc` writes nothing and asks again next launch) |
 | SETTINGS → WORKBENCH size rows (`-`/`+`/`0`), or leaving `alt-l` LAYOUT mode | all four `[ui]` keys; a height cleared to automatic is removed rather than written |
-| the machines button (`alt-h`), once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
-| Disconnecting a machine (`alt-h`, or the tab's row menu) | removes that `[[remote]]` block |
+| the machines button (`alt-h`), or SETTINGS → MACHINES → **add a machine**, once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
+| Disconnecting a machine (`alt-h`, the tab's row menu, or SETTINGS → MACHINES → **disconnect**) | removes that `[[remote]]` block |
+| SETTINGS → MACHINES → **forget**, on a configured machine that is not connected | removes that `[[remote]]` block — the half of a disconnect that is left over when there is no link to drop |
+| Changing space (`alt-o`, `alt-,`/`alt-.`, the spaces menu, a space button), about two seconds later — and at once when you leave the workspace or the workbench | one line of `[views]`, for the workspace you are in |
 
-Four properties of those writes are load-bearing:
+Six properties of those writes are load-bearing:
 
 - **There is no Save button.** A change applies and is written when you make it,
   which is what the client already does everywhere else.
@@ -586,7 +685,19 @@ Four properties of those writes are load-bearing:
 - **A `[[remote]] socket` block is never forgotten.** It is somebody else's
   forward — the client has no ssh under it to kill — so a disconnect leaves it
   alone however its badge reads. Forgetting a machine that was never remembered
-  is a silent no-op that does not even create a config file.
+  is a silent no-op that does not even create a config file. SETTINGS → MACHINES
+  still offers **forget** on one, because the block is ours to remove even when
+  the forward under it is not.
+- **SETTINGS → MACHINES → connect writes nothing**, which is not an omission.
+  The row is offered only on a machine that already *has* a `[[remote]]` block —
+  that block is why the client knows the machine exists to be dialled — and the
+  dial goes through the same remember the machines button uses, which is
+  idempotent by `host`. So connecting a machine you already configured re-dials
+  it and leaves the file exactly as it was, `name` and `ssh_args` included.
+- **The MACHINES row that writes no config at all is `update`.** It is a request
+  to the daemon on that machine — `POST /v1/update` — and whether that machine
+  will take it is decided by [`[update] allow_remote`](#update) in *its* own
+  `config.toml`, not by anything the client can write from here.
 
 The one thing the SETTINGS page does *not* write is the role overrides sitting
 beside `name` in `[theme]`: a page that also rewrote `accent = "#ff8800"` would
@@ -600,6 +711,8 @@ be silently discarding something the file's owner typed on purpose.
 | `[general] prefix`, `[keys]`, `[theme]`, `[ui]`, `[[remote]]` | the next client start — with the exceptions below |
 | `[theme] name` | live from the SETTINGS page, which applies each palette as the cursor passes it and puts the old one back if you leave without choosing |
 | `[general] default_agent`, `remote_auto_attach`, `[ui]`, `[update] check` | live when *you* change them in the client; a hand edit needs a restart |
+| `[[remote]]` | dialled at the next client start, as above — but SETTINGS → MACHINES re-reads the blocks off disk when you first open the page, on `r`, and after each of its own `disconnect` and `forget` writes, so the section is never listing a machine the file has stopped naming |
+| `[views]` | read once at client start and kept in memory from then on, so a hand edit — or another client's write — needs a restart to be seen |
 
 `:reload-config` is a command to the daemon and reloads the daemon's half only —
 re-reading the file and replacing the config the daemon holds, with any parse
@@ -646,21 +759,23 @@ file fell back to defaults, and something said so".
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `BUTAI_SOCKET` | everything | The daemon socket. `--socket` beats it; it is exported into every pane, and passed to a daemon the client auto-spawns. |
+| `BUTAI_HOME` | everything | Moves `~/.butai` whole — socket, lock, config, themes, logs, `session.json`, `panes/`, `scratch/`. `$HOME` is untouched, so ssh config, shell profile and your repositories stay where they are. Panes inherit it. Empty is not an override. This is how a build off a branch runs beside the butai you use; see [development.md](development.md#running-a-second-daemon). |
+| `BUTAI_SOCKET` | everything | The daemon socket. It is exported into every pane, and passed to a daemon the client auto-spawns. Precedence: `--socket` beats `BUTAI_HOME` beats this — because this is the one that is routinely *inherited* rather than typed, so a `BUTAI_HOME=… butai` run inside a pane must not be answered with the enclosing daemon's socket. |
 | `BUTAI_WORKSPACE` | the CLI | Default for `--ws`. Exported into every pane, so a command run inside butai acts on its own workspace. |
 | `BUTAI_PANE` | the CLI | Which pane a command is running in. Its *absence* is the test for "not inside butai" — there is no separate marker variable. |
 | `BUTAI` | the client | Set in every pane to the daemon's socket; the nesting guard compares it against the socket being attached to, so attaching a *different* daemon from inside a pane is still allowed. |
 | `BUTAI_THEME_DIR` | client | Overrides `~/.butai/themes`. |
-| `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this. |
+| `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this, or `BUTAI_HOME`, which takes it along. |
 | `BUTAI_NO_UPDATE_CHECK` | client | Non-empty and not `0` stops the update check entirely, whatever `[update] check` says. For a butai a package manager owns. |
 | `BUTAI_NO_HANDOFF` | the CLI | Non-empty and not `0` stops bare `butai` over ssh from handing its machine to the workbench you are already looking at. |
 | `SSH_CONNECTION` | the CLI | Its presence (plus a tty) is what makes that handoff probe run at all, so a local `butai` never pays for it. |
 | `SHELL` | daemon | Fallback shell when `default_shell` is unset. |
 | `RUST_LOG` | daemon | `tracing` filter for `~/.butai/logs/`; defaults to `info`. |
-| `HOME` | both | Resolves `~/.butai`, and the login `bin` directories added to a pane's `PATH`. |
+| `HOME` | both | Resolves `~/.butai` when `BUTAI_HOME` is unset, and the login `bin` directories added to a pane's `PATH`. |
 | `XDG_RUNTIME_DIR` | client, CLI | Where ssh forward sockets and the `butai standalone` socket directory go; falls back to the system temp directory. |
 | `TERM`, `COLORTERM` | — | *Set* by the daemon for every pane's child: `xterm-256color` and `truecolor`. |
-| `BUTAI_VERSION`, `BUTAI_INSTALL_DIR` | `scripts/install.sh` | Install a specific tag, or install somewhere other than `/usr/local/bin` → `~/.local/bin`. |
+| `BUTAI_VERSION`, `BUTAI_INSTALL_DIR` | `scripts/install.sh` | Install a specific tag, or install somewhere other than `/usr/local/bin` → `~/.local/bin`. `BUTAI_VERSION` is the only way to reach a dev prerelease, which the installer never finds on its own. |
+| `BUTAI_DEV_HOME` | `scripts/vet.sh` | Where `--run` keeps its state; default `~/.butai-dev`. |
 
 ## Examples
 
@@ -694,7 +809,7 @@ remote_auto_attach = true      # let `butai` over ssh pull its machine into the 
 option_as_alt = true           # macOS: read Option-composed characters as Alt
 
 # ── agents ─────────────────────────────────────────────────────────────────
-# Declaring any block replaces the five built-ins entirely.
+# Declaring any block replaces the six built-ins entirely.
 
 [[agents]]
 name = "claude"

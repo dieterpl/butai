@@ -577,7 +577,14 @@ export function mergeWorkspaces(
     const w = have.get(s.id);
     if (w) {
       // Identity can change under us (a rename); rails cannot come from here.
-      return Object.assign({}, w, { name: s.name ?? w.name, cwd: s.cwd ?? w.cwd });
+      // `autostart` rides the summary as well as the detail, so a project
+      // names the agent it starts from the first `workspaces` event — before
+      // any detail for it has arrived.
+      return Object.assign({}, w, {
+        name: s.name ?? w.name,
+        cwd: s.cwd ?? w.cwd,
+        autostart: s.autostart ?? w.autostart ?? [],
+      });
     }
     return {
       id: s.id,
@@ -589,6 +596,7 @@ export function mergeWorkspaces(
       changes: null,
       stage: null,
       attached_clients: s.attached_clients || 0,
+      autostart: s.autostart || [],
       pending: true,
     };
   });

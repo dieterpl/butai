@@ -158,7 +158,8 @@ butai pane read $P --lines 40
 
 `spawn` prints the bare pane id, so it assigns straight into a variable, and
 `--background` leaves the stage where the human left it. Configured agent types
-come from `[[agents]]` (`claude`, `codex`, `gemini`, `aider`, `agy` by default);
+come from `[[agents]]` (`claude`, `codex`, `gemini`, `opencode`, `aider`, `agy`
+by default);
 `butai --json agent ls` and `GET /v1/agents` both list them.
 
 `--prompt` folds the first two lines into one, which is the shape an

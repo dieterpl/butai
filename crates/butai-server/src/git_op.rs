@@ -27,7 +27,6 @@ use std::time::Duration;
 use butai_protocol::api::{GitOp, RepoState, ResetMode, SequenceAction};
 use butai_protocol::SessionId;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -552,7 +551,7 @@ async fn run(
     op: &GitOp,
     mut cancel: oneshot::Receiver<()>,
 ) -> OpResult {
-    let mut cmd = Command::new("git");
+    let mut cmd = butai_protocol::local::background_async_command("git");
     cmd.arg("-C").arg(root).arg("--no-pager");
     // `core.askPass` in the user's config overrides the GIT_ASKPASS env var, so
     // clearing the variable alone would not close the door.

@@ -592,6 +592,7 @@ What each configured CLI can answer, and why:
 |---|---|---|
 | `claude` | `metered` | caches the provider's own limits in `~/.claude.json`. Falls back to `counted` from `~/.claude/projects/**.jsonl` before it has ever written them, or once that cache has outlived every window it names |
 | `gemini` | `counted` | publishes no ceiling on disk, but every assistant turn in `~/.gemini/tmp/*/chats/*.json` carries its token counts |
+| `opencode` | `unknown` | can use several providers or OpenCode's own account, and butai does not read either provider credentials or its usage database |
 | `agy` | `unknown` | **has** a quota and never writes it down — fetched per run into an in-memory cache — and its sessions record no per-turn cost, so there is nothing to total instead |
 | `aider` | `no_account` | runs on your own API key; the provider bills you directly and there is no account limit to report |
 | anything else | `unknown` | installed, and butai does not know where it keeps its numbers |
@@ -881,4 +882,3 @@ informative**: a daemon that does not send it predates the field, and so is olde
 than any client able to look. Clients are encouraged to say so plainly; the TUI
 puts "daemon is 0.8.0, client is 0.9.0 — restart it" in the footer, because the
 alternative is the user hunting for five bugs that are all one stale process.
-

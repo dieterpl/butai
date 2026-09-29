@@ -49,7 +49,7 @@ usage: run.sh [smoke|standard|soak] [options]
   soak      long     adds drift detection (see --minutes)
 
 Options:
-  --real-agents     build the layer that installs claude/codex/gemini/aider and
+  --real-agents     build the layer that installs claude/codex/gemini/opencode/aider and
                     run against them (credentials are read from the environment;
                     tests skip cleanly when they are absent)
   --filter PATTERN  only run tests matching a name, module or tag (repeatable)

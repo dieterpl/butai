@@ -12,6 +12,7 @@ pub mod api;
 pub mod b64;
 pub mod framing;
 pub mod hunk;
+pub mod local;
 pub mod names;
 pub mod paths;
 

@@ -38,11 +38,15 @@ pub async fn apply(staged: &Staged, socket: &Path) -> Result<()> {
 /// daemon has finished writing its session snapshot and closing the socket, and
 /// a new client that connects in that window attaches to the *old* build on its
 /// way out — the version skew this whole feature exists to end.
-async fn stop_daemon(socket: &Path) -> Result<()> {
+///
+/// Public because the workbench stops a daemon for the other reason: not to
+/// replace the binary, but because the one running is already a different build
+/// from the client. Same window, same trap.
+pub async fn stop_daemon(socket: &Path) -> Result<()> {
     // Nothing listening: there is no daemon to stop, and asking would start
     // one, because `control_request` connects-or-spawns like every other
     // client call.
-    if tokio::net::UnixStream::connect(socket).await.is_err() {
+    if butai_protocol::local::LocalStream::connect(socket).await.is_err() {
         return Ok(());
     }
 
@@ -57,7 +61,7 @@ async fn stop_daemon(socket: &Path) -> Result<()> {
 
     let deadline = tokio::time::Instant::now() + DAEMON_EXIT_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
-        if tokio::net::UnixStream::connect(socket).await.is_err() {
+        if butai_protocol::local::LocalStream::connect(socket).await.is_err() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

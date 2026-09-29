@@ -103,6 +103,16 @@ pub struct Workspace {
     /// small and reflowed the moment it is staged — a program that reads its
     /// window size once, at startup, only gets one chance.
     pub stage_size: Option<(u16, u16)>,
+    /// What this project's own `.butai.toml` says it starts, verbatim and in
+    /// order — `[agents] autostart`.
+    ///
+    /// Kept after the file has been acted on, because it is a *declaration*
+    /// rather than a one-time instruction: it is the answer to "which agent
+    /// does this project use", which a client needs whenever it offers to start
+    /// one, not only at open. Published on [`WorkspaceSummary`] and left
+    /// unfiltered — whether a name still exists in the agent list is the
+    /// client's to notice, the same way it decides which interfaces to draw.
+    pub autostart: Vec<String>,
 }
 
 impl Workspace {
@@ -119,6 +129,7 @@ impl Workspace {
             changes: None,
             stage: None,
             stage_size: None,
+            autostart: Vec::new(),
         }
     }
 

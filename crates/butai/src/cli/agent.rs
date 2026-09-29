@@ -49,7 +49,7 @@ pub enum AgentCmd {
     },
     /// Start an agent, printing its new pane id
     Spawn {
-        /// Agent type, as configured (claude, codex, gemini, aider, …)
+        /// Agent type, as configured (claude, codex, gemini, opencode, aider, …)
         kind: String,
         /// Do not take the stage — leave the human's view where it is
         #[arg(long)]

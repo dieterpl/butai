@@ -2,8 +2,9 @@
 
 Working on butai itself: what is in the tree, what the toolchain is pinned to,
 every check CI runs and the command that reproduces it locally, the three test
-layers and how to add to each, how to run a daemon that cannot touch your real
-one, and how a release is cut.
+layers and how to add to each, how the branches and the two release tracks fit
+together, how to run a second daemon without disturbing your own, and how a
+release is cut.
 
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md) is the short front door — the layout
 sketch and the three commands to run before a pull request. This page is the
@@ -22,7 +23,7 @@ web/                   browser client (TypeScript/React/Vite) + its Bun bridge
 testsuite/             the Docker suite: a real binary, real PTYs, real apps
 docs/                  this manual
 examples/              standalone samples: an API client, themes
-scripts/               release.sh, install.sh, screenshot tooling
+scripts/               vet.sh, cut.sh, release.sh, install.sh, screenshot tooling
 .github/workflows/     ci.yml, release.yml
 ```
 
@@ -81,8 +82,8 @@ follows cargo's own rules.
 each other — a lint failure must not hide an API regression, and a broken
 testsuite must not hide a web client nobody can load.
 
-Triggers: push to `main`, every pull request, a nightly `cron: "0 3 * * *"`, and
-`workflow_dispatch`. `RUSTFLAGS: "-D warnings"` is set for the whole workflow,
+Triggers: push to `main` or `develop`, every pull request, a nightly
+`cron: "0 3 * * *"`, and `workflow_dispatch`. `RUSTFLAGS: "-D warnings"` is set for the whole workflow,
 so warnings are errors in every job that compiles.
 
 | Job | Runs | Reproduce locally |
@@ -96,7 +97,7 @@ so warnings are errors in every job that compiles.
 | `targets` | `cargo`/`cross check --release --target <t> -p butai`, seven targets | `TARGETS="x86_64-unknown-linux-musl" scripts/release.sh`, or the `check` by hand |
 
 The `docker` job picks its profile from the event: `smoke` on a pull request,
-`standard` on a push to `main`, `soak --minutes 25` on the nightly schedule. It
+`standard` on a push to a branch, `soak --minutes 25` on the nightly schedule. It
 uploads `testsuite/out/` as an artifact whatever the outcome.
 
 The `targets` job runs **only** on the schedule or a manual dispatch. Its
@@ -368,16 +369,52 @@ When you probe a PTY, wait on the *effect*, not on the text you typed —
 `test_00_daemon.py`'s `caret_at(app, label, prev=...)` is the pattern: sample
 until the value **changes**.
 
-## Running a daemon in isolation
+## Running a second daemon
 
 A daemon on the default paths restores the user's real session and will spawn
-their agents and processes. Isolating one is cheap, and there are four rules.
+their agents and processes. There are two reasons to stand up another one, and
+they want different tools — the difference is whether you mean to *use* it.
+
+### A butai you mean to use: `BUTAI_HOME`
+
+Trying a build against real work is the case `BUTAI_HOME` exists for. It moves
+`~/.butai` and nothing else:
+
+```sh
+BUTAI_HOME=~/.butai-dev target/release/butai
+```
+
+That daemon gets its own socket, lock, config, themes, logs, `session.json` and
+`panes/`, and keeps your real `$HOME` — ssh config, shell profile, git identity,
+and the repositories you actually work in. Your own butai keeps running beside
+it; the two never meet, because they are not looking at the same socket.
+
+It is read in one place, [`paths::butai_dir`](../crates/butai-protocol/src/paths.rs),
+so every path in the module follows it at once. That is the point of putting it
+there: no combination of variables can leave a daemon with one butai's socket
+and another's session store. Panes inherit it — a pane starts from a snapshot of
+the daemon's environment — so `butai` shelled out inside a dev pane reaches the
+dev daemon, not the real one.
+
+Empty is not an override. `BUTAI_HOME=` from a profile that exports it
+unconditionally means "no opinion", not "the working directory".
+
+`scripts/vet.sh --run` does all of this for you, including seeding
+`~/.butai-dev` with a **copy** of your real `config.toml` and `themes/` — a copy
+and not a symlink, because the client writes back to `config.toml` and a build
+you are still vetting should not be able to edit the one your real butai reads.
+
+### A daemon that must touch nothing: `HOME`
+
+A test daemon is the other case, and there `BUTAI_HOME` is not enough: the point
+is a machine-shaped sandbox, not just butai's share of one. Four rules.
 
 **1. Give it its own `HOME`.** Everything butai reads or writes outside a
 project lives under `~/.butai` — socket, lock, config, logs, session store, pane
-dumps — so one environment variable isolates all of it. That is exactly what
-`suite/daemon.py` does, and it is why a dozen differently-configured daemons can
-run side by side in one container.
+dumps — so one environment variable isolates all of it, along with everything
+*else* the process might reach for. That is exactly what `suite/daemon.py` does,
+and it is why a dozen differently-configured daemons can run side by side in one
+container.
 
 **2. Set `BUTAI_SOCKET` explicitly.** This is the one that bites. `BUTAI_SOCKET`
 is exported into **every pane the daemon creates**, so a shell you are running
@@ -388,9 +425,9 @@ together for this reason, and also clears `BUTAI` so the nesting guard is not
 confused by a stale value.
 
 ```sh
-export BUTAI_HOME=/tmp/bt
-mkdir -p "$BUTAI_HOME/.butai"
-HOME="$BUTAI_HOME" BUTAI_SOCKET="$BUTAI_HOME/.butai/butai.sock" \
+sandbox=/tmp/bt
+mkdir -p "$sandbox/.butai"
+HOME="$sandbox" BUTAI_SOCKET="$sandbox/.butai/butai.sock" \
   butai daemon &
 ```
 
@@ -399,22 +436,25 @@ and 108 on Linux, so a daemon whose `HOME` sits under a deep temp directory
 cannot bind at all. The suite budgets 100 bytes and fails with an actionable
 message; `temp_base()` prefers `/tmp` over `tempfile.gettempdir()` because the
 macOS default (`/var/folders/<hash>/<hash>/T`) is most of the budget on its own.
-`BUTAI_TEST_TMP` overrides it.
+`BUTAI_TEST_TMP` overrides it. `vet.sh` budgets the same 100 bytes before it
+starts a dev daemon.
 
 **4. Kill it by socket, never by pattern.**
 
 ```sh
-butai --socket /tmp/bt/.butai/butai.sock kill-server
+butai --socket /tmp/bt/.butai/butai.sock kill-server   # a sandbox
+BUTAI_HOME=~/.butai-dev butai kill-server              # a dev butai
 ```
 
 `pkill -f "butai daemon"` matches the user's real daemon too.
 
 Two more knobs are worth knowing. `BUTAI_SESSION_FILE` overrides
-`~/.butai/session.json` and takes `panes/` and `scratch/` with it — deliberately
-*not* keyed off `BUTAI_SOCKET`, so a second daemon on a custom socket shares the
-real session store unless you set it. And `exit_when_empty` ships **on**:
-closing the last workspace stops the daemon, which is right for a person and
-surprising in a test, so the suite's `Config` turns it off.
+`~/.butai/session.json` on its own and takes `panes/` and `scratch/` with it —
+deliberately *not* keyed off `BUTAI_SOCKET`, so a second daemon on a custom
+socket shares the real session store unless you set it, or set `BUTAI_HOME`,
+which takes it along. And `exit_when_empty` ships **on**: closing the last
+workspace stops the daemon, which is right for a person and surprising in a
+test, so the suite's `Config` turns it off.
 
 The web bridge has the same trap in a different shape: `BUTAI_SOCKETS` on its
 own is not isolation, because `BUTAI_SOCKET` has a default and the bridge will
@@ -510,10 +550,138 @@ and the rules that will matter are the ones about hooks; until it lands, the
 compiler and the tests are the whole gate. CI's `web` job runs `typecheck`,
 `test` and `build` after `bun install --frozen-lockfile`, and nothing else.
 
+## Branches, and the two release tracks
+
+Work happens on feature branches. They land on `develop`, and `develop` lands on
+`main` when it is worth a stable release.
+
+```
+feat/x ──PR──▶ develop ──tag v1.3.0-dev.1──▶ prerelease   (dev track)
+                  │
+                  └──merge──▶ main ──tag v1.3.0──▶ release (stable track)
+```
+
+`main` moves **only** for a stable release, and that is not tidiness. The
+install line in the README fetches `scripts/install.sh` from `main` by raw URL,
+so whatever is on `main` is what a stranger's `curl | sh` runs today. A branch
+you can break is a branch that cannot also be that.
+
+**One tag shape decides the track**, and it decides it by itself: a prerelease
+identifier — the `-` in `1.3.0-dev.1`, as semver defines it. `release.yml` reads
+the tag rather than the branch, because a tag is a commit and by publish time
+there is nothing left to ask about where it was cut. A prerelease is published
+with `--prerelease`, and that one flag is the whole separation:
+
+- GitHub keeps a prerelease out of `releases/latest`.
+- `releases/latest` is the only endpoint `crates/butai-update` asks
+  ([`check`](../crates/butai-update/src/lib.rs)) and the one
+  `scripts/install.sh` reads.
+
+So a dev tag is invisible to every stable install without either of them
+filtering anything, and no stable user is ever offered a build off `develop`.
+Reaching one is deliberate.
+
+### Installing the dev track
+
+Two things, and they are separate: which build gets installed, and which track
+that build then follows.
+
+```sh
+# a second butai, on the dev track, beside the one you use
+BUTAI_CHANNEL=dev \
+BUTAI_INSTALL_DIR=~/.butai-dev/bin \
+BUTAI_NO_RESTART=1 \
+  curl -fsSL https://raw.githubusercontent.com/dieterpl/butai/main/scripts/install.sh | sh
+
+# ~/.butai-dev/config.toml
+[update]
+channel = "dev"
+
+BUTAI_HOME=~/.butai-dev ~/.butai-dev/bin/butai
+```
+
+`BUTAI_CHANNEL=dev` reads the release *list* instead of `releases/latest` and
+takes the newest prerelease; `BUTAI_VERSION=v1.3.0-dev.1` still names one
+exactly. `BUTAI_NO_RESTART=1` matters when the install is a second butai: the
+installer stops the daemon it is replacing, and without `BUTAI_HOME` set in that
+same shell the daemon it would stop is your real one.
+
+`[update] channel` is what keeps it there. It is read by **both** halves — the
+client for the binary a person runs, the daemon for `POST /v1/update` — and it
+lives in the config of whichever `BUTAI_HOME` the install uses, which is what
+makes it per-install rather than per-machine. `dev` compares prereleases
+properly (`1.3.0-dev.10` is ahead of `1.3.0-dev.9`, and `1.3.0` is ahead of
+both), so a dev butai keeps up with `develop` on its own. The stable install
+beside it never sees any of it.
+
+A dev install is also how a *remote* machine gets one — the useful case, since a
+workbench attached over `ssh host butai proxy` is talking to a daemon on the far
+side, and the far side is the one that has to be running the code you are
+testing. `butai update --daemon` then follows the channel configured **there**,
+which is the point: the daemon is the thing being replaced.
+
+For iterating on your own commits, none of this is needed — `scripts/vet.sh
+--run` builds the working tree and runs it on `~/.butai-dev` with no release in
+sight. The dev track is for builds that have to reach a machine you are not
+building on.
+
+### Vetting a branch: `scripts/vet.sh`
+
+```sh
+scripts/vet.sh                 # this tree, uncommitted changes and all
+scripts/vet.sh feat/x          # a branch, in a worktree of its own
+scripts/vet.sh feat/x --run    # ...and leave a daemon up on it to drive
+scripts/vet.sh --full          # the standard testsuite instead of smoke
+```
+
+It runs every check CI runs — `cargo fmt --check`, `clippy` and `test` under
+`-D warnings`, the generated-bindings diff, the four `bun` steps, and
+`testsuite/run.sh` — reporting each as passed, failed or skipped, and skipping
+cleanly when a tool is absent rather than failing on it. A named branch is
+checked out `--detach` into a throwaway worktree; no argument means this tree,
+which is the case worth optimising for, since what you most want to vet is
+usually what you have not committed yet. `CARGO_TARGET_DIR` is shared across
+runs so the second one is incremental.
+
+`--run` is the step CI cannot do for you: it builds the branch and starts a
+daemon on it under `BUTAI_HOME=~/.butai-dev`, seeded once with a copy of your
+real `config.toml` and `themes/`. See
+[Running a second daemon](#running-a-second-daemon) for what that isolates and
+what it deliberately does not.
+
+### Cutting one: `scripts/cut.sh`
+
+The version lives in four places in the root `Cargo.toml` — `[workspace.package]
+version` and the three internal `butai-*` pins under `[workspace.dependencies]`,
+which carry a `version` beside their `path` so `cargo publish` has something to
+rewrite. Four strings that must agree, edited by hand, is how a release goes out
+with a crate still pinned to the last one.
+
+```sh
+scripts/cut.sh 1.3.0-dev.1     # on develop
+scripts/cut.sh 1.3.0           # on main
+```
+
+It rewrites all four, runs `cargo check` to refresh `Cargo.lock`, and stops
+there — committing and tagging are yours, because they are the two steps that
+are hard to take back. It prints the exact three commands to finish the job, and
+warns (without refusing) if the version's track and the branch you are on
+disagree.
+
 ## Cutting a release
 
-The version lives in one place, `[workspace.package] version` in the root
-`Cargo.toml`, and both build paths read it from `cargo metadata`.
+Both tracks build the same seven artifacts from the same workflow; only the
+label differs. See [Branches, and the two release tracks](#branches-and-the-two-release-tracks)
+for which tag goes where, and use `scripts/cut.sh` to set the version rather
+than editing four strings by hand.
+
+The version lives in one place as far as the *build* is concerned,
+`[workspace.package] version` in the root `Cargo.toml`, and both build paths
+read it from `cargo metadata`. A prerelease version — `1.3.0-dev.1` — flows
+through unchanged: the tarball is `butai-1.3.0-dev.1-<triple>.tar.gz`, which is
+also what `butai_update::asset_name` asks for, since it is built from
+`CARGO_PKG_VERSION`. The two halves cannot disagree as long as the tag and the
+manifest say the same thing, which is what `cut.sh` is for.
 
 **The target matrix** — seven targets, kept in sync between
 `.github/workflows/release.yml`, `scripts/release.sh` and the install table in
@@ -560,6 +728,14 @@ links but dies on startup. The `publish` job downloads every artifact, computes
 `SHA256SUMS`, and runs `gh release create` with `--generate-notes`. It is gated
 on `startsWith(github.ref, 'refs/tags/v')`, so a `workflow_dispatch` run builds
 the whole matrix and publishes nothing — that is the dry run.
+
+A prerelease tag takes two different turns in the `publish` job. Its notes come
+from `## [Unreleased]` rather than from a section named for the version, and a
+thin one is not fatal — a dev tag is a build you cut to try something, and
+failing the publish over its notes would only mean the binaries you wanted never
+got built. A stable tag with no changelog section still fails, deliberately:
+that one is an announcement, and shipping it with nothing written down is a
+mistake worth stopping for.
 
 **What `scripts/install.sh` expects of a release**, since it is the consumer:
 
@@ -611,6 +787,7 @@ Four conventions, and they are enforced by habit rather than by a linter:
 | Registration, `xfail`/`XPASS`, timeouts, `ctx` methods, coverage enforcement | `testsuite/suite/runner.py` |
 | The enumerated API surface a run is checked against | `testsuite/suite/coverage.py` |
 | Isolated `HOME`, `BUTAI_SOCKET`, socket-path budget, `Config` defaults | `testsuite/suite/daemon.py` |
+| `BUTAI_HOME` reaching panes by inheritance | `crates/butai-server/src/pane/terminal.rs` |
 | Real PTY, the reconstructed screen, the contiguous-bytes trap | `testsuite/suite/tty.py` |
 | Client-side frame application and display width | `testsuite/suite/screen.py` |
 | Fake agent driver, phases, repaint rules | `testsuite/fakeagents/_lib.sh` |
@@ -623,7 +800,11 @@ Four conventions, and they are enforced by habit rather than by a linter:
 | The bridge | `web/server/`, `web/README.md` |
 | The `ts` feature, the derives, and where the bindings are written | `crates/butai-protocol/Cargo.toml`, `crates/butai-protocol/src/api.rs`, `.cargo/config.toml` |
 | The generated TypeScript itself | `web/src/protocol/generated/protocol.ts` |
-| Release matrix, packaging, publishing | `.github/workflows/release.yml` |
+| Release matrix, packaging, publishing, the prerelease turn | `.github/workflows/release.yml` |
 | Local release builds, builder selection, checksums | `scripts/release.sh` |
 | Asset names, triple detection, install directory | `scripts/install.sh` |
+| The branch gate, its steps and the dev daemon it starts | `scripts/vet.sh` |
+| Setting the version across the manifest | `scripts/cut.sh` |
+| `BUTAI_HOME` and every path derived from it | `crates/butai-protocol/src/paths.rs` |
+| Which release the updater asks for, and how versions compare | `crates/butai-update/src/lib.rs` |
 | Documentation conventions and the page index | `docs/README.md` |

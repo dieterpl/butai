@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! End-to-end tests for the HTTP/REST facade served on the same Unix socket
 //! as the framed protocol (the "Docker-style" API). Drives it exactly as a
 //! `curl --unix-socket` client would, including exercising the first-byte

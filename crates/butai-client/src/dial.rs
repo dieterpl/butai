@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use butai_protocol::{names, AttachTarget, Encoding, ServerMsg};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 use crate::conn::{connect_existing, hello, into_transport, Transport};
 
@@ -68,11 +68,11 @@ pub const NOT_INSTALLED: &str = "butai-not-installed";
 /// Deliberately *not* `nc -U` or `socat`: `butai proxy` means nothing extra has
 /// to be installed on the far host, which matters because some distributions
 /// (Raspberry Pi OS, for one) ship no `nc -U` at all.
-fn remote_cmd() -> String {
+pub(crate) fn remote_cmd() -> String {
     format!(r#"{}; exec "$BUTAI" proxy"#, find_binary())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod find_butai_tests {
     /// Run the fragment against a directory holding `names`, and report what it
     /// put in `$BUTAI`.
@@ -328,7 +328,7 @@ pub fn ssh_transport(
     socket: Option<&std::path::Path>,
     encoding: Encoding,
 ) -> Result<Dialed> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = butai_protocol::local::background_async_command("ssh");
     // No tty: we speak a binary protocol over this stdio, and a pty would both
     // echo and translate it. It also suppresses the login MOTD.
     cmd.arg("-T");
@@ -381,6 +381,7 @@ pub fn ssh_transport(
 /// hangs too, so even a deliberate reconnect could not get out. Three missed
 /// 15s probes end it in about 45 seconds, the `ControlPath` socket goes with
 /// it, and the next dial is a clean connection.
+#[cfg(unix)]
 pub fn control_master_opts() -> Vec<String> {
     let dir = butai_protocol::paths::butai_dir();
     // Best-effort: without the directory ssh just fails to make the control
@@ -421,6 +422,12 @@ fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
 }
 
+#[cfg(windows)]
+pub fn control_master_opts() -> Vec<String> {
+    // Windows OpenSSH does not support Unix control sockets/multiplexing.
+    vec!["ServerAliveInterval=15".into(), "ServerAliveCountMax=3".into()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +449,7 @@ mod tests {
         assert_eq!(shell_quote(std::path::Path::new("/tmp/it's")), r"'/tmp/it'\''s'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn control_path_stays_under_the_sockaddr_limit() {
         // `%C` is a 40-char hash, so the bound is the directory plus "/ssh-".

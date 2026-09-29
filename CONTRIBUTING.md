@@ -16,6 +16,18 @@ docs/              design notes, protocol spec, client handoff docs
 examples/          small standalone samples (e.g. an API client)
 ```
 
+## Branches
+
+Work on a feature branch and open a pull request against **`develop`**.
+`develop` is what gets merged to `main`, and `main` moves only when a stable
+release is cut — the README's install line fetches `scripts/install.sh` from
+`main` by raw URL, so whatever is there is what a stranger's `curl | sh` runs.
+
+`scripts/vet.sh` runs every check CI runs, against a branch or against your
+working tree, and `--run` then starts a daemon on that build under
+`BUTAI_HOME=~/.butai-dev` so you can try it against real work without touching
+the butai you use. See [`docs/development.md`](docs/development.md#branches-and-the-two-release-tracks).
+
 ## Rust
 
 The workspace pins a toolchain in `rust-toolchain.toml` (stable, with
@@ -71,6 +83,20 @@ butai's source. That is the whole of it.
 
 ## Releases
 
+Two tracks, one workflow, and the tag decides which:
+
+| Tag | Cut on | Published as |
+| --- | --- | --- |
+| `v1.3.0` | `main` | a stable release |
+| `v1.3.0-dev.1` | `develop` | a **prerelease** |
+
+A prerelease is kept out of GitHub's `releases/latest`, which is the only
+endpoint the self-updater and the installer read — so a dev build is never
+offered to anyone who did not ask for it by name
+(`BUTAI_VERSION=v1.3.0-dev.1`). Use `scripts/cut.sh <version>` to set the
+version; it rewrites all four places it appears in `Cargo.toml` and refreshes
+the lockfile, and leaves the commit and tag to you.
+
 Tagging `v*` runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which builds the binary for every supported target and uploads one tarball per
 target plus a `SHA256SUMS` file. To reproduce a release locally, run
@@ -98,7 +124,7 @@ than by searching, so the same fact does not end up written twice.
 | Process supervision, `ready`, restart, docker panes | [`docs/processes.md`](docs/processes.md) |
 | SSH, forwarded sockets, the fleet, qualified ids | [`docs/remote.md`](docs/remote.md) |
 | Anything a downstream embedder depends on | [`docs/embedding.md`](docs/embedding.md) |
-| Build, test, lint, CI, or the release matrix | [`docs/development.md`](docs/development.md) and this file |
+| Build, test, lint, CI, branches, or the release matrix | [`docs/development.md`](docs/development.md) and this file |
 | An error message a user can hit | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
 | Colour roles or theme loading | [`docs/theming.md`](docs/theming.md) |
 
@@ -115,6 +141,7 @@ isolated daemon, and the isolation rules there are not optional.
 
 ## Commits & pull requests
 
+- Branch off `develop`; open the pull request against `develop`.
 - Keep commits focused; write imperative subject lines (`add`, `fix`, `move`).
 - Describe the user-visible effect in the PR body, and note protocol changes.
 - Any change to the wire protocol must update [`docs/protocol.md`](docs/protocol.md).

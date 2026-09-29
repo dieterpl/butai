@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>butai · BOOTH terminal prototype</title>
+<style>
+:root{color-scheme:dark;background:#151a23;color:#dde4ef;font:14px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;padding:16px}#terminal{width:max-content;outline:none} .line{height:18px;white-space:pre;display:flex}.cell{display:inline-block;height:18px;white-space:pre;overflow:hidden;flex:none}.rule{color:#2b3547}.faint{color:#66738a}.accent{color:#7aa2f7}.good{color:#9ece6a}.danger{color:#f7768e}.selected{background:#1f2535}.chip{background:#7aa2f7;color:#151a23}.press{cursor:pointer}.press:hover{background:#1f2535;color:#7aa2f7}.press:focus-visible{outline:1px solid #7aa2f7;outline-offset:-1px}button{font:inherit;border:0;padding:0;background:none;color:inherit;text-align:left}.cursor{background:#dde4ef;color:#151a23}#measure{position:absolute;visibility:hidden;white-space:pre}#notice{color:#66738a;font:12px/18px ui-monospace,monospace;margin-top:8px} @media(max-width:700px){body{padding:8px}}
+</style>
+<span id="measure">0000000000</span>
+<main id="terminal" tabindex="0" aria-label="Interactive butai terminal prototype"></main>
+<div id="notice">PROTOTYPE · ! waiting · · idle · ✓ done · … working · j/k move · Enter open · a start agent · z fold · double-click machine/project name to fold · click COMPUTE machine for details</div>
+<script>
+const terminal=document.querySelector('#terminal');
+const hosts=[{name:'local',expanded:false,fold:false,cpu:18,ram:'13/32G',ramPct:42,disk:'281/460G',diskPct:61},{name:'studio',expanded:false,fold:false,cpu:7,ram:'16/64G',ramPct:26,disk:'184/932G',diskPct:20}];
+const projects=[{name:'butai',host:0,fold:false,agents:[{name:'claude',state:'waiting'},{name:'codex',state:'working'}]},{name:'website',host:0,fold:false,agents:[{name:'claude',state:'idle'}]},{name:'notes',host:0,fold:false,agents:[]},{name:'research',host:1,fold:false,agents:[{name:'codex',state:'working'}]}];
+let selected='a:0:0',page='booth',message='',rows=[],cw=8.4,tick=0;
+const sprite=a=>({waiting:' ! ',working:['.  ','.. ','...'][tick%3],idle:' · ',done:' ✓ '}[a.state]);
+const color=a=>a.state==='waiting'?'danger':a.state==='working'?'accent':'good';
+function seg(text,cls='',action,doubleAction){return {text,cls,action,doubleAction}}
+let lastClick=null;
+function activate(s){const now=Date.now();if(s.doubleAction&&lastClick?.action===s.text&&now-lastClick.time<400){lastClick=null;s.doubleAction();return}lastClick=s.doubleAction?{action:s.text,time:now}:null;s.action()}
+function foldHost(hi){hosts[hi].fold=!hosts[hi].fold;choose('h:'+hi)}
+function foldProject(p,i){p.fold=!p.fold;choose('p:'+i)}
+function fit(parts,w){let left=w;const result=[];for(const p of parts){if(left<=0)break;const t=p.text.slice(0,left);result.push({...p,text:t});left-=t.length}if(left)result.push(seg(' '.repeat(left)));return result}
+function right(left,r,w){const n=left.reduce((n,p)=>n+p.text.length,0);return [...fit(left,Math.max(0,w-r.text.length)),r]}
+function border(title,w,cls='rule'){const t=' '+title+' ';return [seg('┌'+t+'─'.repeat(Math.max(0,w-t.length-2))+'┐',cls)]}
+function boxrow(parts,w){return [seg('│','rule'),...fit(parts,w-2),seg('│','rule')]}
+function bottom(w){return [seg('└'+'─'.repeat(w-2)+'┘','rule')]}
+function choose(id){selected=id;message='';draw()}
+function spawn(p){const i=projects.indexOf(p);p.agents.push({name:'claude',state:'idle'});p.fold=false;selected=`a:${i}:${p.agents.length-1}`;message='Started claude in '+p.name+' · simulated';draw()}
+function open(p){page=p.name;message='Opened '+p.name+' · simulated';draw()}
+function fleet(w,h){rows=[];let list=[];const waiting=[];projects.forEach((p,i)=>p.agents.forEach((a,j)=>{if(a.state==='waiting')waiting.push(seg(' '+sprite(a)+' '+a.name+' · '+p.name,color(a)+' press'+(a.state==='working'?' loading':''),()=>choose(`a:${i}:${j}`)))}));list.push(border('FLEET ('+projects.reduce((n,p)=>n+p.agents.length,0)+')',w));for(let i=0;i<4;i++)list.push(boxrow(waiting[i]?[waiting[i]]:i===0?[seg(' nothing waiting','faint')]:[],w));const label=' NEEDS YOU ('+waiting.length+') ';list.push([seg('├','rule'),seg(label,waiting.length?'danger':'faint'),seg('─'.repeat(w-label.length-2)+'┤','rule')]);
+function row(id,parts){rows.push(id);list.push(boxrow(fit(parts,w-2).map(s=>({...s,cls:s.cls+(selected===id?' selected':'')})),w))}
+hosts.forEach((host,hi)=>{
+  const group=projects.map((p,i)=>({p,i})).filter(({p})=>p.host===hi);
+  const count=group.reduce((n,{p})=>n+p.agents.length,0);
+  row('h:'+hi,right([seg(' '+(host.fold?'>':'v')+' '+host.name,'press',()=>choose('h:'+hi),()=>foldHost(hi))],seg(String(count)+' ','faint'),w-2));
+  if(host.fold)return;
+  group.forEach(({p,i},pi)=>{
+    const last=pi===group.length-1,id='p:'+i;
+    row(id,right([
+      seg(' '+(last?'└':'├')+'─','rule'),
+      seg((p.fold?'>':'v')+' ','faint press',()=>{p.fold=!p.fold;choose(id)}),
+      seg(p.name,'press',()=>choose(id),()=>foldProject(p,i)),
+      seg(p.agents.length?'':' no agents','faint')
+    ],seg(p.agents.length?'[+ claude] ':'[+] ','accent press',()=>spawn(p)),w-2));
+    if(!p.fold)p.agents.forEach((a,j)=>row(`a:${i}:${j}`,right([
+      seg(' '+(last?' ':'│')+' '+(j===p.agents.length-1?'└':'├')+'─','rule'),
+      seg(sprite(a)+' ',color(a)+' press'+(a.state==='working'?' loading':''),()=>choose(`a:${i}:${j}`)),
+      seg(a.name,'press',()=>choose(`a:${i}:${j}`))
+    ],seg('[open] ','accent press',()=>{choose(`a:${i}:${j}`);open(p)}),w-2)));
+  });
+});while(list.length<h-1)list.push(boxrow([],w));return [...list.slice(0,h-1),bottom(w)]}
+function preview(){const bits=selected.split(':');if(bits[0]==='h')return {};const p=projects[+bits[1]];const a=bits[0]==='a'?p.agents[+bits[2]]:p.agents.find(a=>a.state==='waiting')||p.agents[0];return {p,a}}
+function stage(w,h){const {p,a}=preview();const title=a?a.name+' · '+hosts[p.host].name+':'+p.name:p?p.name:'STAGE';const l=[border(title,w,'accent')];let content=[];if(!a)content=[seg(p?'  No agents in '+p.name+'.':'  Select a project or an agent.','faint'),seg(p?'  Press a to start claude.':'')];else if(a.state==='waiting')content=[seg(''),seg('  Claude Code','accent'),seg('  ~/Projects/'+p.name,'faint'),seg(''),seg('  ❯ Review the compute panel in BOOTH'),seg(''),seg('  I have updated the machine readings and'),seg('  storage display. Ready to run the checks.'),seg(''),seg('  ╭──────────────────────────────────────╮','rule'),seg('  │ Run cargo test --workspace?          │'),seg('  │                                      │'),seg('  │ ❯ 1. Yes                             │','accent'),seg('  │   2. No                              │'),seg('  ╰──────────────────────────────────────╯','rule'),seg('  Enter to select · ↑/↓ to navigate','faint')];else content=[seg(''),seg('  '+a.name+' · ~/Projects/'+p.name,'accent'),seg(''),seg(a.state==='working'?'  • Reading the workspace…':'  Ready for your instructions.','faint'),seg(''),seg('  ❯ ')];for(let i=0;i<h-2;i++)l.push(boxrow(content[i]?[content[i]]:[],w));l.push(bottom(w));return l}
+function compute(w,h){const l=[border('COMPUTE',w)];const meter=(n)=>'█'.repeat(Math.round(n/10))+'░'.repeat(10-Math.round(n/10));hosts.forEach((host,hi)=>{const count=projects.filter(p=>p.host===hi).reduce((n,p)=>n+p.agents.length,0);const pressure=[{label:'CPU',pct:host.cpu},{label:'RAM',pct:host.ramPct},{label:'DSK',pct:host.diskPct}].reduce((a,b)=>a.pct>=b.pct?a:b);l.push(boxrow(right([seg(' '+(host.expanded?'v':'>')+' '+host.name,'press',()=>{host.expanded=!host.expanded;draw()})],seg(count+' '+pressure.label+' '+pressure.pct+'% ',pressure.pct>85?'danger':'faint'),w-2),w));if(!host.expanded)return;const data=[['CPU',host.cpu,host.cpu+'%'],['RAM',host.ramPct,host.ram],['DSK',host.diskPct,host.disk+' /']];for(const [label,pct,value] of data){l.push(boxrow([seg('   '+label+' ','faint'),seg(meter(pct),pct>85?'danger':'accent'),seg(' '+value)],w));if(host.expanded&&label!=='DSK')l.push(boxrow([seg('       ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀','accent')],w))}if(host.expanded){l.push(boxrow([seg('   GPU integrated    4%','faint')],w));l.push(boxrow([seg('   NET eth0   ↓15k ↑86k','faint')],w))}l.push(boxrow([],w))});while(l.length<h-1)l.push(boxrow([],w));return [...l.slice(0,h-1),bottom(w)]}
+function draw(){cw=document.querySelector('#measure').getBoundingClientRect().width/10;const cols=Math.max(110,Math.min(180,Math.floor((innerWidth-32)/cw)));const height=Math.max(30,Math.floor((innerHeight-76)/18));const fw=32,rw=36,sw=cols-fw-rw-2;terminal.replaceChildren();function line(parts){const el=document.createElement('div');el.className='line';for(const s of parts){const node=document.createElement(s.action?'button':'span');node.className='cell '+s.cls;node.textContent=s.text;node.style.width=(s.text.length*cw)+'px';if(s.action)node.onclick=()=>activate(s);el.append(node)}terminal.append(el)}line(right([seg(page==='booth'?'[ booth!]':'  booth! ','chip press',()=>{page='booth';draw()}),seg(' │ ','rule'),seg(' 1:butai ! ','press',()=>open(projects[0])),seg(' 2:website  3:notes  4:studio:research','faint')],seg('[views v] [+ host] [+ new]','faint'),cols));const f=fleet(fw,height),s=stage(sw,height),c=compute(rw,height);for(let i=0;i<height;i++)line([...f[i],seg(' '),...s[i],seg(' '),...c[i]]);const {p}=preview();line(right([seg(' '+(p?p.name+' ~/Projects/'+p.name:'booth')+'  ','faint'),seg(message||'● claude is waiting',message?'accent':'danger')],seg('[layout] [detach] [help] [settings]','faint'),cols))}
+window.addEventListener('resize',draw);window.addEventListener('keydown',e=>{if(e.target.tagName==='BUTTON'&&e.key==='Enter')return;const idx=rows.indexOf(selected);const {p}=preview();if(['j','k','ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();choose(rows[Math.max(0,Math.min(rows.length-1,idx+(['j','ArrowDown'].includes(e.key)?1:-1)))])}else if(e.key==='z'&&p){p.fold=!p.fold;selected='p:'+projects.indexOf(p);draw()}else if(e.key==='a'&&p){spawn(p)}else if(e.key==='Enter'&&p){open(p)}else if(e.key==='Escape'||(e.altKey&&e.key==='0')){page='booth';draw()}});draw();setInterval(()=>{tick++;document.querySelectorAll('.loading').forEach(node=>{node.textContent=['.  ','.. ','...'][tick%3]+' '})},1200);
+</script>
+</html>
