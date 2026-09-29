@@ -36,6 +36,10 @@ use tokio::process::Command;
 #[cfg(unix)]
 const BIND_TIMEOUT: Duration = Duration::from_secs(15);
 
+// macOS temporary-directory paths are long, and Unix sockets have a roughly
+// 104-byte path limit. The directory already identifies the forward.
+const SOCKET_NAME: &str = "s";
+
 /// A live `ssh -L` forward. Dropping it kills the ssh child and removes the
 /// socket, so a host that goes away leaves nothing behind.
 pub struct Forward {
@@ -193,7 +197,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
 
     let directory = local_socket_dir(target)?;
-    let socket = directory.path().join("daemon.sock");
+    let socket = directory.path().join(SOCKET_NAME);
 
     let mut cmd = butai_protocol::local::background_async_command("ssh");
     // `-N` runs no command: this connection exists only to carry the forward.
@@ -297,7 +301,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
     let directory = local_socket_dir(target)?;
-    let socket = directory.path().join("daemon.sock");
+    let socket = directory.path().join(SOCKET_NAME);
     let listener = butai_protocol::local::LocalListener::bind(&socket)?;
     let (target, args, remote_socket) =
         (target.to_owned(), args.to_vec(), remote_socket.to_owned());
@@ -351,7 +355,7 @@ mod tests {
         // Unix socket paths are length-limited, and the limit counts the whole
         // path — a long ssh alias must not push it over.
         let directory = local_socket_dir(&"x".repeat(200)).unwrap();
-        let long = directory.path().join("daemon.sock");
+        let long = directory.path().join(SOCKET_NAME);
         assert!(long.as_os_str().len() < 100, "{}", long.display());
     }
 
@@ -361,7 +365,7 @@ mod tests {
         let old_path = old.path().to_path_buf();
         let new = local_socket_dir("build-box").unwrap();
         assert_ne!(old.path(), new.path(), "a persistent SSH master remembers the old path");
-        let socket = new.path().join("daemon.sock");
+        let socket = new.path().join(SOCKET_NAME);
         std::fs::write(&socket, "replacement").unwrap();
         drop(old);
         assert!(!old_path.exists());
