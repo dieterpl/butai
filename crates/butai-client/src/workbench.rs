@@ -5179,13 +5179,12 @@ struct Downed {
 
 /// Rebuild the link to the machine at `d`, if it is ours and it is time.
 ///
-/// The old forward is dropped *before* the dial goes out, and the order is
-/// load-bearing twice over. [`crate::ssh::local_socket_path`] is (target, our
-/// pid), so a re-dial binds the **same path**, and `forward()` unlinks it
-/// before binding — a stale `Forward` dropped afterwards would delete the
-/// socket the new ssh had just created. And killing the old ssh is what
-/// releases the ControlMaster it holds open: on a slept laptop that master is
-/// half-open, and a dial that multiplexes onto it hangs rather than connecting.
+/// Dropping the old forward before the dial keeps stale children from
+/// accumulating. Each attempt now allocates a fresh socket directory:
+/// an OpenSSH master can retain a forward even after its
+/// client dies, so reusing the old path would leave us waiting for a socket
+/// that the master thinks it already bound. The shared master's keepalives
+/// detect half-open connections independently.
 ///
 /// The old `Daemon` stays in `daemons` meanwhile, so the tab keeps its place
 /// and its last-known rails instead of blinking out and coming back.

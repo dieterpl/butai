@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Browser navigation parity.** BOOTH chat clicks focus the live preview and
+- **SSH connections return on the first launch after an update (`1.3.0-dev.3.beta.8`).** Each
+  forwarding attempt now gets its own socket directory. Previously, updating
+  preserved the app's process ID and reused a socket path that OpenSSH's
+  shared connection still remembered, leaving remote projects missing until
+  the app was opened again.
+
+- **Browser navigation parity (`1.3.0-dev.3.beta.8`).** BOOTH chat clicks focus the live preview and
   attention entries reveal chats inside folded projects. Enter opens the
   selected project or chat, and `A` chooses an agent. Project tabs scroll with
   the mouse wheel and follow keyboard selection, while BOOTH and Views stay

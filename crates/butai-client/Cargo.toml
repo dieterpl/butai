@@ -36,6 +36,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+tempfile.workspace = true
 
 # Wayland's clipboard is a separate protocol from X11's, and arboard only speaks
 # it with this feature on. Linux-only because it is the only target that has

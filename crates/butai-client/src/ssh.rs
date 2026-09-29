@@ -44,6 +44,9 @@ pub struct Forward {
     #[cfg(windows)]
     relay: tokio::task::JoinHandle<()>,
     socket: PathBuf,
+    // A fresh directory for every attempt, including an exec after updating.
+    // Keep it alive until the forward is dropped.
+    _directory: tempfile::TempDir,
 }
 
 impl Forward {
@@ -189,12 +192,8 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
 
-    let socket = local_socket_path(target);
-    // A stale socket from a killed client would make ssh refuse to bind.
-    std::fs::remove_file(&socket).ok();
-    if let Some(dir) = socket.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    }
+    let directory = local_socket_dir(target)?;
+    let socket = directory.path().join("daemon.sock");
 
     let mut cmd = butai_protocol::local::background_async_command("ssh");
     // `-N` runs no command: this connection exists only to carry the forward.
@@ -215,7 +214,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
 
     let child = cmd.spawn().context("spawn ssh -L")?;
-    let mut fwd = Forward { child, socket };
+    let mut fwd = Forward { child, socket, _directory: directory };
     wait_for_socket(&mut fwd).await?;
     Ok(fwd)
 }
@@ -260,13 +259,18 @@ async fn drain_stderr(fwd: &mut Forward) -> String {
     }
 }
 
-/// A private path for one forward.
+/// A private directory for one forwarding attempt.
 ///
 /// Under the user's runtime directory when there is one, because a socket in
 /// `/tmp` is world-listable and this one reaches a daemon that can run
-/// commands. The name carries the target so two forwards to different machines
-/// cannot collide, and the pid so two clients cannot.
-fn local_socket_path(target: &str) -> PathBuf {
+/// commands. Random allocation matters even within one process: OpenSSH's
+/// persistent master can retain a forwarding entry after its child exits and
+/// we unlink the socket. Asking it for the same path again reports success
+/// without binding a new socket. An update uses exec, preserving our PID, so
+/// a (target, PID) path breaks the first launch after updating while a second
+/// launch with a new PID works. A fresh directory also isolates old cleanup
+/// from a replacement forward and distinguishes aliases with the same prefix.
+fn local_socket_dir(target: &str) -> Result<tempfile::TempDir> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -279,7 +283,11 @@ fn local_socket_path(target: &str) -> PathBuf {
     // the whole path, so the variable part is kept short rather than
     // descriptive.
     let safe: String = safe.chars().take(24).collect();
-    dir.join(format!("{safe}-{}.sock", std::process::id()))
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    tempfile::Builder::new()
+        .prefix(&format!("{safe}-"))
+        .tempdir_in(&dir)
+        .with_context(|| format!("allocate ssh forward in {}", dir.display()))
 }
 
 /// Windows OpenSSH cannot forward Unix sockets. Bridge each local pipe
@@ -288,7 +296,8 @@ fn local_socket_path(target: &str) -> PathBuf {
 pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Result<Forward> {
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
-    let socket = local_socket_path(target);
+    let directory = local_socket_dir(target)?;
+    let socket = directory.path().join("daemon.sock");
     let listener = butai_protocol::local::LocalListener::bind(&socket)?;
     let (target, args, remote_socket) =
         (target.to_owned(), args.to_vec(), remote_socket.to_owned());
@@ -322,7 +331,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
             }
         }
     });
-    Ok(Forward { relay, socket })
+    Ok(Forward { relay, socket, _directory: directory })
 }
 
 #[cfg(test)]
@@ -331,19 +340,34 @@ mod tests {
 
     #[test]
     fn a_forward_path_is_private_and_collision_proof() {
-        let a = local_socket_path("user@host.example.com");
-        let b = local_socket_path("other");
-        assert_ne!(a, b, "two targets must not share a socket");
-        assert_eq!(a.parent(), b.parent());
+        let a = local_socket_dir("user@host.example.com").unwrap();
+        let b = local_socket_dir("other").unwrap();
+        assert_ne!(a.path(), b.path(), "two targets must not share a socket");
+        assert_eq!(a.path().parent(), b.path().parent());
         // Nothing in the name can escape the directory or confuse a shell.
-        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        let name = a.path().file_name().unwrap().to_string_lossy().into_owned();
         assert!(!name.contains('/'), "{name}");
         assert!(!name.contains('@'), "{name}");
-        assert!(name.ends_with(".sock"), "{name}");
         // Unix socket paths are length-limited, and the limit counts the whole
         // path — a long ssh alias must not push it over.
-        let long = local_socket_path(&"x".repeat(200));
+        let directory = local_socket_dir(&"x".repeat(200)).unwrap();
+        let long = directory.path().join("daemon.sock");
         assert!(long.as_os_str().len() < 100, "{}", long.display());
+    }
+
+    #[test]
+    fn reconnecting_in_the_same_process_gets_a_fresh_socket() {
+        let old = local_socket_dir("build-box").unwrap();
+        let old_path = old.path().to_path_buf();
+        let new = local_socket_dir("build-box").unwrap();
+        assert_ne!(old.path(), new.path(), "a persistent SSH master remembers the old path");
+        let socket = new.path().join("daemon.sock");
+        std::fs::write(&socket, "replacement").unwrap();
+        drop(old);
+        assert!(!old_path.exists());
+        assert!(socket.exists(), "old cleanup must not remove the replacement");
+        drop(new);
+        assert!(!socket.exists(), "the replacement must clean up its own directory");
     }
 
     /// The half of "the machine went away" that the event stream cannot see.
@@ -356,12 +380,14 @@ mod tests {
             child: Command::new("sleep").arg("30").kill_on_drop(true).spawn().expect("spawn sleep"),
             // Never bound, and `Drop` only unlinks — nothing to clean up.
             socket: std::env::temp_dir().join("butai-is-alive-test.sock"),
+            _directory: local_socket_dir("alive-test").unwrap(),
         };
         assert!(alive.is_alive(), "a running ssh must read as alive");
 
         let mut dead = Forward {
             child: Command::new("true").kill_on_drop(true).spawn().expect("spawn true"),
             socket: std::env::temp_dir().join("butai-is-dead-test.sock"),
+            _directory: local_socket_dir("dead-test").unwrap(),
         };
         dead.child.wait().await.expect("reap");
         assert!(!dead.is_alive(), "an ssh that exited must not read as alive");
