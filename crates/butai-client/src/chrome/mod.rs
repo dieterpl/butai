@@ -22,6 +22,9 @@
 mod model;
 pub use model::*;
 
+pub mod dialog;
+pub use dialog::DialogOverlay;
+
 pub mod help;
 pub use help::Help;
 
@@ -2001,6 +2004,10 @@ pub enum Overlay {
     Confirm(ConfirmOverlay),
     /// Typing and choosing at once: a query at the top, its hits below.
     Search(SearchOverlay),
+    /// A window from outside the workbench: it says something, may ask for a
+    /// line of text, shows why an answer failed, and offers buttons. See
+    /// [`dialog`].
+    Dialog(DialogOverlay),
 }
 
 /// Find a file, or a line in one.
@@ -3241,8 +3248,10 @@ pub fn draw(
 /// painted over by it. An overlay is on top of everything by definition, so it
 /// goes on last — chrome, then pane, then this.
 pub fn draw_overlay_layer(buf: &mut Buffer, cols: u16, rows: u16, view: &View, theme: &Theme) {
-    if let Some(overlay) = &view.overlay {
-        draw_overlay(buf, cols, rows, overlay, theme);
+    match &view.overlay {
+        Some(Overlay::Dialog(d)) => dialog::draw(buf, cols, rows, d, theme),
+        Some(overlay) => draw_overlay(buf, cols, rows, overlay, theme),
+        None => {}
     }
 }
 
@@ -3331,6 +3340,9 @@ fn overlay_rows(overlay: &Overlay) -> OverlayRows {
             // character index.
             (" FIND ".to_string(), lines, sel, Some((0usize, f.cursor + 1)))
         }
+        // Drawn and hit-tested by `dialog`, which has its own layout; this arm
+        // exists so the match stays exhaustive.
+        Overlay::Dialog(d) => (format!(" {} ", d.title), d.lead.clone(), None, None),
         Overlay::Confirm(c) => {
             // "no" first, and selected first, so the keystroke that throws work
             // away is never the one that opened the box.

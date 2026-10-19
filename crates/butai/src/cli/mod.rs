@@ -141,6 +141,13 @@ pub enum Cmd {
     Daemon,
     /// Bridge stdin/stdout to the daemon socket (for `ssh host butai proxy`)
     Proxy,
+    /// Answer an ssh prompt through the running client (set as `SSH_ASKPASS`)
+    #[command(hide = true)]
+    Askpass {
+        /// The prompt ssh passes as its argument
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
     /// Put a terminal left in mouse/raw mode by a killed or crashed butai back
     /// to normal
     Reset,
@@ -215,6 +222,15 @@ pub fn run(cli: Cli) -> Result<u8> {
         }
         Some(Cmd::Daemon) => butai_server::run_daemon(&socket).map(|_| crate::exit::OK),
         Some(Cmd::Proxy) => crate::proxy::run(&socket).map(|_| crate::exit::OK),
+        // Run by ssh, never by hand: the answer is the only thing on stdout, and
+        // a non-zero exit is how ssh learns the prompt was cancelled.
+        Some(Cmd::Askpass { prompt }) => match butai_client::askpass::ask(&prompt.join(" "))? {
+            Some(answer) => {
+                println!("{answer}");
+                Ok(crate::exit::OK)
+            }
+            None => Ok(1),
+        },
         // Stands alone on purpose: no nesting guard, no daemon, so it works
         // from whatever shell the wedged terminal left you in.
         Some(Cmd::Reset) => butai_client::term::reset_terminal().map(|_| crate::exit::OK),

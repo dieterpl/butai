@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-19
+
+### Added
+
+- **ssh can now ask you its questions, from inside the workbench.** Connecting a
+  machine ran ssh with `BatchMode=yes`, which makes an unknown host, a
+  passphrase and a one-time code all the same instant failure: typing a new
+  machine's name in `[+ host]` ended in `Host key verification failed` and no
+  way to say yes. Every prompt now arrives as a window. A new host shows its key
+  type and SHA-256 fingerprint, how to compare it on the machine, and what
+  trusting it writes; a passphrase, password or code is a masked input, and a
+  repeat of the same prompt says `Permission denied, please try again.` under
+  the field. Nothing is trusted by a stray keystroke — the window opens on
+  *cancel*, and `y` is what trusts.
+
+  It works by pointing ssh at `butai askpass` (`SSH_ASKPASS`) with a private
+  socket back to the client, so the answer never touches a terminal or a log. A
+  dial that was not asked for — a reconnect after sleep, an announcement from a
+  pane — keeps `BatchMode=yes` and stays silent: a window about a machine that
+  dropped while you were typing somewhere else would arrive mid-keystroke. The
+  forward and the daemon lookup also wait up to three minutes longer when they
+  may stop to ask, since reading a fingerprint is not a hung connection.
+  Unix only; on Windows those dials behave as before.
+
+- **A changed host key is explained, and can be replaced on purpose.** ssh
+  answers a key that no longer matches with a screenful of banner, and the
+  footer showed its first line. The window now says that the key has changed,
+  shows the fingerprint the machine offered and the `known_hosts` entry it
+  disagrees with, and offers `R` to remove that one entry and connect again —
+  which then asks about the new key like any unknown host. `esc` is the default.
+
+- **One dialog component, in both clients.** `chrome/dialog.rs` in the terminal
+  and `web/src/components/Window.tsx` in the browser draw the same thing: a
+  title with a tone, a lead, labelled facts, a note, an optional input (masked
+  for secrets), an error line and buttons. Anything that fails inside a dialog
+  keeps it open with the reason drawn under the field instead of a toast over
+  a window that has already gone.
+
+### Changed
+
+- **A dial you started tells you why it failed, in a window.** `[+ host]` and the
+  SETTINGS connect row now open an error window (permission denied, host key
+  not trusted, unreachable, ssh's own line otherwise) in addition to the footer
+  line, which stays. Saying no to a question ssh asked does not then also
+  report that ssh failed.
+
+- **ssh's whole stderr is kept, not its first line.** For a changed host key the
+  first line was a banner, so the footer read `@@@@@@@@@@@@@@@@@@@@`; the footer
+  line now skips the banner, and the full text is what the window reads.
+
+- **The browser's two modals are the new component.** The yes/no and the form
+  that asks for a branch or a commit message are drawn by `Window`, and a form
+  can refuse its own answer. Adding a host in the browser reports a refused
+  socket (including the explanation that the bridge does not run ssh) inside
+  the form, with what was typed still in the boxes.
+
 ## [1.3.0] - 2026-09-29
 
 Stable release of the 1.3 development track, with BOOTH controls, terminal and
@@ -2612,7 +2668,8 @@ Initial workspace: per-user daemon with server-side VT emulation, editor,
 file tree, and git panes; a terminal (TUI) client; and a public framed +
 REST protocol. See [`docs/protocol.md`](docs/protocol.md).
 
-[Unreleased]: https://github.com/dieterpl/butai/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/dieterpl/butai/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/dieterpl/butai/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/dieterpl/butai/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/dieterpl/butai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/dieterpl/butai/compare/v1.1.0...v1.1.1

@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Patch } from "@/components/Patch";
+import { Window } from "@/components/Window";
 import { NO_FOLDS, type Folds } from "../logic/fleet.ts";
 import {
   Dialog,
@@ -126,6 +127,8 @@ interface Question {
   title: string;
   fields: readonly AskField[];
   submit: string;
+  /** Vets the answer before the question closes; a message keeps it open. */
+  check?: ((values: string[]) => Promise<string | null>) | undefined;
   resolve: (values: string[] | null) => void;
 }
 
@@ -169,8 +172,8 @@ export function Shell() {
     [],
   );
   const askFor = useCallback(
-    (title: string, fields: readonly AskField[], submit = "OK") =>
-      new Promise<string[] | null>((resolve) => setQuestion({ title, fields, submit, resolve })),
+    (title: string, fields: readonly AskField[], submit = "OK", check?: (values: string[]) => Promise<string | null>) =>
+      new Promise<string[] | null>((resolve) => setQuestion({ title, fields, submit, check, resolve })),
     [],
   );
   const showPatch = useCallback((title: string, text: string) => setPatch({ title, text }), []);
@@ -527,8 +530,12 @@ export function Shell() {
             </div>)}
             <Button variant="outline" onClick={async () => {
               setHostsOpen(false);
-              const values = await askFor("ADD HOST", [{ label: "Socket path" }, { label: "Name" }], "Add");
-              if (values?.[0]?.trim()) void actions.addDaemon(values[0].trim(), values[1]?.trim() || undefined);
+              // Vetted inside the window: a refused socket (this bridge does not
+              // run ssh; the path is not there) is told to the person typing it
+              // with what they typed still in the boxes.
+              await askFor("ADD HOST", [{ label: "Socket path" }, { label: "Name" }], "Add", (values) =>
+                actions.tryAddDaemon(values[0]?.trim() ?? "", values[1]?.trim() || undefined),
+              );
             }}>+ host</Button>
           </DialogContent>
         </Dialog>
@@ -596,22 +603,21 @@ export function Shell() {
 
         <PatchDialog patch={page === "work" ? null : patch} onClose={() => setPatch(null)} />
 
-        <Dialog open={!!ask} onOpenChange={(o) => { if (!o && ask) { ask.resolve(false); setAsk(null); } }}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{ask?.q}</DialogTitle>
-              {ask?.detail ? <DialogDescription>{ask.detail}</DialogDescription> : null}
-            </DialogHeader>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => { ask?.resolve(false); setAsk(null); }}>
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={() => { ask?.resolve(true); setAsk(null); }}>
-                Yes, do it
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        {ask ? (
+          <Window
+            tone="warn"
+            title={ask.q}
+            lead={ask.detail ? [ask.detail] : []}
+            onClose={(how) => {
+              if (how === "dismissed") ask.resolve(false);
+              setAsk(null);
+            }}
+            actions={[
+              { label: "Cancel", autoFocus: true, run: () => ask.resolve(false) },
+              { label: "Yes, do it", destructive: true, run: () => ask.resolve(true) },
+            ]}
+          />
+        ) : null}
 
         <Toaster />
       </div>
@@ -625,62 +631,33 @@ export function Shell() {
  * A field with `options` is a choice and draws a `Select`; without, it is free
  * text. Enter submits, because every question here has one obvious answer and
  * reaching for the mouse to confirm the default is the friction this replaces.
- * The port of `web/ui/actions.js`'s `PromptDialog`, unchanged in behaviour.
+ * The port of `web/ui/actions.js`'s `PromptDialog`, now drawn by [`Window`] —
+ * which is what lets a question refuse its own answer: `check` returns a
+ * message and the window stays up with it, instead of closing on a toast.
  */
 function PromptDialog({ question, onDone }: { question: Question | null; onDone: (v: string[] | null) => void }) {
-  const [vals, setVals] = useState<string[]>([]);
-  useEffect(() => {
-    setVals(question ? question.fields.map((f) => f.value ?? "") : []);
-  }, [question]);
   if (!question) return null;
-  const submit = () => onDone(vals);
   return (
-    <Dialog open onOpenChange={(o) => { if (!o) onDone(null); }}>
-      <DialogContent
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>{question.title}</DialogTitle>
-        </DialogHeader>
-        {question.fields.map((f, i) => (
-          <label key={f.label} className="grid gap-1">
-            <span className="text-11 text-dim">{f.label}</span>
-            {f.options ? (
-              <Select value={vals[i] ?? ""} onValueChange={(v) => setVals((cur) => replace(cur, i, v))}>
-                <SelectTrigger className="w-full" aria-label={f.label}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {f.options.map((o) => (
-                    <SelectItem key={o} value={o}>
-                      {o}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Input
-                autoFocus={i === 0}
-                aria-label={f.label}
-                value={vals[i] ?? ""}
-                onChange={(e) => setVals((cur) => replace(cur, i, e.target.value))}
-              />
-            )}
-          </label>
-        ))}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onDone(null)}>
-            Cancel
-          </Button>
-          <Button onClick={submit}>{question.submit}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Window
+      title={question.title}
+      fields={question.fields}
+      onClose={(how) => {
+        if (how === "dismissed") onDone(null);
+      }}
+      actions={[
+        { label: "Cancel", run: () => onDone(null) },
+        {
+          label: question.submit,
+          primary: true,
+          run: async (values) => {
+            const why = await question.check?.(values);
+            if (why) return why;
+            onDone(values);
+            return null;
+          },
+        },
+      ]}
+    />
   );
 }
 

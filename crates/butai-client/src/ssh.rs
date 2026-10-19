@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::askpass::AskpassEnv;
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use tokio::process::Child;
@@ -35,6 +36,33 @@ use tokio::process::Command;
 /// of the workbench keeps drawing.
 #[cfg(unix)]
 const BIND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How much longer a dial that may stop to ask the user is allowed to take.
+///
+/// The clock starts before ssh has authenticated, so a person reading a
+/// host-key fingerprint, or fetching a passphrase from their password manager,
+/// is time the timeouts above would otherwise count as a hung connection.
+const ASK_PATIENCE: Duration = Duration::from_secs(180);
+
+/// An ssh that exited unhappy, with everything it wrote.
+///
+/// The one-line `summary` is what a footer shows. `stderr` is kept whole
+/// because the lines that matter are not always the first: a changed host key
+/// is a screenful of banner, with the fingerprint and the offending file near
+/// the bottom, and [`crate::ssh_prompts::failure_dialog`] reads them from here.
+#[derive(Debug)]
+pub struct SshFailure {
+    pub summary: String,
+    pub stderr: String,
+}
+
+impl std::fmt::Display for SshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary)
+    }
+}
+
+impl std::error::Error for SshFailure {}
 
 // macOS temporary-directory paths are long, and Unix sockets have a roughly
 // 104-byte path limit. The directory already identifies the forward.
@@ -106,12 +134,23 @@ const WHOAMI_TIMEOUT: Duration = Duration::from_secs(20);
 /// The two entry points differ only here: a handoff arrives with the far
 /// daemon's socket attached, and a machine chosen from `~/.ssh/config` has told
 /// us nothing, so it is asked.
-pub async fn dial(target: &str, args: &[String], socket: Option<&str>) -> Result<Forward> {
+///
+/// `ask` is `Some` when a person is waiting on this dial: ssh may then stop and
+/// put a question to them (trust this host? your passphrase?) through the
+/// workbench, instead of being forbidden to by `BatchMode`. Background
+/// reconnects pass `None` and stay silent — a dialog nobody asked for, about a
+/// machine that dropped while you were typing elsewhere, is worse than a retry.
+pub async fn dial(
+    target: &str,
+    args: &[String],
+    socket: Option<&str>,
+    ask: Option<&AskpassEnv>,
+) -> Result<Forward> {
     let socket = match socket.filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
-        None => remote_socket(target, args).await?,
+        None => remote_socket(target, args, ask).await?,
     };
-    forward(target, args, &socket).await
+    forward(target, args, &socket, ask).await
 }
 
 /// Ask `target` where its daemon listens, starting one if none is.
@@ -123,7 +162,11 @@ pub async fn dial(target: &str, args: &[String], socket: Option<&str>) -> Result
 /// has always started one (that is what `ssh host butai proxy` did), and a host
 /// picker that only worked on machines you had already visited would be a
 /// smaller thing than the one being replaced.
-pub async fn remote_socket(target: &str, args: &[String]) -> Result<String> {
+pub async fn remote_socket(
+    target: &str,
+    args: &[String],
+    ask: Option<&AskpassEnv>,
+) -> Result<String> {
     anyhow::ensure!(!target.is_empty(), "no ssh target to ask");
     let script = format!(
         r#"{}; "$BUTAI" ls >/dev/null 2>&1; exec "$BUTAI" --json whoami"#,
@@ -132,7 +175,7 @@ pub async fn remote_socket(target: &str, args: &[String]) -> Result<String> {
     let mut cmd = butai_protocol::local::background_async_command("ssh");
     // No tty: this is one JSON document, not a session.
     cmd.arg("-T");
-    cmd.arg("-o").arg("BatchMode=yes");
+    batch_or_ask(&mut cmd, ask);
     for opt in crate::dial::control_master_opts() {
         cmd.arg("-o").arg(opt);
     }
@@ -143,9 +186,10 @@ pub async fn remote_socket(target: &str, args: &[String]) -> Result<String> {
     // None of these name the target: the caller has already put it in front of
     // whatever comes back, and the footer is one line — a live run of this
     // spent a third of it on "gpu-box: gpu-box: ssh: ...".
-    let out = tokio::time::timeout(WHOAMI_TIMEOUT, cmd.output())
+    let patience = WHOAMI_TIMEOUT + if ask.is_some() { ASK_PATIENCE } else { Duration::ZERO };
+    let out = tokio::time::timeout(patience, cmd.output())
         .await
-        .map_err(|_| anyhow::anyhow!("no answer within {WHOAMI_TIMEOUT:?}"))?
+        .map_err(|_| anyhow::anyhow!("no answer within {patience:?}"))?
         .context("spawn ssh")?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
@@ -165,10 +209,27 @@ pub async fn remote_socket(target: &str, args: &[String]) -> Result<String> {
                 butai_protocol::names::BINARY
             );
         }
-        let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
-        anyhow::bail!("{}", why.trim());
+        return Err(SshFailure {
+            summary: crate::ssh_prompts::summary(&why),
+            stderr: why.into_owned(),
+        }
+        .into());
     }
     socket_from_whoami(&out.stdout).context("it did not say where its daemon is")
+}
+
+/// Either forbid ssh to ask anything, or let it ask through the workbench.
+///
+/// With `BatchMode=yes` an unknown host, a passphrase and a one-time code are
+/// all the same instant failure, which is right for a retry loop and wrong for
+/// a person who just typed a machine's name.
+fn batch_or_ask(cmd: &mut tokio::process::Command, ask: Option<&AskpassEnv>) {
+    match ask {
+        Some(env) => env.apply(cmd),
+        None => {
+            cmd.arg("-o").arg("BatchMode=yes");
+        }
+    }
 }
 
 /// Pull the socket path out of `butai --json whoami`.
@@ -192,7 +253,12 @@ fn socket_from_whoami(stdout: &[u8]) -> Result<String> {
 /// daemon from the pane's own `ssh` process — so this goes back the same way,
 /// through the same jump hosts, with the same key.
 #[cfg(unix)]
-pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Result<Forward> {
+pub async fn forward(
+    target: &str,
+    args: &[String],
+    remote_socket: &str,
+    ask: Option<&AskpassEnv>,
+) -> Result<Forward> {
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
 
@@ -203,7 +269,7 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
     // `-N` runs no command: this connection exists only to carry the forward.
     // `-T` keeps ssh from allocating a tty we would then have to manage.
     cmd.arg("-N").arg("-T");
-    cmd.arg("-o").arg("BatchMode=yes");
+    batch_or_ask(&mut cmd, ask);
     cmd.arg("-o").arg("ExitOnForwardFailure=yes");
     // Reuse the connection [`remote_socket`] just opened, when there was one.
     // A forward asked of an existing master costs no key exchange, which is the
@@ -219,7 +285,8 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
 
     let child = cmd.spawn().context("spawn ssh -L")?;
     let mut fwd = Forward { child, socket, _directory: directory };
-    wait_for_socket(&mut fwd).await?;
+    let patience = BIND_TIMEOUT + if ask.is_some() { ASK_PATIENCE } else { Duration::ZERO };
+    wait_for_socket(&mut fwd, patience).await?;
     Ok(fwd)
 }
 
@@ -228,8 +295,8 @@ pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Resu
 /// Existence is not enough — ssh creates the socket before the connection is
 /// usable — so this connects, which is also what the caller is about to do.
 #[cfg(unix)]
-async fn wait_for_socket(fwd: &mut Forward) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + BIND_TIMEOUT;
+async fn wait_for_socket(fwd: &mut Forward, patience: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + patience;
     loop {
         if butai_protocol::local::LocalStream::connect(&fwd.socket).await.is_ok() {
             return Ok(());
@@ -237,18 +304,19 @@ async fn wait_for_socket(fwd: &mut Forward) -> Result<()> {
         // A dead ssh will never bind, and its stderr says why (a bad key, an
         // unknown host, a refused forward). Reporting that beats a timeout.
         if let Some(status) = fwd.child.try_wait().context("wait on ssh")? {
-            let why = drain_stderr(fwd).await;
-            anyhow::bail!("ssh exited ({status}){why}");
+            let stderr = drain_stderr(fwd).await;
+            return Err(failure(format!("ssh exited ({status})"), stderr).into());
         }
         if tokio::time::Instant::now() >= deadline {
-            let why = drain_stderr(fwd).await;
-            anyhow::bail!("ssh did not forward the socket within {BIND_TIMEOUT:?}{why}");
+            let stderr = drain_stderr(fwd).await;
+            let said = format!("ssh did not forward the socket within {patience:?}");
+            return Err(failure(said, stderr).into());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// Whatever ssh complained about, trimmed to one line for a footer.
+/// Everything ssh complained about.
 #[cfg(unix)]
 async fn drain_stderr(fwd: &mut Forward) -> String {
     use tokio::io::AsyncReadExt;
@@ -257,10 +325,15 @@ async fn drain_stderr(fwd: &mut Forward) -> String {
     // Never block on this: ssh may still hold the pipe open.
     let read = tokio::time::timeout(Duration::from_millis(200), err.read_to_string(&mut text));
     read.await.ok();
-    match text.lines().find(|l| !l.trim().is_empty()) {
-        Some(line) => format!(": {}", line.trim()),
-        None => String::new(),
-    }
+    text
+}
+
+/// `said` for the footer, followed by ssh's own first real line when it had one.
+#[cfg(unix)]
+fn failure(said: String, stderr: String) -> SshFailure {
+    let why = crate::ssh_prompts::summary(&stderr);
+    let summary = if stderr.trim().is_empty() { said } else { format!("{said}: {why}") };
+    SshFailure { summary, stderr }
 }
 
 /// A private directory for one forwarding attempt.
@@ -297,7 +370,12 @@ fn local_socket_dir(target: &str) -> Result<tempfile::TempDir> {
 /// Windows OpenSSH cannot forward Unix sockets. Bridge each local pipe
 /// connection over `ssh ... butai proxy`, which also carries HTTP unchanged.
 #[cfg(windows)]
-pub async fn forward(target: &str, args: &[String], remote_socket: &str) -> Result<Forward> {
+pub async fn forward(
+    target: &str,
+    args: &[String],
+    remote_socket: &str,
+    _ask: Option<&AskpassEnv>,
+) -> Result<Forward> {
     anyhow::ensure!(!target.is_empty(), "no ssh target to dial back on");
     anyhow::ensure!(!remote_socket.is_empty(), "the far side did not say where its socket is");
     let directory = local_socket_dir(target)?;
@@ -399,9 +477,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_forward_refuses_without_somewhere_to_dial() {
-        assert!(forward("", &[], "/run/butai.sock").await.is_err());
-        assert!(forward("host", &[], "").await.is_err());
-        assert!(remote_socket("", &[]).await.is_err());
+        assert!(forward("", &[], "/run/butai.sock", None).await.is_err());
+        assert!(forward("host", &[], "", None).await.is_err());
+        assert!(remote_socket("", &[], None).await.is_err());
     }
 
     /// Verbatim from a real `butai --json whoami` on a machine with no daemon
@@ -419,6 +497,27 @@ mod tests {
         // machine, and it must not be the reason a host is unreachable.
         let reply = b"Welcome to gpu-box!\nlast login: never\n{\"socket\":\"/run/b.sock\"}\n";
         assert_eq!(socket_from_whoami(reply).unwrap(), "/run/b.sock");
+    }
+
+    /// The footer gets one line and the dialog gets the rest: the failure keeps
+    /// both, and `anyhow` context added by the caller must not hide it.
+    #[test]
+    fn a_failure_keeps_ssh_stderr_behind_the_footer_line() {
+        let err = anyhow::Error::new(SshFailure {
+            summary: "Host key verification failed.".into(),
+            stderr: "@@@@\nHost key verification failed.\n".into(),
+        })
+        .context("gpu-box");
+        let f = err.downcast_ref::<SshFailure>().expect("reachable through context");
+        assert!(f.stderr.starts_with("@@@@"));
+        assert_eq!(f.to_string(), "Host key verification failed.");
+    }
+
+    #[test]
+    fn a_failed_forward_names_the_exit_and_ssh_first_real_line() {
+        let f = failure("ssh exited (255)".into(), "@@@@\nPermission denied (publickey).\n".into());
+        assert_eq!(f.summary, "ssh exited (255): Permission denied (publickey).");
+        assert_eq!(failure("ssh exited (1)".into(), String::new()).summary, "ssh exited (1)");
     }
 
     #[test]

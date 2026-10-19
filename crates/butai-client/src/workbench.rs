@@ -12,7 +12,7 @@
 //! loop reconciles it, so a burst of pane output costs one paint rather than one
 //! per message.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -385,6 +385,26 @@ pub async fn run(
     // Machines whose link has dropped, and when to try them again.
     let mut downed: HashMap<String, Downed> = HashMap::new();
     let (adopt_tx, mut adopt_rx) = unbounded_channel::<(String, Result<crate::ssh::Forward>)>();
+    // What ssh asks while a person is waiting on a dial, and the windows that
+    // ask it. `None` where the platform cannot forward prompts, which leaves
+    // those dials as non-interactive as they always were.
+    let mut askpass = crate::askpass::Askpass::start()
+        .map_err(|e| tracing::debug!("ssh prompts are not forwarded: {e:#}"))
+        .ok();
+    // Dialogs waiting for the screen. Only one modal is ever up, and a question
+    // that arrives while you are typing a commit message waits its turn.
+    let mut pending_dialogs: VecDeque<chrome::DialogOverlay> = VecDeque::new();
+    // Where each question's answer goes back to, by the id its dialog carries.
+    // Dropping a sender is how a question is cancelled.
+    let mut ask_replies: HashMap<u64, tokio::sync::oneshot::Sender<Option<String>>> =
+        HashMap::new();
+    let mut next_ask: u64 = 0;
+    // Questions already asked in this dial, so a repeat can say the last answer
+    // was refused.
+    let mut ask_seen: HashSet<String> = HashSet::new();
+    // The user said no to a question, so the failure that follows is theirs and
+    // the footer is enough.
+    let mut ask_declined = false;
     // The GIT page's reads, which run off the loop so they cannot freeze it.
     let (git_tx, mut git_rx) = unbounded_channel::<GitLoad>();
     // The update check, off the loop for the same reason and one more: it is
@@ -437,6 +457,8 @@ pub async fn run(
                 reconnect: false,
                 args: r.args,
                 socket_path: r.socket_path,
+                interactive: false,
+                ask: None,
             },
             &mut dialling,
             &mut dial_meta,
@@ -824,6 +846,26 @@ pub async fn run(
         // Cheap on every pass: the write is debounced and the common case is a
         // map lookup that finds the page already there.
         views.note(showing_key.as_deref(), view.page, Instant::now());
+        // A question reaches the screen as soon as nothing else is being asked.
+        if view.overlay.is_none() {
+            if let Some(d) = pending_dialogs.pop_front() {
+                view.overlay = Some(Overlay::Dialog(d));
+                dirty = true;
+            }
+        }
+        // Another modal can replace a question's window (an update offer does).
+        // Its ssh must not wait three minutes on an answer that can no longer be
+        // given, so any question neither shown nor queued is cancelled.
+        if !ask_replies.is_empty() {
+            let shown = match &view.overlay {
+                Some(Overlay::Dialog(d)) => Some(d.purpose.clone()),
+                _ => None,
+            };
+            ask_replies.retain(|id, _| {
+                let this = chrome::dialog::Purpose::Ask(*id);
+                shown.as_ref() == Some(&this) || pending_dialogs.iter().any(|d| d.purpose == this)
+            });
+        }
         if dirty {
             let rect = chrome::stage_rect(cols, rows, &view);
             // Follow the stage. `watch` is what makes this cost no reconnect —
@@ -973,6 +1015,8 @@ pub async fn run(
                                         reconnect: false,
                                         args: a.ssh_args.clone(),
                                         socket_path: Some(a.socket.clone()),
+                                        interactive: false,
+                                        ask: None,
                                     },
                                     &mut dialling,
                                     &mut dial_meta,
@@ -1073,14 +1117,30 @@ pub async fn run(
                     dirty = true;
                 }
             }
+            Some(req) = recv_ask(askpass.as_mut()) => {
+                next_ask += 1;
+                let id = next_ask;
+                let retry = !ask_seen.insert(req.prompt.clone());
+                ask_replies.insert(id, req.reply);
+                pending_dialogs.push_back(crate::ssh_prompts::ask_dialog(
+                    id,
+                    &req.prompt,
+                    req.kind,
+                    retry,
+                ));
+                dirty = true;
+            }
             Some((target, dialled)) = adopt_rx.recv() => {
                 dialling.remove(&target);
+                ask_seen.clear();
                 let meta = dial_meta.remove(&target).unwrap_or_else(|| DialMeta {
                     label: target.clone(),
                     remember: false,
                     reconnect: false,
                     args: Vec::new(),
                     socket_path: None,
+                    interactive: false,
+                    ask: None,
                 });
                 match dialled {
                     Ok(forward) => {
@@ -1163,15 +1223,38 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    dial_failed(&meta.label, &e, &mut dial_errors, &mut view)
-                                }
+                                Err(e) => dial_failed_ui(
+                                    &meta,
+                                    &target,
+                                    &e,
+                                    &mut dial_errors,
+                                    &mut view,
+                                    &mut pending_dialogs,
+                                    &mut ask_declined,
+                                ),
                             },
-                            Err(e) => dial_failed(&meta.label, &e, &mut dial_errors, &mut view),
+                            Err(e) => dial_failed_ui(
+                                &meta,
+                                &target,
+                                &e,
+                                &mut dial_errors,
+                                &mut view,
+                                &mut pending_dialogs,
+                                &mut ask_declined,
+                            ),
                         }
                     }
-                    Err(e) => dial_failed(&meta.label, &e, &mut dial_errors, &mut view),
+                    Err(e) => dial_failed_ui(
+                        &meta,
+                        &target,
+                        &e,
+                        &mut dial_errors,
+                        &mut view,
+                        &mut pending_dialogs,
+                        &mut ask_declined,
+                    ),
                 }
+                ask_declined = false;
                 machines_stale.mark();
                 dirty = true;
             }
@@ -1634,6 +1717,21 @@ pub async fn run(
                         ));
                         dirty = true;
                     }
+                    Flow::Dialog { dialog, action } => {
+                        answer_dialog(
+                            *dialog,
+                            action,
+                            &mut view,
+                            &mut ask_replies,
+                            &mut ask_declined,
+                            &hosts,
+                            &mut dialling,
+                            &mut dial_meta,
+                            &adopt_tx,
+                            askpass.as_ref().map(|a| a.env.clone()),
+                        );
+                        dirty = true;
+                    }
                     Flow::DialHost(target) => {
                         connect_machine(
                             target,
@@ -1642,6 +1740,7 @@ pub async fn run(
                             &mut dialling,
                             &mut dial_meta,
                             &adopt_tx,
+                            askpass.as_ref().map(|a| a.env.clone()),
                         );
                         // The dial is in flight, not landed, and that is
                         // exactly what the SETTINGS row that started it has to
@@ -2506,6 +2605,7 @@ pub async fn run(
                                             &mut dialling,
                                             &mut dial_meta,
                                             &adopt_tx,
+                                            askpass.as_ref().map(|a| a.env.clone()),
                                         );
                                     }
                                 } else if let ListKind::Links = &list.kind {
@@ -4014,6 +4114,112 @@ fn dial_failed(
     errors.insert(label.to_string(), reason);
 }
 
+/// [`dial_failed`], and for a dial a person is waiting on, a window saying why.
+///
+/// The footer line goes on being written either way: the window is dismissed
+/// and the footer is what is still there afterwards. `declined` is the user
+/// having said no to one of ssh's questions, which makes the failure that
+/// follows their own doing — a window telling them what they just chose is
+/// noise.
+fn dial_failed_ui(
+    meta: &DialMeta,
+    target: &str,
+    err: &anyhow::Error,
+    errors: &mut HashMap<String, String>,
+    view: &mut View,
+    queue: &mut VecDeque<chrome::DialogOverlay>,
+    declined: &mut bool,
+) {
+    dial_failed(&meta.label, err, errors, view);
+    if meta.interactive && !std::mem::take(declined) {
+        queue.push_back(crate::ssh_prompts::failure_dialog(&meta.label, target, err));
+    }
+}
+
+/// Act on a closed dialog: send ssh its answer, or do what the button offered.
+#[allow(clippy::too_many_arguments)]
+fn answer_dialog(
+    mut dialog: chrome::DialogOverlay,
+    action: chrome::dialog::Action,
+    view: &mut View,
+    replies: &mut HashMap<u64, tokio::sync::oneshot::Sender<Option<String>>>,
+    declined: &mut bool,
+    hosts: &[Option<String>],
+    dialling: &mut HashSet<String>,
+    dial_meta: &mut HashMap<String, DialMeta>,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, Result<crate::ssh::Forward>)>,
+    ask: Option<crate::askpass::AskpassEnv>,
+) {
+    use chrome::dialog::{Action, Purpose};
+    match dialog.purpose.clone() {
+        Purpose::Ask(id) => {
+            let notice = dialog.buttons.len() == 1;
+            let answer = match (&action, &dialog.input) {
+                (Action::Accept, Some(input)) => Some(input.text.clone()),
+                (Action::Accept, None) => Some(crate::ssh_prompts::confirm_answer(true)),
+                // Reading a message is not declining anything.
+                _ if notice => Some(String::new()),
+                // A refused yes/no is an explicit "no", so ssh reports the
+                // refusal itself instead of waiting on a helper that went away.
+                (_, None) => Some(crate::ssh_prompts::confirm_answer(false)),
+                (_, Some(_)) => None,
+            };
+            if !notice && action != Action::Accept {
+                *declined = true;
+            }
+            if let Some(reply) = replies.remove(&id) {
+                reply.send(answer).ok();
+            }
+        }
+        Purpose::HostKeyChanged { target, host, file } => {
+            if action != Action::Other("replace") {
+                return;
+            }
+            match forget_host_key(&host, &file) {
+                Ok(()) => {
+                    view.flash =
+                        Some(format!("removed the saved key for {host} — connecting again"));
+                    connect_machine(target, hosts, view, dialling, dial_meta, tx, ask);
+                }
+                // Stay up and say why: the window is the place the person is
+                // looking, and the footer behind it is not.
+                Err(e) => {
+                    dialog.error = Some(format!("{e:#}"));
+                    view.overlay = Some(Overlay::Dialog(dialog));
+                }
+            }
+        }
+        Purpose::Notice => {}
+    }
+}
+
+/// Remove `host` from the `known_hosts` file ssh named, using ssh's own tool so
+/// hashed entries and comments are handled the way ssh would.
+fn forget_host_key(host: &str, file: &str) -> Result<()> {
+    anyhow::ensure!(!host.is_empty() && !file.is_empty(), "ssh did not say which entry");
+    let out = butai_protocol::local::background_command("ssh-keygen")
+        .args(["-R", host, "-f", file])
+        .output()
+        .context("run ssh-keygen")?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let why = String::from_utf8_lossy(&out.stderr);
+    let why = crate::ssh_prompts::summary(&why);
+    anyhow::bail!("ssh-keygen could not remove it: {why}")
+}
+
+/// The next question from ssh, or never when nothing can ask.
+///
+/// Same shape and same reason as [`recv_stage`]: a closed channel answering
+/// `None` forever would spin the select loop.
+async fn recv_ask(ask: Option<&mut crate::askpass::Askpass>) -> Option<crate::askpass::AskRequest> {
+    match ask {
+        Some(a) => a.requests.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The badge a `[[remote]]` block's tabs will carry.
 ///
 /// The exact rule the two readers of the file already use — [`crate::remotes`]
@@ -4933,6 +5139,7 @@ fn connect_machine(
     dialling: &mut HashSet<String>,
     dial_meta: &mut HashMap<String, DialMeta>,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, Result<crate::ssh::Forward>)>,
+    ask: Option<crate::askpass::AskpassEnv>,
 ) {
     if hosts.iter().flatten().any(|h| *h == target) {
         view.flash = Some(format!("{target} is already in the tab bar"));
@@ -4948,7 +5155,16 @@ fn connect_machine(
         target,
         // The picker dials with no extra ssh arguments and asks the far side
         // where its daemon is, which is why the block it writes is `host` alone.
-        DialMeta { label, remember: true, reconnect: false, args: Vec::new(), socket_path: None },
+        DialMeta {
+            label,
+            remember: true,
+            reconnect: false,
+            args: Vec::new(),
+            socket_path: None,
+            // Typed or picked by a person, who is now watching for it to land.
+            interactive: true,
+            ask,
+        },
         dialling,
         dial_meta,
         tx,
@@ -5090,11 +5306,12 @@ fn spawn_dial(
 ) {
     let args = meta.args.clone();
     let socket = meta.socket_path.clone();
+    let ask = meta.ask.clone();
     dialling.insert(target.clone());
     dial_meta.insert(target.clone(), meta);
     let tx = tx.clone();
     tokio::spawn(async move {
-        let out = crate::ssh::dial(&target, &args, socket.as_deref())
+        let out = crate::ssh::dial(&target, &args, socket.as_deref(), ask.as_ref())
             .await
             .with_context(|| target.to_string());
         tx.send((target, out)).ok();
@@ -5123,6 +5340,14 @@ struct DialMeta {
     /// handoff, or a `[[remote]] socket_path`). `None` means ask — the case for
     /// a machine chosen from the picker, which has told us nothing.
     socket_path: Option<String>,
+    /// Whether a person is waiting on this dial. Only then may ssh stop to ask
+    /// them something, and only then is a failure worth a window of its own: a
+    /// reconnect or an announcement happens while you are doing something else,
+    /// and a dialog about it would arrive in the middle of a keystroke.
+    interactive: bool,
+    /// How ssh reaches the workbench to ask. `Some` exactly when `interactive`
+    /// and the platform can forward prompts.
+    ask: Option<crate::askpass::AskpassEnv>,
 }
 
 /// How a machine in the tab bar was reached, kept for as long as it is there.
@@ -5228,6 +5453,8 @@ fn redial_lost(
             reconnect: true,
             args: spec.args,
             socket_path: spec.socket_path,
+            interactive: false,
+            ask: None,
         },
         dialling,
         dial_meta,
@@ -5782,6 +6009,12 @@ enum Flow {
     /// destination `ssh` takes, and it lands in the same place the picker's
     /// rows do — including being written down as a `[[remote]]`.
     DialHost(String),
+    /// A dialog was answered. Carries the dialog, so the loop can read the input
+    /// and see who was asking, and the button that closed it.
+    Dialog {
+        dialog: Box<chrome::DialogOverlay>,
+        action: chrome::dialog::Action,
+    },
     /// Put the focused rail's selected row on the stage — what Enter does, and
     /// what a second click on an already-selected row means.
     StageSelected,
@@ -7153,6 +7386,11 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
     if matches!(view.overlay, Some(Overlay::Prompt(_))) {
         return handle_prompt_key(k, view);
     }
+    // A dialog may be typed into as well, so it gets the same early claim on
+    // the keyboard: a passphrase with a `q` in it must not close the window.
+    if matches!(view.overlay, Some(Overlay::Dialog(_))) {
+        return handle_dialog_key(k, view);
+    }
     if matches!(view.overlay, Some(Overlay::Search(_))) {
         return handle_search_key(k, view);
     }
@@ -7223,6 +7461,28 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
     Flow::Continue
 }
 
+/// Keys while a dialog is up. The dialog interprets them; this closes it when
+/// they pressed a button.
+fn handle_dialog_key(k: event::KeyEvent, view: &mut View) -> Flow {
+    let Some(Overlay::Dialog(d)) = view.overlay.as_mut() else { return Flow::Continue };
+    match d.on_key(k.code, k.modifiers) {
+        Some(action) => finish_dialog(view, action),
+        None => Flow::Continue,
+    }
+}
+
+/// Take the dialog off the screen and hand it, with the button that closed it,
+/// to the loop — which is what knows who was asking.
+fn finish_dialog(view: &mut View, action: chrome::dialog::Action) -> Flow {
+    match view.overlay.take() {
+        Some(Overlay::Dialog(dialog)) => Flow::Dialog { dialog: Box::new(dialog), action },
+        other => {
+            view.overlay = other;
+            Flow::Continue
+        }
+    }
+}
+
 /// The pointer while a modal is up.
 ///
 /// The daemon had seven of these, one per modal, each with a hand-written width
@@ -7244,6 +7504,17 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
         event::MouseEventKind::Down(_) => {}
         _ => return Flow::Continue,
     }
+    // A dialog's buttons sit side by side on one row, which the row-indexed hit
+    // test cannot tell apart, and clicking outside one is ignored rather than
+    // dismissing it: the question may be ssh's, and walking away from it is an
+    // answer.
+    if let Some(Overlay::Dialog(d)) = view.overlay.as_mut() {
+        let hit = chrome::dialog::button_at(cols, rows, d, m.column, m.row);
+        return match hit.and_then(|i| d.press(i)) {
+            Some(action) => finish_dialog(view, action),
+            None => Flow::Continue,
+        };
+    }
     let Some(overlay) = view.overlay.as_mut() else { return Flow::Continue };
     let Some(row) = chrome::overlay_hit(cols, rows, overlay, m.column, m.row) else {
         // Outside the box: dismiss. The one thing a click past a question can
@@ -7254,7 +7525,7 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
     match overlay {
         // The prompt's row is text being typed, so clicking it keeps the modal
         // rather than answering something the user did not ask.
-        Overlay::Prompt(_) => Flow::Continue,
+        Overlay::Prompt(_) | Overlay::Dialog(_) => Flow::Continue,
         Overlay::List(list) => {
             if row >= list.items.len() {
                 return Flow::Continue;
@@ -8150,6 +8421,7 @@ fn paste_text(
                 f.searching = true;
                 return Flow::Search(f.query.clone());
             }
+            Overlay::Dialog(d) => d.paste(&text),
             Overlay::List(_) | Overlay::Confirm(_) => {}
         }
         return Flow::Continue;
@@ -15392,6 +15664,148 @@ name = \"terminal\"
         // machine that is already down has no photograph to point at.
         let down = Stage::down(PaneId(1), Rect::new(0, 0, 10, 3), Instant::now());
         assert!(!down.has_frame());
+    }
+
+    // ---- dialogs -----------------------------------------------------------
+
+    const HOST_KEY: &str =
+        "The authenticity of host 'macmini (100.113.243.56)' can't be established.\n\
+ED25519 key fingerprint is SHA256:hnZRMnSrfeIwqOHlgb106J8zCBjGGDvZgQhqkuMz6NI.\n\
+This key is not known by any other names.\n\
+Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    fn dialog_view(prompt: &str, kind: crate::askpass::AskKind) -> View {
+        View {
+            overlay: Some(Overlay::Dialog(crate::ssh_prompts::ask_dialog(1, prompt, kind, false))),
+            ..Default::default()
+        }
+    }
+
+    /// A reply channel, plus the pieces `answer_dialog` takes that these tests
+    /// have no use for.
+    struct Replies {
+        map: HashMap<u64, tokio::sync::oneshot::Sender<Option<String>>>,
+        rx: tokio::sync::oneshot::Receiver<Option<String>>,
+        declined: bool,
+    }
+
+    fn replies() -> Replies {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        Replies { map: HashMap::from([(1, tx)]), rx, declined: false }
+    }
+
+    fn answer(r: &mut Replies, view: &mut View, flow: Flow) {
+        let Flow::Dialog { dialog, action } = flow else { panic!("not a dialog answer: {flow:?}") };
+        let (tx, _rx) = unbounded_channel();
+        answer_dialog(
+            *dialog,
+            action,
+            view,
+            &mut r.map,
+            &mut r.declined,
+            &[],
+            &mut HashSet::new(),
+            &mut HashMap::new(),
+            &tx,
+            None,
+        );
+    }
+
+    /// The key that opened the box must not be the one that trusts the host.
+    #[test]
+    fn a_host_key_dialog_enter_declines_and_ssh_is_told_no() {
+        let mut view = dialog_view(HOST_KEY, crate::askpass::AskKind::Confirm);
+        let flow = handle_overlay_key(key(event::KeyCode::Enter), &mut view);
+        assert!(view.overlay.is_none(), "the dialog closes when a button is pressed");
+        let mut r = replies();
+        answer(&mut r, &mut view, flow);
+        assert_eq!(r.rx.try_recv().unwrap(), Some("no".to_string()));
+        assert!(r.declined, "the failure that follows is the user's own doing");
+    }
+
+    #[test]
+    fn y_trusts_the_host_and_ssh_is_told_yes() {
+        let mut view = dialog_view(HOST_KEY, crate::askpass::AskKind::Confirm);
+        let flow = handle_overlay_key(key(event::KeyCode::Char('y')), &mut view);
+        let mut r = replies();
+        answer(&mut r, &mut view, flow);
+        assert_eq!(r.rx.try_recv().unwrap(), Some("yes".to_string()));
+        assert!(!r.declined);
+    }
+
+    #[test]
+    fn a_passphrase_is_typed_in_and_sent_and_q_is_just_a_letter() {
+        let mut view =
+            dialog_view("Enter passphrase for key 'k': ", crate::askpass::AskKind::Secret);
+        for c in "aqb".chars() {
+            let flow = handle_overlay_key(key(event::KeyCode::Char(c)), &mut view);
+            assert!(matches!(flow, Flow::Continue));
+        }
+        assert!(matches!(view.overlay, Some(Overlay::Dialog(_))), "q must not close the dialog");
+        let flow = handle_overlay_key(key(event::KeyCode::Enter), &mut view);
+        let mut r = replies();
+        answer(&mut r, &mut view, flow);
+        assert_eq!(r.rx.try_recv().unwrap(), Some("aqb".to_string()));
+    }
+
+    #[test]
+    fn cancelling_a_passphrase_cancels_the_ssh_prompt() {
+        let mut view =
+            dialog_view("Enter passphrase for key 'k': ", crate::askpass::AskKind::Secret);
+        let flow = handle_overlay_key(key(event::KeyCode::Esc), &mut view);
+        let mut r = replies();
+        answer(&mut r, &mut view, flow);
+        assert_eq!(r.rx.try_recv().unwrap(), None);
+        assert!(r.declined);
+    }
+
+    #[test]
+    fn a_paste_lands_in_the_input_on_one_line() {
+        let mut view = dialog_view("password: ", crate::askpass::AskKind::Secret);
+        let mut files = Files::default();
+        let mut docs = Files::default();
+        paste_text("s3cret\n".into(), &mut view, &mut files, &mut docs, None);
+        let Some(Overlay::Dialog(d)) = &view.overlay else { panic!("dialog went away") };
+        assert_eq!(d.input.as_ref().unwrap().text, "s3cret");
+    }
+
+    /// The error path inside the window: a replacement that fails says so where
+    /// the person is looking, and the window stays.
+    #[test]
+    fn a_failed_replacement_stays_open_and_says_why() {
+        use chrome::dialog::{Action, Purpose};
+        let mut dialog = crate::ssh_prompts::failure_dialog(
+            "macmini",
+            "macmini",
+            &anyhow::Error::new(crate::ssh::SshFailure {
+                summary: "x".into(),
+                stderr: "REMOTE HOST IDENTIFICATION HAS CHANGED\nOffending ED25519 key in /nonexistent/known_hosts:1\nED25519 host key for macmini has changed\n".into(),
+            }),
+        );
+        assert!(matches!(dialog.purpose, Purpose::HostKeyChanged { .. }));
+        dialog.sel = 1;
+        let mut view = View::default();
+        let mut r = replies();
+        answer(
+            &mut r,
+            &mut view,
+            Flow::Dialog { dialog: Box::new(dialog), action: Action::Other("replace") },
+        );
+        let Some(Overlay::Dialog(d)) = &view.overlay else { panic!("the dialog was dropped") };
+        assert!(d.error.as_deref().is_some_and(|e| e.contains("ssh-keygen")), "{:?}", d.error);
+    }
+
+    #[test]
+    fn clicking_outside_a_dialog_does_not_answer_ssh() {
+        let mut view = dialog_view(HOST_KEY, crate::askpass::AskKind::Confirm);
+        let click = event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        assert!(matches!(overlay_mouse(&click, &mut view, 100, 30), Flow::Continue));
+        assert!(matches!(view.overlay, Some(Overlay::Dialog(_))));
     }
 
     /// Write `s` into a stage buffer's first row, the way a frame would.

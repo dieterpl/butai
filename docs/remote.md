@@ -143,18 +143,33 @@ rather than offering a disconnect it would then refuse.
 
 | Purpose | Command |
 |---|---|
-| Ask where the daemon is | `ssh -T -o BatchMode=yes <control opts> <args> <target> '<find>; butai ls >/dev/null 2>&1; exec butai --json whoami'` |
-| Forward the socket | `ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes <control opts> -L <local>:<far> <args> <target>` |
+| Ask where the daemon is | `ssh -T [-o BatchMode=yes] <control opts> <args> <target> '<find>; butai ls >/dev/null 2>&1; exec butai --json whoami'` |
+| Forward the socket | `ssh -N -T [-o BatchMode=yes] -o ExitOnForwardFailure=yes <control opts> -L <local>:<far> <args> <target>` |
 | Stream one pane | `ssh -T <control opts> <args> <target> '<find>; exec butai proxy'` |
 
 `-T` everywhere: these carry a binary protocol or one JSON document, and a pty
 would echo and newline-translate it. `-N` on the forward because that connection
 exists only to carry the tunnel.
 
-**`BatchMode=yes` on the two the client runs for itself.** A key that needs a
-passphrase typed, or a password, cannot be used to connect a machine from inside
-the workbench — there is nowhere to type it. Use an agent. `butai proxy` does not
-set it, so a script running that by hand can still be prompted.
+**Questions from ssh become windows.** A machine you connect yourself — `[+ host]`,
+or the SETTINGS connect row — runs the first two *without* `BatchMode`, with
+`SSH_ASKPASS` pointing at `butai askpass` and `SSH_ASKPASS_REQUIRE=force`, and the
+ssh started in a session of its own so it has no terminal to ask on instead.
+Every question ssh would have printed arrives in the workbench as a window:
+
+| ssh asks | The window |
+|---|---|
+| `Are you sure you want to continue connecting?` | **Unknown host**: key type, SHA-256 fingerprint, how to compare it on the machine. Opens on cancel; `y` trusts and writes `known_hosts` |
+| `Enter passphrase for key …` / `user@host's password:` / a verification code | A masked input. Asking again means the last answer was refused, and the window says so |
+| the key changed | **Host key changed**, with the offered fingerprint and the `known_hosts` entry. `R` removes that entry and connects again; `esc` is the default |
+
+The window travels over a socket in a directory only you can enter (under
+`$XDG_RUNTIME_DIR/butai-forwards`), and the answer is not logged. A connection
+that was not started by a person — a reconnect after sleep, an announced
+machine, the `[[remote]]` blocks at start-up — keeps `BatchMode=yes` and stays
+silent, so a key that needs a passphrase still wants an agent there. While a
+window is open the dial's timeout is extended by three minutes. This is Unix
+only; on Windows the commands above run as before, with `BatchMode=yes`.
 
 **Connection sharing.** All three pass `ControlMaster=auto`,
 `ControlPath=~/.butai/ssh-%C` and `ControlPersist=60`. Connecting one machine is

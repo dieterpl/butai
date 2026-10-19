@@ -79,7 +79,12 @@ export interface ActionsOptions {
    * order, or `null` when it was cancelled — which every caller reads as "then
    * do nothing".
    */
-  ask: (title: string, fields: readonly AskField[], submit?: string) => Promise<string[] | null>;
+  ask: (
+    title: string,
+    fields: readonly AskField[],
+    submit?: string,
+    check?: (values: string[]) => Promise<string | null>,
+  ) => Promise<string[] | null>;
   /** Show a patch, read-only. A diff and a commit are the same reader. */
   patch: (title: string, text: string) => void;
   /**
@@ -689,6 +694,26 @@ export class Actions {
       const d = await api.addDaemon({ socket, ...(name ? { name } : {}) });
       return { ok: !d.error, summary: d.error ?? d.label };
     });
+
+  /**
+   * [`addDaemon`] for a window that can show the refusal: the reason, or `null`
+   * when the machine joined.
+   *
+   * Not `run`, which answers a failure with a toast over a window that has
+   * already closed. Here the caller is the window, and the reason belongs in it.
+   */
+  tryAddDaemon = async (socket: string, name?: string): Promise<string | null> => {
+    if (!socket) return "a machine needs a socket path";
+    try {
+      const d = await api.addDaemon({ socket, ...(name ? { name } : {}) });
+      if (d.error) return d.error;
+      toast.success(`add ${name || socket}: ${d.label}`);
+      this.o.refresh();
+      return null;
+    } catch (e) {
+      return why(e);
+    }
+  };
 
   removeDaemon = async (key: string) => {
     if (!(await this.o.confirm(`Remove ${key} from this bridge?`, "Its projects leave the tab bar. The daemon keeps running."))) return null;

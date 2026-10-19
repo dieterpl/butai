@@ -2,6 +2,7 @@
 //! workbench it draws from the daemon's `/v1/*` DTOs.
 
 pub mod api;
+pub mod askpass;
 pub mod chrome;
 pub mod clipboard;
 pub mod config;
@@ -20,6 +21,7 @@ pub mod reference;
 pub mod selection;
 pub mod ssh;
 pub mod ssh_config;
+pub mod ssh_prompts;
 pub mod syntax;
 #[cfg(unix)]
 pub mod term;

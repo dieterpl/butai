@@ -189,8 +189,11 @@ footer carries ssh's own last line; the same dial by hand shows the whole thing:
 ssh -o BatchMode=yes <your ssh_args> <host> butai ls
 ```
 
-`BatchMode=yes` is the usual answer — a key needing a passphrase cannot be used
-from inside the workbench, because there is nowhere to type it. Use an agent.
+`BatchMode=yes` is the usual answer for a *reconnect* — those never ask, so a key
+needing a passphrase has to be in an agent. A machine you connect by hand from
+`[+ host]` can ask: an unknown host, a passphrase or a changed key opens a
+window instead (see [remote.md](remote.md#what-it-runs)). `Host key verification
+failed` in the footer after cancelling one is the cancel, not a second problem.
 
 **On a butai older than this behaviour**, the machine never returned at all and
 `alt-h` refused it with `<host> is already in the tab bar`. The workaround was
