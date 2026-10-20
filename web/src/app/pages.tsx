@@ -367,9 +367,21 @@ function Home(p: PageProps) {
     closeChat: (row) => {
       void p.actions.kill(row.ws, row.pane, row.agent.title);
     },
+    tag: (row, next) => {
+      void p.actions.tagAgent(row.ws, row.pane, next.role, next.labels);
+    },
+    newLabel: (row) => {
+      void p.actions.newLabel(row.ws, row.pane, row.agent);
+    },
+    // Stays on HOME: the new project appears in the fleet when the daemon
+    // answers, which is the whole of what pressing `+` on a machine asked for.
+    newWorkspace: (machine) => {
+      void p.actions.newWorkspaceOn(machine.daemon, machine.label);
+    },
   };
 
   const act: HomeActions = {
+    newWorkspace: () => p.on.newWorkspace(),
     press: (surface, key) => {
       const verb = verbFor(surface, key, p.view.pin);
       // `enter` reads the row: an agent goes to that agent, a project goes to

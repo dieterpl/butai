@@ -461,6 +461,9 @@ class Http:
     def post(self, path, json_body=None, **kw):
         return self.request("POST", path, json_body=json_body, **kw)
 
+    def put(self, path, json_body=None, **kw):
+        return self.request("PUT", path, json_body=json_body, **kw)
+
     def delete(self, path, **kw):
         return self.request("DELETE", path, **kw)
 

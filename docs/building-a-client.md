@@ -177,7 +177,8 @@ Conventions:
 | GET | `/v1/workspaces/{id}/processes` | `[ProcessDto]` |
 | GET | `/v1/workspaces/{id}/changes` | `ChangesDto` (404 if not a git repo) |
 | GET | `/v1/system` | `SysDto` |
-| GET | `/v1/agents` | `[string]` (configured agent type names) |
+| GET | `/v1/agents` | `[string]` (configured agent type names, in picker order) |
+| GET | `/v1/agents/usage` | `[AgentUseDto]` — `{name,count,last}` per agent type, in the same order |
 | GET | `/v1/usage` | `UsageDto` — every configured CLI's account standing |
 | GET | `/v1/events` | SSE stream (Section 6) |
 
@@ -292,7 +293,9 @@ AgentDto {
   "question": false,               // a decision prompt is on screen (subset of "waiting")
   "started_ms": 1754900000000,     // unix ms the process started; run the clock yourself
   "working_since_ms": null,        // unix ms the current turn began, null when not working
-  "unread": false                  // reached "finished"/"exited" and not looked at since
+  "unread": false,                 // reached "finished"/"exited" and not looked at since
+  "role": null,                    // "lead" | "worker" | "loop" | "watch" | null — the person's note on what it is for
+  "labels": []                     // free words, e.g. ["review"]; set with PUT .../panes/{pane}/tags
 }
 
 ProcessDto {

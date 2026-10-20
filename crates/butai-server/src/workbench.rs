@@ -70,6 +70,14 @@ pub struct AgentMeta {
     /// which is what it is for; the point of this flag is that they are now the
     /// exception rather than every idle agent on every restart.
     pub spoke: bool,
+    /// The person's note on what this chat is for — see
+    /// [`AgentDto::role`](butai_protocol::api::AgentDto::role). Lives with the
+    /// pane's metadata rather than on the terminal because it is not the
+    /// process's: it must outlive a respawn (a failed resume restarts the pane)
+    /// and go into `session.json` beside the conversation id.
+    pub role: Option<String>,
+    /// Free labels, same reasoning as [`role`](Self::role).
+    pub labels: Vec<String>,
 }
 
 pub struct Workspace {

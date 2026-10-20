@@ -10,12 +10,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent_usage::AgentUsage;
 use crate::config::Config;
 use butai_protocol::api::{
-    AgentDto, AgentState, ApiEvent, ApiReply, ApiRequest, BrowseDto, BrowseEntry, ContainerDto,
-    DiffDto, DiskDto, FileDto, GitOp, GitOpDto, GpuDto, NetDto, NotificationDto, NotificationKind,
-    NotificationsDto, OutputFormat, OutputSource, PaneOutputDto, ProcessDto, StackDto, SysDto,
-    TreeDto, TreeEntry, TreeFilter, UsageDto, WorkspaceDetail, WorkspaceSummary,
+    normalize_tags, AgentDto, AgentState, AgentUseDto, ApiEvent, ApiReply, ApiRequest, BrowseDto,
+    BrowseEntry, ContainerDto, DiffDto, DiskDto, FileDto, GitOp, GitOpDto, GpuDto, NetDto,
+    NotificationDto, NotificationKind, NotificationsDto, OutputFormat, OutputSource, PaneOutputDto,
+    ProcessDto, StackDto, SysDto, TreeDto, TreeEntry, TreeFilter, UsageDto, WorkspaceDetail,
+    WorkspaceSummary,
 };
 use butai_protocol::{
     AttachTarget, ClientMsg, Command, FrameUpdate, InputEvent, MouseButton, PaneId, ServerMsg,
@@ -399,6 +401,9 @@ pub struct ServerCore {
     /// Where to persist the open-workspace list so it survives daemon
     /// restarts/reboots. `None` disables persistence (tests, standalone).
     session_store: Option<PathBuf>,
+    /// Which agents a person has started, for the picker's order. Written
+    /// beside the session store, so it exists only where that does.
+    agent_usage: AgentUsage,
     /// The socket this daemon actually bound, handed to every pane as
     /// `$BUTAI_SOCKET`. Defaults to the configured path for `standalone`, which
     /// binds nothing.
@@ -524,6 +529,13 @@ struct PersistedAgent {
     /// launch they would otherwise get.
     #[serde(default)]
     spoke: bool,
+    /// The person's role and labels for this chat (see [`AgentMeta::role`]).
+    /// `#[serde(default)]`: a session file from before tags existed loads with
+    /// none, which is how those chats looked.
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -740,6 +752,7 @@ impl ServerCore {
             notifications: std::collections::VecDeque::new(),
             notif_seq: 0,
             session_store: None,
+            agent_usage: AgentUsage::default(),
             socket: butai_protocol::paths::socket_path(),
             restoring: false,
             git_refreshing: std::collections::HashSet::new(),
@@ -759,7 +772,24 @@ impl ServerCore {
     /// Enable workspace persistence, restoring any previously saved session
     /// immediately. Call before `run()`. Only the socket daemon does this.
     pub fn set_session_store(&mut self, path: PathBuf) {
+        // The agent history lives next to the session it belongs to, so a
+        // daemon pointed at its own store gets its own history too.
+        self.agent_usage = AgentUsage::load(path.with_file_name("agent_usage.json"));
         self.session_store = Some(path);
+    }
+
+    /// Agent types in the order a picker lists them.
+    fn agent_names(&self) -> Vec<String> {
+        let names: Vec<String> = self.config.agents.iter().map(|a| a.name.clone()).collect();
+        self.agent_usage.ordered(&names, self.config.general.agent_order)
+    }
+
+    /// Count an agent a person started.
+    fn note_agent_start(&mut self, name: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.agent_usage.record(name, now);
     }
 
     /// Record the socket the listener is actually bound to.
@@ -1528,10 +1558,12 @@ impl ServerCore {
                 a.spoke,
                 false,
             ) {
-                Ok(pane) if saved.stage.as_deref() == Some(a.dump.as_str()) => {
-                    staged = Some(pane);
+                Ok(pane) => {
+                    self.set_agent_tags(pane, a.role.clone(), a.labels.clone());
+                    if saved.stage.as_deref() == Some(a.dump.as_str()) {
+                        staged = Some(pane);
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => warn!("restore agent {:?}: {e:#}", a.agent),
             }
         }
@@ -1696,8 +1728,11 @@ impl ServerCore {
         else {
             return false;
         };
-        let Some(name) =
-            self.workspaces.get(&sid).and_then(|w| w.agent_meta.get(&pane)).map(|m| m.name.clone())
+        let Some((name, role, labels)) = self
+            .workspaces
+            .get(&sid)
+            .and_then(|w| w.agent_meta.get(&pane))
+            .map(|m| (m.name.clone(), m.role.clone(), m.labels.clone()))
         else {
             return false;
         };
@@ -1744,6 +1779,8 @@ impl ServerCore {
                 return true;
             }
         };
+        // The restarted pane is the same chat to the person who tagged it.
+        self.set_agent_tags(fresh, role, labels);
         // Put it back where it was: the rails are ordered, and the pane dumps
         // are keyed by position, so appending would silently renumber both.
         if let Some(ws) = self.workspaces.get_mut(&sid) {
@@ -1930,6 +1967,8 @@ impl ServerCore {
                                 dump: agent_dump(i),
                                 session_id: meta.session_id.clone(),
                                 spoke: meta.spoke,
+                                role: meta.role.clone(),
+                                labels: meta.labels.clone(),
                             })
                         })
                         .collect();
@@ -2320,8 +2359,9 @@ impl ServerCore {
         match cmd {
             Command::SpawnAgent(name) => {
                 if let Some(sid) = ws_id {
-                    if let Err(e) = self.spawn_agent(sid, &name) {
-                        self.report_error(id, format!("{e:#}"));
+                    match self.spawn_agent(sid, &name) {
+                        Ok(()) => self.note_agent_start(&name),
+                        Err(e) => self.report_error(id, format!("{e:#}")),
                     }
                 }
             }
@@ -2908,9 +2948,16 @@ impl ServerCore {
                 None => ApiReply::NotFound(format!("nothing running for workspace {ws}")),
             },
             ApiRequest::System => ApiReply::System(self.build_sys_dto()),
-            ApiRequest::AgentTypes => {
-                ApiReply::AgentTypes(self.config.agents.iter().map(|a| a.name.clone()).collect())
-            }
+            ApiRequest::AgentTypes => ApiReply::AgentTypes(self.agent_names()),
+            ApiRequest::AgentUsage => ApiReply::AgentUsage(
+                self.agent_names()
+                    .into_iter()
+                    .map(|name| {
+                        let u = self.agent_usage.get(&name);
+                        AgentUseDto { name, count: u.count, last: u.last }
+                    })
+                    .collect(),
+            ),
             ApiRequest::Usage => ApiReply::Usage(self.build_usage_dto()),
             ApiRequest::Notifications { since } => {
                 ApiReply::Notifications(self.notifications_since(since))
@@ -2928,7 +2975,14 @@ impl ServerCore {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
                 }
                 match self.spawn_agent_restoring(ws, &name, None, None, false, background) {
-                    Ok(_) => ApiReply::Ok,
+                    Ok(_) => {
+                        // `background` is how a helper an agent starts for
+                        // itself says so; that is not a pick.
+                        if !background {
+                            self.note_agent_start(&name);
+                        }
+                        ApiReply::Ok
+                    }
                     Err(e) => ApiReply::BadRequest(format!("{e:#}")),
                 }
             }
@@ -3049,6 +3103,25 @@ impl ServerCore {
                     Some(_) => ApiReply::Ok,
                     None => ApiReply::NotFound(format!("no pane {pane}")),
                 }
+            }
+            ApiRequest::TagAgent { ws, pane, role, labels } => {
+                let known = match self.workspaces.get(&ws) {
+                    Some(w) => w.agents.contains(&pane),
+                    None => return ApiReply::NotFound(format!("no workspace {ws}")),
+                };
+                if !known {
+                    return ApiReply::NotFound(format!("no agent {pane} in workspace {ws}"));
+                }
+                let (role, labels) = match normalize_tags(role.as_deref(), &labels) {
+                    Ok(t) => t,
+                    Err(e) => return ApiReply::BadRequest(e),
+                };
+                if !self.set_agent_tags(pane, role, labels) {
+                    return ApiReply::NotFound(format!("no agent {pane}"));
+                }
+                self.persist_session();
+                self.dirty = true;
+                ApiReply::Ok
             }
             ApiRequest::StageFile { ws, path } => self.api_git(ws, |g| g.stage_path(&path)),
             ApiRequest::UnstageFile { ws, path } => self.api_git(ws, |g| g.unstage_path(&path)),
@@ -3364,6 +3437,7 @@ impl ServerCore {
         // state machine would never produce.
         let track = self.agent_track.get(&pane);
         let state = track.map(|tr| tr.state).unwrap_or(AgentState::Idle);
+        let meta = self.workspaces.values().find_map(|w| w.agent_meta.get(&pane));
         Some(AgentDto {
             pane,
             title: t.agent_title(),
@@ -3377,7 +3451,21 @@ impl ServerCore {
             // An untracked pane has crossed no edge this daemon saw, so it has
             // no news to report — the same answer the `unwrap_or` above gives.
             unread: track.is_some_and(|tr| tr.unread),
+            role: meta.and_then(|m| m.role.clone()),
+            labels: meta.map(|m| m.labels.clone()).unwrap_or_default(),
         })
+    }
+
+    /// Set an agent's role and labels in place. Returns whether the pane is a
+    /// known agent; the caller has already validated the values.
+    fn set_agent_tags(&mut self, pane: PaneId, role: Option<String>, labels: Vec<String>) -> bool {
+        let Some(meta) = self.workspaces.values_mut().find_map(|w| w.agent_meta.get_mut(&pane))
+        else {
+            return false;
+        };
+        meta.role = role;
+        meta.labels = labels;
+        true
     }
 
     fn build_agents(&self, sid: SessionId) -> Vec<AgentDto> {
@@ -4489,8 +4577,16 @@ impl ServerCore {
             // A resumed pane is by definition one that had already been spoken
             // to, so it stays resumable across a second restart without waiting
             // for the user to type into it again.
-            ws.agent_meta
-                .insert(pane, AgentMeta { name: agent.name.clone(), session_id, spoke: resumed });
+            ws.agent_meta.insert(
+                pane,
+                AgentMeta {
+                    name: agent.name.clone(),
+                    session_id,
+                    spoke: resumed,
+                    role: None,
+                    labels: Vec::new(),
+                },
+            );
             if !background {
                 ws.stage = Some(pane);
             }
@@ -5189,6 +5285,30 @@ mod tests {
     use crate::config::AgentDef;
     use butai_protocol::{Encoding, KeyEvent};
     use tokio::sync::mpsc::unbounded_channel;
+
+    /// A chat's role and labels are written into `session.json` and read back,
+    /// and a file from before they existed still loads — untagged, which is how
+    /// those chats looked.
+    #[test]
+    fn a_chats_tags_survive_the_session_file_and_old_files_still_load() {
+        let tagged = PersistedAgent {
+            agent: "claude".into(),
+            dump: "agent-0.bin".into(),
+            session_id: None,
+            spoke: true,
+            role: Some("lead".into()),
+            labels: vec!["review".into(), "bug".into()],
+        };
+        let back: PersistedAgent =
+            serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
+        assert_eq!(back.role.as_deref(), Some("lead"));
+        assert_eq!(back.labels, ["review", "bug"]);
+
+        let old: PersistedAgent =
+            serde_json::from_str(r#"{"agent":"claude","dump":"agent-0.bin"}"#).unwrap();
+        assert_eq!(old.role, None);
+        assert!(old.labels.is_empty());
+    }
 
     /// A buffer whose rows are the given lines, left-aligned and space-padded.
     fn buf_of(lines: &[&str]) -> Buffer {

@@ -73,6 +73,45 @@ pub struct General {
     /// screens of a redraw-heavy agent and well over a thousand lines of plain
     /// output.
     pub restore_bytes: usize,
+    /// Keep the six built-in launchers alongside your `[[agents]]`.
+    ///
+    /// On by default: an `[[agents]]` block adds to the built-ins, and one
+    /// with the name of a built-in replaces it. Off gives back the old
+    /// behaviour, where the list is exactly what the file declares.
+    pub builtin_agents: bool,
+    /// How the agent picker orders the list. See [`AgentOrder`].
+    pub agent_order: AgentOrder,
+}
+
+/// The order `GET /v1/agents` lists agent types in, and so the order of the
+/// picker in every client.
+///
+/// Parsed leniently: a misspelt value is the default order, not a config the
+/// daemon refuses to read. Every other key in the file would have been lost to
+/// the parse fallback for the sake of one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentOrder {
+    /// The order of the launchers: built-ins first, then your own.
+    Config,
+    /// Alphabetical.
+    Name,
+    /// Most started first. The default; with no history it is `Config`.
+    #[default]
+    Frequent,
+    /// Most recently started first.
+    Recent,
+}
+
+impl<'de> Deserialize<'de> for AgentOrder {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(d)?;
+        Ok(match word.trim().to_ascii_lowercase().as_str() {
+            "config" => Self::Config,
+            "name" => Self::Name,
+            "recent" => Self::Recent,
+            _ => Self::Frequent,
+        })
+    }
 }
 
 impl Default for General {
@@ -82,6 +121,8 @@ impl Default for General {
             exit_when_empty: true,
             scrollback: 5000,
             restore_bytes: 256 * 1024,
+            builtin_agents: true,
+            agent_order: AgentOrder::default(),
         }
     }
 }
@@ -200,88 +241,33 @@ impl Config {
         cfg
     }
 
+    /// Merge the built-in launchers with the file's `[[agents]]`.
+    ///
+    /// By name: a block called `codex` replaces the built-in `codex` where it
+    /// stands, any other block is appended after the built-ins. Until 1.4 the
+    /// built-ins were filled in only when the file declared no agents at all,
+    /// so a single block hid all six; `[general] builtin_agents = false` is
+    /// that behaviour.
     fn fill_builtins(&mut self) {
-        if self.agents.is_empty() {
-            // Agents run unattended in rail panes, so the built-in launchers
-            // use each CLI's auto-approve flag; override via [[agents]].
-            // Third column is `resume_args` (see [`AgentDef::resume_args`]).
-            //
-            // `{session_id}` is the conversation butai names for this pane. It
-            // is what makes restore correct with more than one agent open: the
-            // obvious flags (`claude --continue`, `gemini --resume latest`) all
-            // mean "the most recent conversation *in this directory*", so two
-            // agents in one workspace would reopen the same transcript and
-            // interleave into it. Naming it removes the ambiguity.
-            //
-            // Note the id is set with one flag and reopened with another. Both
-            // CLIs refuse to re-declare an id that already exists — gemini
-            // exits outright — so `--session-id` must appear only in `args` and
-            // `--resume` only in `resume_args`.
-            //
-            // Filled in only where verified against the installed CLI:
-            // `claude` v2.1 and `gemini` v0.53.1, both 2026-08-03, and
-            // `opencode` v1.1.25 on 2026-09-24. The rest are left empty
-            // deliberately — a wrong flag makes the CLI exit on launch. Fill
-            // them in via `[[agents]]` once checked against the CLI you
-            // actually run.
-            type Builtin<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
-            let builtins: [Builtin<'_>; 6] = [
-                (
-                    "claude",
-                    &["--dangerously-skip-permissions", "--session-id", "{session_id}"],
-                    &["--dangerously-skip-permissions", "--resume", "{session_id}"],
-                    &[],
-                ),
-                // Codex has no way to be told an id at launch; it assigns its
-                // own, and `codex resume` takes it afterwards. Reopening the
-                // right one therefore means learning the id from codex first,
-                // which butai does not do yet.
-                ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[], &[]),
-                (
-                    "gemini",
-                    &["--yolo", "--session-id", "{session_id}"],
-                    &["--yolo", "--resume", "{session_id}"],
-                    &[],
-                ),
-                // aider has no session concept at all: its history is per
-                // directory, so there is nothing per-pane to name.
-                ("aider", &["--yes-always"], &[], &[]),
-                // OpenCode assigns its own opaque id on first launch. It can
-                // reopen that id with `--session`, but cannot be told the id
-                // butai minted before the session exists, so resume stays off.
-                // Permissions are configuration rather than a stable v1 CLI
-                // flag; the inline override is the documented unattended
-                // equivalent and preserves every explicit `deny` only when a
-                // user replaces this built-in with their own definition.
-                ("opencode", &[], &[], &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]),
-                // Antigravity, Google's agent CLI and the announced successor
-                // to `gemini`. Its binary is `agy`, so that is the agent's name
-                // here, the same way the others are named after theirs.
-                //
-                // Codex-shaped for sessions: `agy --conversation <id>` reopens
-                // one, but nothing names an id at *launch*, so butai has no id
-                // to hand back and `resume_args` stays empty. `--continue` is
-                // deliberately not used — it means "the most recent
-                // conversation in this directory", which is exactly the
-                // ambiguity `{session_id}` exists to remove.
-                //
-                // Flag verified against agy 1.1.12 on 2026-08-11.
-                ("agy", &["--dangerously-skip-permissions"], &[], &[]),
-            ];
-            for (name, args, resume_args, env) in builtins {
-                self.agents.push(AgentDef {
-                    name: name.into(),
-                    command: name.into(),
-                    args: args.iter().map(|s| s.to_string()).collect(),
-                    resume_args: resume_args.iter().map(|s| s.to_string()).collect(),
-                    env: env.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
-                    // The built-ins are exactly the agents the generic tables
-                    // are tuned against, so they carry no overrides.
-                    waiting_pattern: None,
-                    busy_pattern: None,
-                });
+        if !self.general.builtin_agents {
+            return;
+        }
+        let mut merged = builtin_agents();
+        let builtins = merged.len();
+        let mut replaced = vec![false; builtins];
+        for mine in std::mem::take(&mut self.agents) {
+            // The first block of a name wins a built-in's slot; a repeat of it
+            // is appended, as duplicates always were, and `agent()` still finds
+            // the first.
+            match merged.iter().take(builtins).position(|a| a.name == mine.name) {
+                Some(i) if !replaced[i] => {
+                    replaced[i] = true;
+                    merged[i] = mine;
+                }
+                _ => merged.push(mine),
             }
         }
+        self.agents = merged;
     }
 
     pub fn shell(&self) -> String {
@@ -291,6 +277,90 @@ impl Config {
     pub fn agent(&self, name: &str) -> Option<&AgentDef> {
         self.agents.iter().find(|a| a.name == name)
     }
+}
+
+/// The launchers butai ships.
+fn builtin_agents() -> Vec<AgentDef> {
+    // Agents run unattended in rail panes, so the built-in launchers
+    // use each CLI's auto-approve flag; override via [[agents]].
+    // Third column is `resume_args` (see [`AgentDef::resume_args`]).
+    //
+    // `{session_id}` is the conversation butai names for this pane. It
+    // is what makes restore correct with more than one agent open: the
+    // obvious flags (`claude --continue`, `gemini --resume latest`) all
+    // mean "the most recent conversation *in this directory*", so two
+    // agents in one workspace would reopen the same transcript and
+    // interleave into it. Naming it removes the ambiguity.
+    //
+    // Note the id is set with one flag and reopened with another. Both
+    // CLIs refuse to re-declare an id that already exists — gemini
+    // exits outright — so `--session-id` must appear only in `args` and
+    // `--resume` only in `resume_args`.
+    //
+    // Filled in only where verified against the installed CLI:
+    // `claude` v2.1 and `gemini` v0.53.1, both 2026-08-03, and
+    // `opencode` v1.1.25 on 2026-09-24. The rest are left empty
+    // deliberately — a wrong flag makes the CLI exit on launch. Fill
+    // them in via `[[agents]]` once checked against the CLI you
+    // actually run.
+    type Builtin<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
+    let builtins: [Builtin<'_>; 6] = [
+        (
+            "claude",
+            &["--dangerously-skip-permissions", "--session-id", "{session_id}"],
+            &["--dangerously-skip-permissions", "--resume", "{session_id}"],
+            &[],
+        ),
+        // Codex has no way to be told an id at launch; it assigns its
+        // own, and `codex resume` takes it afterwards. Reopening the
+        // right one therefore means learning the id from codex first,
+        // which butai does not do yet.
+        ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[], &[]),
+        (
+            "gemini",
+            &["--yolo", "--session-id", "{session_id}"],
+            &["--yolo", "--resume", "{session_id}"],
+            &[],
+        ),
+        // aider has no session concept at all: its history is per
+        // directory, so there is nothing per-pane to name.
+        ("aider", &["--yes-always"], &[], &[]),
+        // OpenCode assigns its own opaque id on first launch. It can
+        // reopen that id with `--session`, but cannot be told the id
+        // butai minted before the session exists, so resume stays off.
+        // Permissions are configuration rather than a stable v1 CLI
+        // flag; the inline override is the documented unattended
+        // equivalent and preserves every explicit `deny` only when a
+        // user replaces this built-in with their own definition.
+        ("opencode", &[], &[], &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]),
+        // Antigravity, Google's agent CLI and the announced successor
+        // to `gemini`. Its binary is `agy`, so that is the agent's name
+        // here, the same way the others are named after theirs.
+        //
+        // Codex-shaped for sessions: `agy --conversation <id>` reopens
+        // one, but nothing names an id at *launch*, so butai has no id
+        // to hand back and `resume_args` stays empty. `--continue` is
+        // deliberately not used — it means "the most recent
+        // conversation in this directory", which is exactly the
+        // ambiguity `{session_id}` exists to remove.
+        //
+        // Flag verified against agy 1.1.12 on 2026-08-11.
+        ("agy", &["--dangerously-skip-permissions"], &[], &[]),
+    ];
+    builtins
+        .iter()
+        .map(|(name, args, resume_args, env)| AgentDef {
+            name: (*name).into(),
+            command: (*name).into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            resume_args: resume_args.iter().map(|s| s.to_string()).collect(),
+            env: env.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+            // The built-ins are exactly the agents the generic tables are tuned
+            // against, so they carry no overrides.
+            waiting_pattern: None,
+            busy_pattern: None,
+        })
+        .collect()
 }
 
 /// Per-project workspace file (`.butai.toml` at the workspace root):
@@ -432,8 +502,66 @@ mod tests {
         let mut cfg: Config = toml::from_str(text).unwrap();
         cfg.fill_builtins();
         assert_eq!(cfg.general.default_shell.as_deref(), Some("fish"));
-        assert_eq!(cfg.agents.len(), 1, "explicit agents replace builtins");
+        assert_eq!(cfg.agents.len(), 6, "a block named for a built-in replaces it in place");
+        assert_eq!(cfg.agents[0].name, "claude", "and keeps its slot");
         assert_eq!(cfg.agent("claude").unwrap().args, vec!["--continue"]);
+    }
+
+    fn parsed(text: &str) -> Config {
+        let mut cfg: Config = toml::from_str(text).unwrap();
+        cfg.fill_builtins();
+        cfg
+    }
+
+    fn names(cfg: &Config) -> Vec<&str> {
+        cfg.agents.iter().map(|a| a.name.as_str()).collect()
+    }
+
+    /// The reason the merge exists: adding an agent used to hide the other
+    /// six, because the built-ins were filled in only when the list was empty.
+    #[test]
+    fn a_new_agent_is_added_to_the_builtins_rather_than_replacing_them() {
+        let cfg = parsed("[[agents]]\nname = \"goose\"\ncommand = \"goose\"\n");
+        let all = names(&cfg);
+        assert_eq!(all.len(), 7, "{all:?}");
+        assert_eq!(all.last(), Some(&"goose"), "yours come after the built-ins");
+        assert!(all.contains(&"claude") && all.contains(&"agy"), "{all:?}");
+    }
+
+    #[test]
+    fn builtin_agents_false_is_exactly_the_file() {
+        let cfg = parsed(
+            "[general]\nbuiltin_agents = false\n[[agents]]\nname = \"goose\"\ncommand = \"goose\"\n",
+        );
+        assert_eq!(names(&cfg), vec!["goose"]);
+        assert!(parsed("[general]\nbuiltin_agents = false\n").agents.is_empty());
+    }
+
+    /// The first block of a name takes the built-in's slot; a repeat is
+    /// appended, as duplicates always were, so `agent()` keeps finding the
+    /// first one.
+    #[test]
+    fn a_repeated_name_keeps_the_first_block() {
+        let cfg = parsed(
+            "[[agents]]\nname = \"codex\"\ncommand = \"one\"\n\n[[agents]]\nname = \"codex\"\ncommand = \"two\"\n",
+        );
+        assert_eq!(cfg.agent("codex").unwrap().command, "one");
+        assert_eq!(cfg.agents.iter().filter(|a| a.name == "codex").count(), 2);
+    }
+
+    #[test]
+    fn agent_order_is_lenient_and_defaults_to_frequent() {
+        assert_eq!(Config::with_defaults().general.agent_order, AgentOrder::Frequent);
+        for (word, want) in [
+            ("config", AgentOrder::Config),
+            ("name", AgentOrder::Name),
+            ("recent", AgentOrder::Recent),
+            ("Frequent", AgentOrder::Frequent),
+            ("nonsense", AgentOrder::Frequent),
+        ] {
+            let cfg = parsed(&format!("[general]\nagent_order = \"{word}\"\n"));
+            assert_eq!(cfg.general.agent_order, want, "{word}");
+        }
     }
 
     /// A `.butai.toml` from before rail widths went global still loads. It

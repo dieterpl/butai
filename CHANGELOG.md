@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Say what a chat is for: a role and labels, from a right-click in BOOTH.**
+  Eight chats in a fleet read as eight copies of `claude`. Right-clicking one
+  (or its `⋯`) opens a menu at the pointer with a **role** — `lead` for the chat
+  handing out work, `worker` for one taking it, `loop` for one that runs on
+  repeat, `watch` for one waiting on an event — and any number of **labels**
+  (`#review`, `#blocked`, `#bug`, `#idea`, or one you make). They show beside
+  the chat's name in the fleet and in the needs-you list at its top, as words
+  rather than boxes like every other state on this client, and the menu stays
+  open so a role and a label are one visit.
+
+  The daemon keeps them with the chat: they are in `GET .../agents` as `role`
+  and `labels`, set with `PUT /v1/workspaces/{id}/panes/{pane}/tags`, and
+  survive a restart and a failed-resume respawn. A role is one of the four
+  words; a label is up to 24 of `a-z 0-9 - _`, at most 8 to a chat; the daemon
+  checks both, so a client cannot store what another could not show. A daemon
+  from before this reports neither and the browser draws nothing. Browser only
+  for now — the terminal still shows the chats untagged.
+
+- **A `+` on every machine in BOOTH starts a workspace there.** The machine
+  header in the fleet now ends in a `+`: it asks for a directory (and an
+  optional name) and opens the workspace on *that* machine, without leaving the
+  page, so the new project is simply there in the list. Until now the only way
+  was `+ new` in the tab bar, which picks the machine for you.
+
+- **BOOTH's fleet column is wider**, `30ch`–`56ch` where it was `22ch`–`40ch`,
+  taking the room from the compute column (`20ch`–`32ch`, was `36ch`). A row now
+  carries a name, a role, labels and two buttons, and used to truncate the name
+  to make space for them.
+
 - **ssh can now ask you its questions, from inside the workbench.** Connecting a
   machine ran ssh with `BatchMode=yes`, which makes an unknown host, a
   passphrase and a one-time code all the same instant failure: typing a new
@@ -43,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps it open with the reason drawn under the field instead of a toast over
   a window that has already gone.
 
+- **The agent picker is ordered by what you start, with a bar instead of a
+  number.** Most-picked first, the pinned agent ahead of all of them and marked
+  `★`. On a terminal at least 60 columns by 16 rows, a bar follows each name,
+  scaled to the agent you start most; below that the picker is the names alone,
+  in the same order. Only starts you make count: a pick in the picker, or `a` on
+  the pinned agent. Autostart, a restart restore and a `--background` helper do
+  not. The counts live in `agent_usage.json` beside the session store, not in
+  `config.toml`, so the file you edit by hand is never written by the daemon.
+  `[general] agent_order` is `frequent` (the default), `recent`, `name` or
+  `config`; with no history every order but `name` is the order of the launchers,
+  so a fresh install lists exactly as before. `GET /v1/agents` returns the names
+  in that order, so the browser's chooser follows it too, and a new
+  `GET /v1/agents/usage` returns `{name,count,last}` for a client that wants to
+  draw a bar.
+
+- **`[+]` on BOOTH's FLEET border opens a new workspace.** The same folder list
+  as `n` and the tab bar's `[+ new]`, in the corner the AGENTS and PROCESSES
+  boxes keep their own plus. The browser's BOOTH has a `+` on the fleet title.
+
 ### Changed
 
 - **A dial you started tells you why it failed, in a window.** `[+ host]` and the
@@ -60,6 +108,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can refuse its own answer. Adding a host in the browser reports a refused
   socket (including the explanation that the bridge does not run ssh) inside
   the form, with what was typed still in the boxes.
+
+- **`[[agents]]` adds to the built-ins instead of replacing them.** Until now the
+  six built-in launchers were filled in only when the file declared no agents at
+  all, so adding one agent hid `claude`, `codex`, `gemini`, `opencode`, `aider`
+  and `agy`. A block named for a built-in now replaces that one where it stands,
+  and any other block is listed after them. **A config that declares only the
+  agents it wants will now also show the six**; `[general] builtin_agents =
+  false` is the old behaviour.
+
+- **A list longer than its box scrolls with the cursor.** The agent picker and
+  the other terminal lists drew the first rows that fit and nothing else, so
+  a cursor that walked past them was on a row nobody could see. `▲` and `▼` at
+  the edge say there is more.
 
 ## [1.3.0] - 2026-09-29
 

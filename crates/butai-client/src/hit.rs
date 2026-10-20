@@ -183,6 +183,15 @@ pub fn at(
         if c.stage_inner.contains(x, y) {
             return Target::Stage(x - c.stage_inner.x, y - c.stage_inner.y);
         }
+        // The `[+]` on FLEET's top border: a second spelling of `n` and the tab
+        // bar's `[+ new]`.
+        if y == c.fleet_box.y {
+            if let Some((start, end)) = chrome::fleet_new_span(c.fleet_box) {
+                if x >= start && x < end {
+                    return Target::NewWorkspace;
+                }
+            }
+        }
         // A fleet row needs the cross-daemon list, which only [`on_fleet`]
         // takes; everything else in BOOTH's band is nothing, and crucially not
         // the rails underneath.
@@ -883,6 +892,8 @@ mod tests {
             started_ms: 0,
             working_since_ms: None,
             unread: false,
+            role: None,
+            labels: Vec::new(),
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let fleet = vec![
@@ -998,6 +1009,8 @@ mod tests {
             started_ms: 0,
             working_since_ms: None,
             unread: false,
+            role: None,
+            labels: Vec::new(),
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let row = |ws, id, a| chrome::AllAgentRow {
@@ -1153,6 +1166,8 @@ mod tests {
             started_ms: 0,
             working_since_ms: None,
             unread: false,
+            role: None,
+            labels: Vec::new(),
         };
         let calm = agent("claude", 1, AgentState::Idle);
         let asking = agent("codex", 2, AgentState::Waiting);
@@ -1398,6 +1413,34 @@ mod tests {
     /// count only existed past one machine, so the columns it sat in answered
     /// nothing on the common single-machine client. Now the same columns are a
     /// button at every count; only the word in them changes.
+    /// The `[+]` on BOOTH's FLEET border is the tab bar's `[+ new]` by another
+    /// route, and it is only the three cells it was drawn in: the title beside
+    /// it and the rows below it are not buttons.
+    #[test]
+    fn the_plus_on_the_fleet_border_opens_a_new_workspace() {
+        let view = View { page: Page::Booth, ..Default::default() };
+        let tabs: [Tab<'_>; 0] = [];
+        let geom = chrome::page_geom(WIDE, ROWS, &view);
+        let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
+        let (start, end) = chrome::fleet_new_span(c.fleet_box).expect("room for it");
+        let y = c.fleet_box.y;
+
+        for x in start..end {
+            assert_eq!(at(WIDE, ROWS, &view, &tabs, 1, None, x, y), Target::NewWorkspace, "x={x}");
+        }
+        for x in [start - 1, end] {
+            assert_ne!(at(WIDE, ROWS, &view, &tabs, 1, None, x, y), Target::NewWorkspace, "x={x}");
+        }
+        assert_ne!(
+            at(WIDE, ROWS, &view, &tabs, 1, None, start, c.fleet_rows.y),
+            Target::NewWorkspace,
+            "the row under it is a row"
+        );
+        // Off BOOTH the same cell is not a button.
+        let work = View { page: Page::Agents, ..Default::default() };
+        assert_ne!(at(WIDE, ROWS, &work, &tabs, 1, None, start, y), Target::NewWorkspace);
+    }
+
     #[test]
     fn the_machines_button_opens_the_picker_at_every_count() {
         let a = summary("alpha");
@@ -1618,6 +1661,8 @@ mod tests {
                     started_ms: 0,
                     working_since_ms: None,
                     unread: false,
+                    role: None,
+                    labels: Vec::new(),
                 })
                 .collect(),
             processes: (0..procs)

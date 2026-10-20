@@ -119,6 +119,8 @@ export interface ShellCallbacks {
   setRails: (open: boolean) => void;
   /** Open the `g` menu. An overlay, so the shell draws it. */
   gitMenu: () => void;
+  /** Ask which directory to open as a new workspace — `alt-n`, and BOOTH's `+`. */
+  newWorkspace: () => void;
   closeUtility: () => void;
 }
 
@@ -156,6 +158,10 @@ export function Shell() {
   const returnPage = useRef<PageName>("work");
   const projectTabs = useRef<HTMLElement>(null);
   const prefixPending = useRef(false);
+  // `newWorkspace` is defined below the callbacks that hand it to the pages, and
+  // reads state those callbacks were memoised before; a ref is how the page's
+  // button reaches the current one.
+  const newWorkspaceRef = useRef<() => void>(() => {});
   const [menu, setMenu] = useState(false);
 
   // The two overlays a verb needs and a page must not own, as promises.
@@ -275,6 +281,7 @@ export function Shell() {
       setTopic,
       setRails: (open: boolean) => setRails(open ? "open" : "auto"),
       gitMenu: () => setMenu(true),
+      newWorkspace: () => newWorkspaceRef.current(),
       closeUtility: () => setPage(returnPage.current),
     }),
     [page],
@@ -331,6 +338,7 @@ export function Shell() {
     const made = await actions.newWorkspace(daemon, values[0].trim(), values[1]?.trim());
     if (made != null) { on.setWsId(String(made)); setPage("work"); }
   };
+  newWorkspaceRef.current = () => void newWorkspace();
 
   // Capture the app chords before the terminal's input sink forwards them.
   useEffect(() => {

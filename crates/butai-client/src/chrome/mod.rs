@@ -2256,6 +2256,10 @@ pub struct ListOverlay {
     /// right up until a stash message contains one.
     pub values: Option<Vec<String>>,
     pub sel: usize,
+    /// A bar to draw after each row, 0 to [`METER_CELLS`] cells long, same
+    /// length as `items` when present. Only the agent picker uses it, and it
+    /// draws only when the terminal has room — see [`meters_fit`].
+    pub meters: Option<Vec<u8>>,
     /// What the caller does with the chosen row.
     pub kind: ListKind,
 }
@@ -3264,6 +3268,19 @@ pub fn draw_overlay_layer(buf: &mut Buffer, cols: u16, rows: u16, view: &View, t
 /// its own hard-coded width.
 fn overlay_layout(cols: u16, rows: u16, overlay: &Overlay) -> OverlayRows {
     let mut o = overlay_rows(overlay);
+    if let Overlay::List(ListOverlay { meters: Some(meters), .. }) = overlay {
+        if meters_fit(cols, rows) && meters.len() == o.lines.len() {
+            let name_w = o.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            for (line, &n) in o.lines.iter_mut().zip(meters) {
+                let n = n.min(METER_CELLS) as usize;
+                let pad = name_w - line.chars().count() + 2;
+                line.push_str(&" ".repeat(pad));
+                line.push_str(&"█".repeat(n));
+                line.push_str(&"░".repeat(METER_CELLS as usize - n));
+            }
+            o.meter_col = Some(name_w + 2);
+        }
+    }
     // Wide enough for the title as well as the content: a chooser whose items
     // are short ("sh", "amp") but whose question is long would otherwise cut the
     // question, which is the half that says what the list is for.
@@ -3275,7 +3292,25 @@ fn overlay_layout(cols: u16, rows: u16, overlay: &Overlay) -> OverlayRows {
     let w = want_w.min(cols.saturating_sub(4)).max(12);
     let h = (o.lines.len() as u16 + 2).min(rows.saturating_sub(4)).max(3);
     o.rect = LRect::new(cols.saturating_sub(w) / 2, rows.saturating_sub(h) / 2, w, h);
+    // Scrolled by the rule every other list uses, so the line under the cursor
+    // is always drawn. A box shorter than its list used to show the first rows
+    // and nothing else, and a cursor that walked off the end walked out of
+    // sight.
+    o.first = o.sel.map_or(0, |sel| first_visible(sel, h.saturating_sub(2)));
     o
+}
+
+/// Cells in the bar beside an agent in the picker.
+pub const METER_CELLS: u8 = 6;
+/// The smallest terminal the picker's bars are drawn on. Under either number
+/// the list is the names alone: the order still says what you start most, and a
+/// bar squeezed into a few cells says nothing.
+const METER_MIN_COLS: u16 = 60;
+const METER_MIN_ROWS: u16 = 16;
+
+/// Whether a terminal of this size has room for the picker's bars.
+pub fn meters_fit(cols: u16, rows: u16) -> bool {
+    cols >= METER_MIN_COLS && rows >= METER_MIN_ROWS
 }
 
 /// One modal, resolved into the rows it draws and the box they go in.
@@ -3287,6 +3322,10 @@ struct OverlayRows {
     /// Line and column of the text caret, for the two modals being typed into.
     caret: Option<(usize, usize)>,
     rect: LRect,
+    /// The first line drawn, when the box is shorter than the list.
+    first: usize,
+    /// The column a bar starts at in every line, when the modal draws one.
+    meter_col: Option<usize>,
 }
 
 /// Which line of the open modal is at `(x, y)`, if any.
@@ -3304,7 +3343,7 @@ pub fn overlay_hit(cols: u16, rows: u16, overlay: &Overlay, x: u16, y: u16) -> O
     let i = (y - r.y - 1) as usize;
     // Only as far as the box could actually show, which is what the drawing
     // clamps to — a click below the last visible line hits nothing.
-    (i < o.lines.len().min(r.height.saturating_sub(2) as usize)).then_some(i)
+    (i < o.lines.len().min(r.height.saturating_sub(2) as usize)).then_some(i + o.first)
 }
 
 /// The title, lines, cursor row and caret of a modal — everything about it that
@@ -3350,7 +3389,15 @@ fn overlay_rows(overlay: &Overlay) -> OverlayRows {
             (format!(" {} ", c.title), lines, Some(2 + usize::from(c.yes)), None)
         }
     };
-    OverlayRows { title, lines, sel, caret, rect: LRect::new(0, 0, 0, 0) }
+    OverlayRows {
+        title,
+        lines,
+        sel,
+        caret,
+        rect: LRect::new(0, 0, 0, 0),
+        first: 0,
+        meter_col: None,
+    }
 }
 
 /// A centred modal box, sized to its content and clamped to the screen.
@@ -3361,7 +3408,8 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
     // no reason for them to exist five times. The rows and the box both come
     // from `overlay_layout`, which `overlay_hit` also reads, so a click lands
     // on the line it looks like it lands on.
-    let OverlayRows { title, lines, sel, caret, rect } = overlay_layout(cols, rows, overlay);
+    let OverlayRows { title, lines, sel, caret, rect, first, meter_col } =
+        overlay_layout(cols, rows, overlay);
     let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
 
     // Clear behind it: a modal that lets the rails show through is unreadable
@@ -3379,8 +3427,9 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
 
     let inner_w = w.saturating_sub(2);
     let bound = x + w - 1;
-    for (i, line) in lines.iter().take(h.saturating_sub(2) as usize).enumerate() {
-        let ly = y + 1 + i as u16;
+    let visible = h.saturating_sub(2) as usize;
+    for (i, line) in lines.iter().enumerate().skip(first).take(visible) {
+        let ly = y + 1 + (i - first) as u16;
         let cursor = sel == Some(i);
         let bg = if cursor { theme.selection } else { theme.surface };
         if cursor {
@@ -3390,8 +3439,23 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
                 }
             }
         }
-        let text = ellipsize(line, inner_w.saturating_sub(2) as usize);
-        put_str(buf, x + 2, ly, &text, bound, Pen::new(theme.ink, bg));
+        let room = inner_w.saturating_sub(2) as usize;
+        match meter_col {
+            // A bar is only coloured when the whole line fits: an ellipsized
+            // line has lost the end the bar is at.
+            Some(col) if line.chars().count() <= room => {
+                let name: String = line.chars().take(col).collect();
+                put_str(buf, x + 2, ly, &name, bound, Pen::new(theme.ink, bg));
+                for (mx, ch) in (x + 2 + col as u16..).zip(line.chars().skip(col)) {
+                    let fg = if ch == '█' { theme.accent } else { theme.faint };
+                    put_str(buf, mx, ly, &ch.to_string(), bound, Pen::new(fg, bg));
+                }
+            }
+            _ => {
+                let text = ellipsize(line, room);
+                put_str(buf, x + 2, ly, &text, bound, Pen::new(theme.ink, bg));
+            }
+        }
         // The caret is a reversed cell rather than the terminal's own: the real
         // cursor is parked on the streamed pane, and moving it here would drag
         // it back the moment the modal closed.
@@ -3405,6 +3469,16 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
                     }
                 }
             }
+        }
+    }
+    // Lines above and below the window, in the one column the text leaves free.
+    if visible > 0 && w > 4 {
+        let mark = bound - 1;
+        if first > 0 {
+            put_str(buf, mark, y + 1, "▲", bound, Pen::new(theme.faint, theme.surface));
+        }
+        if first + visible < lines.len() {
+            put_str(buf, mark, y + h - 2, "▼", bound, Pen::new(theme.faint, theme.surface));
         }
     }
 }
@@ -4066,6 +4140,16 @@ fn draw_booth_page(
             theme.border(focused),
             theme.ground,
         );
+        if let Some((x, _)) = fleet_new_span(cols.fleet_box) {
+            put_str(
+                buf,
+                x,
+                cols.fleet_box.y,
+                FLEET_NEW_LABEL,
+                cols.fleet_box.right(),
+                Pen::new(theme.faint, theme.ground),
+            );
+        }
 
         // The tray: a fixed region, whether or not anything is in it.
         if cols.tray_rows.height > 0 {
@@ -7660,6 +7744,28 @@ pub fn layout_hud(view: &View, cols: u16, rows: u16) -> String {
 }
 
 pub const PROCS_ADD_LABEL: &str = "[+ term]";
+
+/// The `[+]` on BOOTH's FLEET border: open a folder as a new workspace.
+///
+/// A second spelling of `n` and the tab bar's `[+ new]`, in the corner the
+/// other two lists put theirs. Bare, because the project rows below already
+/// wear a `[+]` for "start an agent here", and because FLEET can be as narrow as
+/// 22 columns; the name of what it does is in the tab bar's button.
+pub const FLEET_NEW_LABEL: &str = "[+]";
+
+/// Where [`FLEET_NEW_LABEL`] sits on the top rule of `fleet_box`, as `(start,
+/// end)` columns. `None` when the box is too narrow to carry it beside the
+/// title, so a press can never land on text.
+pub fn fleet_new_span(fleet_box: LRect) -> Option<(u16, u16)> {
+    // ` FLEET (N) ` with room for a two-digit N, the button, and a rule between.
+    const TITLE_AND_RULE: u16 = 14;
+    let w = FLEET_NEW_LABEL.width() as u16;
+    if fleet_box.width < TITLE_AND_RULE + w + 1 {
+        return None;
+    }
+    let end = fleet_box.right().saturating_sub(1);
+    Some((end.saturating_sub(w), end))
+}
 pub const AGENTS_ADD_LABEL: &str = "[+ agent]";
 
 /// The `[+ agent]` label, naming the pinned agent when there is one.
@@ -8968,6 +9074,40 @@ mod tests {
         assert_eq!(c.stage_box.width, narrow.width);
     }
 
+    /// `[+]` on the FLEET border opens a folder as a workspace. It is drawn in
+    /// the corner, beside the title and never over it, and a box too narrow to
+    /// carry both leaves it out rather than letting a press land on text.
+    #[test]
+    fn the_fleet_border_carries_a_plus_for_a_new_workspace() {
+        let agents = [
+            agent(1, "claude", AgentState::Idle),
+            agent(2, "codex", AgentState::Idle),
+            agent(3, "aider", AgentState::Idle),
+            agent(4, "gemini", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        let mut b = buf(160, 40);
+        let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
+        draw(&mut b, 160, 40, &scene, &view, &Theme::default());
+
+        let geom = page_geom(160, 40, &view);
+        let c = booth_columns(booth_area(160, &geom));
+        let (start, end) = fleet_new_span(c.fleet_box).expect("a 160-column fleet has room");
+        assert_eq!(end - start, 3);
+        let top = text_of(&b, c.fleet_box.y);
+        let drawn: String = top.chars().skip(start as usize).take(3).collect();
+        assert_eq!(drawn, FLEET_NEW_LABEL, "{top}");
+        assert!(top.contains("FLEET (4)"), "the title is still there:\n{top}");
+
+        // The narrowest fleet the layout hands out still fits it.
+        assert!(fleet_new_span(LRect::new(0, 1, 22, 10)).is_some());
+        assert_eq!(fleet_new_span(LRect::new(0, 1, 12, 10)), None);
+    }
+
     /// The page draws all three columns: the fleet grouped by machine, the
     /// selected agent's title over the stage, and every connected machine's
     /// telemetry — not only the active tab's.
@@ -9840,6 +9980,8 @@ mod tests {
             started_ms: now_ms(),
             working_since_ms: None,
             unread: false,
+            role: None,
+            labels: Vec::new(),
         }
     }
 
@@ -10437,6 +10579,7 @@ mod tests {
                 values: None,
                 sel: 0,
                 kind: ListKind::SpawnAgent,
+                meters: None,
             })),
             ..Default::default()
         };
@@ -10451,6 +10594,100 @@ mod tests {
         let after: String = (0..30).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n");
         assert!(after.contains("AGENTS"), "{after}");
         assert!(after.contains("gemini"), "the modal should list its items:\n{after}");
+    }
+
+    fn picker(names: &[&str], meters: Option<Vec<u8>>, sel: usize) -> View {
+        View {
+            overlay: Some(Overlay::List(ListOverlay {
+                title: "SPAWN AGENT".into(),
+                items: names.iter().map(|s| s.to_string()).collect(),
+                values: None,
+                sel,
+                kind: ListKind::SpawnAgent,
+                meters,
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn screen_of(view: &View, cols: u16, rows: u16) -> String {
+        let mut b = buf(cols, rows);
+        draw_all(
+            &mut b,
+            cols,
+            rows,
+            &scene(&[], None, &SysDto::default(), &[]),
+            view,
+            &Theme::default(),
+        );
+        (0..rows).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The bar is a hint, so it goes where there is no room for a hint: under
+    /// 60 columns or under 16 rows the picker is the names alone, in the same
+    /// order, and nothing stands in for the bar.
+    #[test]
+    fn the_pickers_bars_are_drawn_only_where_there_is_room() {
+        let view = picker(&["claude", "codex", "aider"], Some(vec![6, 3, 0]), 0);
+
+        let roomy = screen_of(&view, 80, 24);
+        assert!(roomy.contains("claude  ██████"), "{roomy}");
+        assert!(
+            roomy.contains("codex   ███░░░"),
+            "the bars share one column:
+{roomy}"
+        );
+        assert!(
+            roomy.contains("aider   ░░░░░░"),
+            "an unused agent keeps an empty track:
+{roomy}"
+        );
+
+        for (cols, rows) in [(59u16, 24u16), (80, 15), (30, 8)] {
+            let small = screen_of(&view, cols, rows);
+            assert!(small.contains("codex"), "{cols}x{rows}:\n{small}");
+            assert!(!small.contains('█') && !small.contains('░'), "{cols}x{rows}:\n{small}");
+        }
+        assert!(meters_fit(60, 16) && !meters_fit(59, 16) && !meters_fit(60, 15));
+    }
+
+    #[test]
+    fn a_picker_without_meters_draws_as_it_always_did() {
+        let screen = screen_of(&picker(&["claude", "codex"], None, 0), 100, 30);
+        assert!(!screen.contains('█') && !screen.contains('░'), "{screen}");
+    }
+
+    /// A box shorter than its list used to draw the first rows and stop, so a
+    /// cursor that walked past them was on a row nobody could see. It now
+    /// scrolls with the cursor, and a click lands on the row it was painted on.
+    #[test]
+    fn a_short_box_scrolls_to_keep_the_cursor_in_view() {
+        let names: Vec<String> = (0..12).map(|i| format!("agent{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (cols, rows) = (60u16, 12u16); // room for 8 - 2 = 6 lines
+
+        let top = screen_of(&picker(&refs, None, 0), cols, rows);
+        assert!(top.contains("agent00") && !top.contains("agent11"), "{top}");
+        assert!(top.contains('▼') && !top.contains('▲'), "more below, nothing above:\n{top}");
+
+        let end = picker(&refs, None, 11);
+        let bottom = screen_of(&end, cols, rows);
+        assert!(bottom.contains("agent11") && !bottom.contains("agent00"), "{bottom}");
+        assert!(bottom.contains('▲') && !bottom.contains('▼'), "{bottom}");
+
+        // The last drawn line is the cursor's, and pressing it resolves to it.
+        let o = overlay_layout(cols, rows, end.overlay.as_ref().unwrap());
+        let last_row = o.rect.y + o.rect.height - 2;
+        assert_eq!(
+            overlay_hit(cols, rows, end.overlay.as_ref().unwrap(), o.rect.x + 3, last_row),
+            Some(11)
+        );
+        let first_row = o.rect.y + 1;
+        assert_eq!(
+            overlay_hit(cols, rows, end.overlay.as_ref().unwrap(), o.rect.x + 3, first_row),
+            Some(6),
+            "the top line of the window is row 6, not row 0"
+        );
     }
 
     #[test]
@@ -10491,6 +10728,7 @@ mod tests {
             values: None,
             sel: 0,
             kind: ListKind::SpawnAgent,
+            meters: None,
         };
         list.move_sel(-1);
         assert_eq!(list.sel, 0, "should not walk off the top");
@@ -11203,6 +11441,7 @@ mod tests {
             values: None,
             sel: 0,
             kind: ListKind::SpawnAgent,
+            meters: None,
         };
         assert_eq!(list.chosen(), None);
         let mut b = buf(80, 24);

@@ -103,6 +103,21 @@ def agent_types_come_from_config(ctx):
     assert d.http.json_at("/v1/agents") == ["sh", "other"]
 
 
+@test(profile="smoke", tags=("http", "agents"))
+def agent_usage_follows_what_a_person_starts(ctx):
+    d = ctx.daemon(config=Config().shell_agent("sh").agent("other", "/bin/sh"))
+    ctx.cover("GET /v1/agents/usage")
+    ws = d.http.new_workspace(path=d.work)
+    d.http.spawn_agent(ws, "other")
+    d.http.spawn_agent(ws, "other")
+    d.http.spawn_agent(ws, "sh")
+    # Most started first; `sh` and `other` would be the other way round with no
+    # history.
+    assert d.http.json_at("/v1/agents") == ["other", "sh"]
+    usage = {u["name"]: u["count"] for u in d.http.json_at("/v1/agents/usage")}
+    assert usage == {"other": 2, "sh": 1}, usage
+
+
 @test(profile="standard", tags=("http",))
 def agents_and_processes_have_their_own_endpoints(ctx):
     d = ctx.daemon(config=Config().shell_agent("sh"))
@@ -249,6 +264,42 @@ def panes_take_input_acks_and_deletion(ctx):
         lambda a: all(x["pane"] != pane for x in a),
         "the killed agent left the rail",
     )
+
+
+@test(profile="standard", tags=("http", "panes"))
+def an_agent_takes_a_role_and_labels_and_keeps_them(ctx):
+    """A chat's role and labels are a person's note: set together, replaced
+    wholesale, tidied by the daemon, refused when invalid, and cleared by an
+    empty body."""
+    d = ctx.daemon(config=Config().shell_agent("sh"))
+    ctx.cover("PUT /v1/workspaces/{id}/panes/{pane}/tags")
+    ws = d.http.new_workspace(path=d.work)
+    d.http.spawn_agent(ws, "sh")
+    agents = d.http.poll_until(
+        f"/v1/workspaces/{ws}/agents", lambda a: len(a) == 1, "the agent appeared"
+    )
+    pane = agents[0]["pane"]
+    route = f"/v1/workspaces/{ws}/panes/{pane}/tags"
+    assert agents[0]["role"] is None and agents[0]["labels"] == [], agents[0]
+
+    set_ = d.http.put(route, json_body={"role": "lead", "labels": ["#Review", "bug"]})
+    assert set_.status == 200, set_.text
+    row = d.http.get(f"/v1/workspaces/{ws}/agents").json()[0]
+    assert row["role"] == "lead" and row["labels"] == ["review", "bug"], row
+
+    for bad in ({"role": "boss"}, {"labels": ["two words"]}):
+        refused = d.http.put(route, json_body=bad)
+        assert refused.status == 400, refused.text
+    row = d.http.get(f"/v1/workspaces/{ws}/agents").json()[0]
+    assert row["role"] == "lead", "a refused write must change nothing"
+
+    cleared = d.http.put(route, json_body={})
+    assert cleared.status == 200, cleared.text
+    row = d.http.get(f"/v1/workspaces/{ws}/agents").json()[0]
+    assert row["role"] is None and row["labels"] == [], row
+
+    gone = d.http.put(f"/v1/workspaces/{ws}/panes/9999/tags", json_body={"role": "lead"})
+    assert gone.status == 404, gone.text
 
 
 @test(profile="standard", tags=("http", "panes"))

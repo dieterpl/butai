@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use butai_protocol::api::{ApiEvent, ApplyTarget, WorkspaceDetail};
+use butai_protocol::api::{AgentUseDto, ApiEvent, ApplyTarget, WorkspaceDetail};
 use butai_protocol::SessionId;
 use butai_protocol::{
     AttachTarget, ClientMsg, Color as PColor, Encoding, FrameUpdate, InputEvent, KeyEvent, PaneId,
@@ -1948,6 +1948,7 @@ pub async fn run(
                                 values: None,
                                 sel: 0,
                                 kind: chrome::ListKind::Links,
+                                meters: None,
                             }));
                         }
                         dirty = true;
@@ -3521,6 +3522,7 @@ async fn pick_overlay(
         values: Some(values),
         sel: 0,
         kind: ListKind::Pick(target),
+        meters: None,
     }))
 }
 
@@ -3729,6 +3731,7 @@ fn git_menu_overlay(
                 values: None,
                 sel: 0,
                 kind: ListKind::GitGroups,
+                meters: None,
             })
         }
         Some(g) => {
@@ -3740,6 +3743,7 @@ fn git_menu_overlay(
                 values: None,
                 sel: 0,
                 kind: ListKind::GitGroup(g),
+                meters: None,
             })
         }
     }
@@ -3875,6 +3879,7 @@ fn browse_overlay(dto: butai_protocol::api::BrowseDto) -> Overlay {
         values: None,
         sel: 0,
         kind: ListKind::Browse { dir: dto.path },
+        meters: None,
     })
 }
 
@@ -4484,36 +4489,89 @@ async fn agent_picker(
     pinned: Option<&str>,
 ) -> Result<Overlay> {
     let d = active_daemon(daemons, hosts, view);
-    let items: Vec<String> = daemons[d].api.get_as("/v1/agents").await?;
-    anyhow::ensure!(!items.is_empty(), "no agents configured");
-    let sel = pinned_row(&items, pinned);
+    let rows = agent_rows(&daemons[d], pinned).await?;
     Ok(Overlay::List(ListOverlay {
         // The title carries `d`, because `?` was the only place that mentioned
         // it and a key you have to leave the picker to find out about is one
         // nobody presses. It goes in the title rather than a row: every line in
         // this box is a selectable agent, and a hint among them reads like one.
         title: AGENT_PICKER_TITLE.into(),
-        items,
-        values: None,
-        sel,
+        items: rows.items,
+        values: Some(rows.names),
+        sel: 0,
         kind: ListKind::SpawnAgent,
+        meters: rows.meters,
     }))
+}
+
+/// What an agent picker lists: the rows as drawn, the agent each one names, and
+/// the bar beside each when there is a history to draw.
+struct AgentRows {
+    items: Vec<String>,
+    names: Vec<String>,
+    meters: Option<Vec<u8>>,
+}
+
+/// Ask a daemon for its agents and how often each has been started.
+///
+/// The usage is best-effort. A daemon from before the route answers 404, and a
+/// picker that refused to open over a missing bar would be a poor trade.
+async fn agent_rows(d: &Daemon, pinned: Option<&str>) -> Result<AgentRows> {
+    let names: Vec<String> = d.api.get_as("/v1/agents").await?;
+    anyhow::ensure!(!names.is_empty(), "no agents configured");
+    let usage: Vec<AgentUseDto> = d.api.get_as("/v1/agents/usage").await.unwrap_or_default();
+    Ok(arrange_agents(names, &usage, pinned))
+}
+
+/// Lay the picker out: the pinned agent first and marked, then the daemon's
+/// order, with a bar per agent scaled to the one started most.
+///
+/// The daemon already sorted the names, so the order is its to decide — by
+/// `[general] agent_order` — and the one thing left here is the client's own
+/// pin, which the daemon cannot know.
+///
+/// A bar is a proportion and never a number. An agent that was never started
+/// has an empty track, one that has been has at least one cell, and the busiest
+/// has them all. With no starts at all there is nothing to scale to, so there
+/// are no bars.
+fn arrange_agents(
+    mut names: Vec<String>,
+    usage: &[AgentUseDto],
+    pinned: Option<&str>,
+) -> AgentRows {
+    let pin = pinned.and_then(|p| names.iter().position(|n| n == p));
+    if let Some(at) = pin {
+        let name = names.remove(at);
+        names.insert(0, name);
+    }
+    let count = |n: &str| usage.iter().find(|u| u.name == n).map_or(0, |u| u.count);
+    let busiest = names.iter().map(|n| count(n)).max().unwrap_or(0);
+    let cells = f64::from(chrome::METER_CELLS);
+    let meters = (busiest > 0).then(|| {
+        names
+            .iter()
+            .map(|n| match count(n) {
+                0 => 0,
+                c => ((c as f64 / busiest as f64 * cells).round() as u8).max(1),
+            })
+            .collect()
+    });
+    // Every row gets the two-cell margin when one is marked, so the names stay
+    // in a column.
+    let items = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| match pin {
+            Some(_) if i == 0 => format!("★ {n}"),
+            Some(_) => format!("  {n}"),
+            None => n.clone(),
+        })
+        .collect();
+    AgentRows { items, names, meters }
 }
 
 /// The agent picker's title, naming the one key in it that is not Enter.
 pub const AGENT_PICKER_TITLE: &str = "SPAWN AGENT — d pins as default";
-
-/// Which row a freshly-opened agent picker starts on.
-///
-/// The pinned one, so the cursor is already on what the rail's `+` advertises —
-/// which is the row you are most likely to want and the one you would otherwise
-/// have to hunt for. A pin naming an agent this daemon does not have falls back
-/// to the top rather than to nothing: the config is the client's and the agent
-/// list is the daemon's, so the two can legitimately disagree once a second
-/// machine is in the tab bar.
-fn pinned_row(items: &[String], pinned: Option<&str>) -> usize {
-    pinned.and_then(|p| items.iter().position(|i| i == p)).unwrap_or(0)
-}
 
 /// Pin (or unpin) the agent the rail's `a` spawns without asking.
 ///
@@ -4570,6 +4628,7 @@ fn machine_picker(daemons: &[Daemon], hosts: &[Option<String>]) -> Overlay {
         values: Some((0..daemons.len()).map(|d| d.to_string()).collect()),
         sel: 0,
         kind: ListKind::Machine,
+        meters: None,
     })
 }
 
@@ -4627,6 +4686,7 @@ fn space_picker(
         values: None,
         sel: Page::ORDER.iter().position(|p| *p == view.page).unwrap_or(0),
         kind: ListKind::Space,
+        meters: None,
     })
 }
 
@@ -4748,6 +4808,7 @@ fn host_overlay(
         values: Some(values),
         sel: 0,
         kind: ListKind::Host,
+        meters: None,
     })
 }
 
@@ -4798,6 +4859,7 @@ async fn branch_picker(
         values: Some(dto.branches),
         sel: 0,
         kind,
+        meters: None,
     }))
 }
 
@@ -8047,6 +8109,7 @@ fn menu_overlay(kind: chrome::MenuTarget) -> Overlay {
         values: None,
         sel: 0,
         kind: ListKind::Menu(kind),
+        meters: None,
     })
 }
 
@@ -10217,14 +10280,14 @@ async fn fleet_agent_picker(
     project: &str,
 ) -> Result<Overlay> {
     let Some(d) = daemons.get(daemon) else { anyhow::bail!("that machine has gone") };
-    let items: Vec<String> = d.api.get_as("/v1/agents").await?;
-    anyhow::ensure!(!items.is_empty(), "no agents configured");
+    let rows = agent_rows(d, None).await?;
     Ok(Overlay::List(ListOverlay {
         title: format!("START IN {project}"),
-        items,
-        values: None,
+        items: rows.items,
+        values: Some(rows.names),
         sel: 0,
         kind: ListKind::SpawnAgentIn { daemon, workspace },
+        meters: rows.meters,
     }))
 }
 
@@ -11620,6 +11683,8 @@ mod tests {
             started_ms: 0,
             working_since_ms: None,
             unread: false,
+            role: None,
+            labels: Vec::new(),
         }
     }
 
@@ -12585,6 +12650,7 @@ mod tests {
             values: Some(vec!["main".into(), "spike".into()]),
             sel: 0,
             kind: ListKind::Branch,
+            meters: None,
         };
         assert_eq!(list.chosen(), Some("main"), "the marker must not reach git");
         assert_eq!(list.chosen_label(), Some("* main"), "but the reader keeps it");
@@ -12596,6 +12662,7 @@ mod tests {
             values: None,
             sel: 0,
             kind: ListKind::SpawnAgent,
+            meters: None,
         };
         assert_eq!(plain.chosen(), Some("claude"));
         assert_eq!(plain.chosen_label(), Some("claude"));
@@ -13073,6 +13140,7 @@ name = \"terminal\"
                 values: None,
                 sel,
                 kind: ListKind::SpawnAgent,
+                meters: None,
             })
         };
 
@@ -13097,6 +13165,7 @@ name = \"terminal\"
                 values: None,
                 sel: 0,
                 kind: ListKind::Branch,
+                meters: None,
             })),
             ..Default::default()
         };
@@ -14369,6 +14438,7 @@ name = \"terminal\"
                 values: None,
                 sel: 1,
                 kind: ListKind::Links,
+                meters: None,
             })),
             ..Default::default()
         };
@@ -14384,6 +14454,7 @@ name = \"terminal\"
             values: None,
             sel: 0,
             kind: ListKind::Branch,
+            meters: None,
         }));
         assert!(matches!(handle_overlay_key(y, &mut view), Flow::Continue));
         assert!(view.overlay.is_some(), "`y` dismissed a branch list");
@@ -15316,20 +15387,65 @@ name = \"terminal\"
         assert_eq!(view.staged, None);
     }
 
-    /// The picker opens on the pinned agent.
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn started(list: &[(&str, u64)]) -> Vec<AgentUseDto> {
+        list.iter().map(|(n, c)| AgentUseDto { name: n.to_string(), count: *c, last: 0 }).collect()
+    }
+
+    /// The picker opens on the pinned agent, because it is listed first.
     ///
     /// A pin the daemon has never heard of is not an error: the config is the
     /// client's and the list is the daemon's, so the two disagree the moment a
     /// second machine joins the tab bar — and a picker that opened on nothing
     /// would be worse than one that opened on the top.
     #[test]
-    fn the_agent_picker_starts_on_the_pinned_row() {
-        let items: Vec<String> =
-            ["claude", "codex", "gemini"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(pinned_row(&items, Some("gemini")), 2);
-        assert_eq!(pinned_row(&items, None), 0);
-        assert_eq!(pinned_row(&items, Some("not-here")), 0, "a stale pin is not an error");
-        assert_eq!(pinned_row(&[], Some("claude")), 0);
+    fn the_pinned_agent_is_listed_first_and_marked() {
+        let rows = arrange_agents(names(&["claude", "codex", "gemini"]), &[], Some("gemini"));
+        assert_eq!(rows.names, names(&["gemini", "claude", "codex"]));
+        assert_eq!(rows.items, names(&["★ gemini", "  claude", "  codex"]));
+
+        let stale = arrange_agents(names(&["claude", "codex"]), &[], Some("not-here"));
+        assert_eq!(stale.names, names(&["claude", "codex"]), "a stale pin is not an error");
+        assert_eq!(stale.items, stale.names, "and marks nothing");
+        assert_eq!(arrange_agents(names(&["claude"]), &[], None).items, names(&["claude"]));
+    }
+
+    /// A bar is a proportion of the agent started most, and an agent never
+    /// started has an empty track rather than none, so a rarely-picked one still
+    /// reads as picked.
+    #[test]
+    fn the_bars_are_scaled_to_the_busiest_agent() {
+        let rows = arrange_agents(
+            names(&["codex", "claude", "gemini", "aider"]),
+            &started(&[("claude", 40), ("codex", 20), ("gemini", 1)]),
+            None,
+        );
+        assert_eq!(rows.meters, Some(vec![3, 6, 1, 0]), "{:?}", rows.names);
+    }
+
+    #[test]
+    fn with_nothing_started_there_are_no_bars() {
+        assert_eq!(arrange_agents(names(&["claude"]), &[], None).meters, None);
+        assert_eq!(
+            arrange_agents(names(&["claude"]), &started(&[("claude", 0)]), None).meters,
+            None
+        );
+    }
+
+    /// The meters follow the pin to the front rather than staying with the
+    /// position, or the bars would be on the wrong names.
+    #[test]
+    fn a_pin_moves_its_bar_with_it() {
+        let rows = arrange_agents(
+            names(&["claude", "codex"]),
+            &started(&[("claude", 10), ("codex", 5)]),
+            Some("codex"),
+        );
+        assert_eq!(rows.names, names(&["codex", "claude"]));
+        assert_eq!(rows.meters, Some(vec![3, 6]));
     }
 
     /// A Ctrl-modified letter is not the bare letter.

@@ -257,6 +257,12 @@ export const api = {
   // the bell stays `waiting` here forever no matter what you click.
   ackPane: (id: string, pane: string): Promise<OkReply> =>
     req<OkReply>("POST", `/workspaces/${ws(id)}/panes/${ws(pane, "pane id")}/ack`),
+  // Set what a chat is for: its role and its labels, replaced together. An
+  // empty body clears both. The daemon is the last word on what is valid —
+  // `normalize_tags` in `butai-protocol` — so a refusal comes back as the
+  // message to show.
+  tagAgent: (id: string, pane: string, role: string | null, labels: readonly string[]): Promise<OkReply> =>
+    req<OkReply>("PUT", `/workspaces/${ws(id)}/panes/${ws(pane, "pane id")}/tags`, { role, labels }),
   // Type into a pane without attaching to it.
   //
   // **New here.** The route has existed on the daemon throughout and no browser

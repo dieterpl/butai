@@ -158,6 +158,7 @@ async fn route(
         (&Method::GET, ["v1", "workspaces"]) => call(&events, ApiRequest::ListWorkspaces).await,
         (&Method::GET, ["v1", "system"]) => call(&events, ApiRequest::System).await,
         (&Method::GET, ["v1", "agents"]) => call(&events, ApiRequest::AgentTypes).await,
+        (&Method::GET, ["v1", "agents", "usage"]) => call(&events, ApiRequest::AgentUsage).await,
         (&Method::GET, ["v1", "usage"]) => call(&events, ApiRequest::Usage).await,
         // -- the daemon itself --
         (&Method::POST, ["v1", "update"]) => call(&events, ApiRequest::Update).await,
@@ -361,6 +362,19 @@ async fn route(
             match (sid(id), pid(pane)) {
                 (Some(ws), Some(pane)) => call(&events, ApiRequest::AckPane { ws, pane }).await,
                 _ => ApiReply::BadRequest("bad workspace or pane id".into()),
+            }
+        }
+        // Set what a chat is for. Replaces the role and the labels together —
+        // see `ApiRequest::TagAgent` for why it is a whole-list write.
+        (&Method::PUT, ["v1", "workspaces", id, "panes", pane, "tags"]) => {
+            match (sid(id), pid(pane), parse::<TagsBody>(&body)) {
+                (Some(ws), Some(pane), Ok(b)) => {
+                    call(&events, ApiRequest::TagAgent { ws, pane, role: b.role, labels: b.labels })
+                        .await
+                }
+                (None, _, _) => ApiReply::BadRequest(format!("bad workspace id {id:?}")),
+                (_, None, _) => ApiReply::BadRequest(format!("bad pane id {pane:?}")),
+                (_, _, Err(e)) => ApiReply::BadRequest(e),
             }
         }
         (&Method::POST, ["v1", "workspaces", id, "changes", "stage"]) => {
@@ -860,6 +874,7 @@ fn reply_to_response(reply: ApiReply) -> Response<ResBody> {
         ApiReply::Search(v) => json(StatusCode::OK, &v),
         ApiReply::System(v) => json(StatusCode::OK, &v),
         ApiReply::AgentTypes(v) => json(StatusCode::OK, &v),
+        ApiReply::AgentUsage(v) => json(StatusCode::OK, &v),
         ApiReply::Usage(v) => json(StatusCode::OK, &v),
         ApiReply::Branches(v) => json(StatusCode::OK, &v),
         ApiReply::Browse(v) => json(StatusCode::OK, &v),
@@ -1131,6 +1146,14 @@ struct MkDirBody {
     #[serde(default)]
     path: Option<String>,
     name: String,
+}
+
+#[derive(Deserialize)]
+struct TagsBody {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 #[derive(Deserialize)]

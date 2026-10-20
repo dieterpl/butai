@@ -733,6 +733,52 @@ async fn http_api_acknowledges_a_bell() {
     assert_eq!(status, 404);
 }
 
+/// A chat can be given a role and labels over HTTP, and they come back on the
+/// agent list. Replacing is wholesale, a bad value is a 400 that changes
+/// nothing, and an unknown pane is a 404.
+#[tokio::test]
+async fn http_api_tags_an_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = start_daemon_with_shell_agent(&tmp).await;
+
+    let (status, body) = http(&socket, "POST", "/v1/workspaces", Some(r#"{"name":"tags"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+    let (status, body) =
+        http(&socket, "POST", "/v1/workspaces/1/agents", Some(r#"{"type":"sh"}"#)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let pane = first_agent_pane(&socket).await;
+    let route = format!("/v1/workspaces/1/panes/{pane}/tags");
+
+    // Untagged is the starting point: no role, no labels.
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    assert!(body.contains("\"role\":null") && body.contains("\"labels\":[]"), "body: {body}");
+
+    let (status, body) =
+        http(&socket, "PUT", &route, Some(r##"{"role":"lead","labels":["#Review","bug"]}"##)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    assert!(body.contains("\"role\":\"lead\""), "body: {body}");
+    assert!(body.contains("\"labels\":[\"review\",\"bug\"]"), "tidied, in order: {body}");
+
+    // Refused values leave the tags alone.
+    let (status, _) = http(&socket, "PUT", &route, Some(r#"{"role":"boss"}"#)).await;
+    assert_eq!(status, 400);
+    let (status, _) = http(&socket, "PUT", &route, Some(r#"{"labels":["two words"]}"#)).await;
+    assert_eq!(status, 400);
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    assert!(body.contains("\"role\":\"lead\""), "a refused write changed nothing: {body}");
+
+    // Sending nothing clears both.
+    let (status, _) = http(&socket, "PUT", &route, Some("{}")).await;
+    assert_eq!(status, 200);
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    assert!(body.contains("\"role\":null") && body.contains("\"labels\":[]"), "body: {body}");
+
+    let (status, _) =
+        http(&socket, "PUT", "/v1/workspaces/1/panes/9999/tags", Some(r#"{"role":"lead"}"#)).await;
+    assert_eq!(status, 404);
+}
+
 /// An agent can be killed over HTTP, via a route that says so. `KillPane` was
 /// always pane-generic, but the only path to it lived under `processes`, so every
 /// GUI concluded agents could not be killed.
@@ -2097,4 +2143,53 @@ async fn an_allowed_update_reaches_the_updater_and_refuses_to_replace_a_cargo_bu
     // And the daemon is still there: a failed update changes nothing.
     let (status, _) = http(&socket, "GET", "/v1/workspaces", None).await;
     assert_eq!(status, 200, "a refused update must not take the daemon down");
+}
+
+/// The picker's order follows what a person starts, and nothing else does.
+///
+/// Two shell agents, `one` ahead of `two` in the config. Starting `two` twice
+/// puts it first; a start another agent made for itself (`background`) is a
+/// helper and not a pick, so `one` stays at none.
+#[tokio::test]
+async fn agents_are_listed_by_how_often_a_person_started_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("butai.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut config = Config::with_defaults();
+    config.general.default_shell = Some("/bin/sh".into());
+    config.agents.clear();
+    for name in ["one", "two"] {
+        config.agents.push(butai_server::config::AgentDef {
+            name: name.into(),
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            resume_args: Vec::new(),
+            env: Default::default(),
+            waiting_pattern: None,
+            busy_pattern: None,
+        });
+    }
+    tokio::spawn(butai_server::daemon::serve(listener, config, None));
+
+    let (status, body) = http(&socket, "GET", "/v1/agents", None).await;
+    assert_eq!((status, body.as_str()), (200, r#"["one","two"]"#), "no history is config order");
+
+    let (status, body) = http(&socket, "POST", "/v1/workspaces", Some(r#"{"name":"w"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+    for payload in [r#"{"type":"two"}"#, r#"{"type":"two"}"#, r#"{"type":"one","background":true}"#]
+    {
+        let (status, body) = http(&socket, "POST", "/v1/workspaces/1/agents", Some(payload)).await;
+        assert!(status == 200 || status == 201, "{payload}: {body}");
+    }
+
+    let (_, body) = http(&socket, "GET", "/v1/agents", None).await;
+    assert_eq!(body, r#"["two","one"]"#);
+
+    let (status, body) = http(&socket, "GET", "/v1/agents/usage", None).await;
+    assert_eq!(status, 200, "body: {body}");
+    let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows[0]["name"], "two");
+    assert_eq!(rows[0]["count"], 2);
+    assert_eq!(rows[1]["name"], "one");
+    assert_eq!(rows[1]["count"], 0, "a background start is a helper, not a pick");
 }

@@ -1,6 +1,7 @@
 //! The butai daemon: owns sessions, PTYs, pane state, and rendering.
 //! Clients speak the `butai-protocol` API over a Unix socket.
 
+pub mod agent_usage;
 pub mod client_conn;
 pub mod config;
 pub mod core;

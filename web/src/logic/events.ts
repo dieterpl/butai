@@ -344,7 +344,13 @@ export function localId(id: Qid | null | undefined): PaneId | null {
  * after 0.6 and an older daemon sends a row without it — which reads as false,
  * and is the degradation `trayRank` in `fleet.ts` is written for.
  */
-export type QualifiedAgent = Omit<AgentDto, "pane" | "unread"> & { pane: Qid; unread?: boolean };
+export type QualifiedAgent = Omit<AgentDto, "pane" | "unread" | "role" | "labels"> & {
+  pane: Qid;
+  unread?: boolean;
+  /** `role` and `labels` postdate 1.3, so a daemon older than that sends neither. */
+  role?: string | null;
+  labels?: string[];
+};
 
 /** One process row, with a qualified pane. */
 export type QualifiedProcess = Omit<ProcessDto, "pane"> & { pane: Qid };

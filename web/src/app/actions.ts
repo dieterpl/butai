@@ -44,6 +44,7 @@ import { toast } from "sonner";
 import { api } from "../logic/api.ts";
 import { daemonOf, qid, type Qid } from "../logic/events.ts";
 import { GitAction, type GitActionId } from "../logic/git-menu.ts";
+import { MAX_LABELS, MAX_LABEL_LEN, cleanLabel, toggleLabel, type Tagged } from "../logic/tags.ts";
 import type { ResetMode, ResolveSide, SequenceAction, WorktreeDto } from "../protocol/generated/protocol.ts";
 
 // `api.ts` takes a qualified id as a `string`; `Qid` is `string | number`
@@ -268,6 +269,45 @@ export class Actions {
   kill = async (ws: Qid, pane: Qid, what: string) => {
     if (!(await this.o.confirm(`End ${what}?`, "The pane and its scrollback go with it."))) return null;
     return this.run(`end ${what}`, `kill:${pane}`, () => api.killPane(q(ws), q(pane)));
+  };
+
+  /**
+   * Set a chat's role and labels. The daemon validates them, so a refusal is
+   * its sentence in the toast rather than a guess made here.
+   */
+  tagAgent = (ws: Qid, pane: Qid, role: string | null, labels: readonly string[]) =>
+    this.run("tag", `tag:${pane}`, () => api.tagAgent(q(ws), q(pane), role, labels).then((r) => (r.ok === false ? r : { ok: true, summary: role ? `${role}${labels.length ? ` +${labels.length}` : ""}` : "cleared" })));
+
+  /**
+   * Ask for a label and add it to a chat. A word the daemon would refuse is
+   * said here, before the round trip, with the rule it broke.
+   */
+  newLabel = async (ws: Qid, pane: Qid, now: Tagged): Promise<unknown> => {
+    const values = await this.o.ask("NEW LABEL", [{ label: "Label" }], "Add");
+    const raw = values?.[0]?.trim();
+    if (!raw) return null;
+    const label = cleanLabel(raw);
+    if (!label) {
+      toast.error(`label: use up to ${MAX_LABEL_LEN} letters, digits, - or _`);
+      return null;
+    }
+    const next = toggleLabel({ ...now, labels: (now.labels ?? []).filter((l) => l !== label) }, label);
+    if (!next) {
+      toast.error(`label: a chat carries at most ${MAX_LABELS}`);
+      return null;
+    }
+    return this.tagAgent(ws, pane, next.role, next.labels);
+  };
+
+  /**
+   * Ask for a directory and open a workspace in it on this host, without
+   * leaving the page. BOOTH's `[+]` on a machine: the machine is already
+   * chosen, so the question is only where.
+   */
+  newWorkspaceOn = async (daemon: string, host: string): Promise<Qid | null> => {
+    const values = await this.o.ask(`NEW WORKSPACE · ${host}`, [{ label: "Directory" }, { label: "Name" }], "Open");
+    if (!values?.[0]?.trim()) return null;
+    return this.newWorkspace(daemon, values[0].trim(), values[1]?.trim());
   };
 
   /** Open a workspace on the chosen host and return its qualified tab id. */

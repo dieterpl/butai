@@ -100,6 +100,76 @@ pub struct AgentDto {
     /// degrades to the behaviour it had before this field existed.
     #[serde(default)]
     pub unread: bool,
+    /// What this chat is *for*, one of [`AGENT_ROLES`], or `null` when the person
+    /// never said.
+    ///
+    /// A fleet of chats reads as a pile of the same word until something sorts
+    /// it: this is the one word that does — `lead` for the chat handing out
+    /// work, `worker` for one taking it, `loop` for one that runs on repeat,
+    /// `watch` for one waiting on an event. It is a person's note, not a state:
+    /// butai never sets it, nothing about it changes when the agent does, and it
+    /// survives a daemon restart with the chat it belongs to.
+    ///
+    /// Added after 1.3, and `null` is the honest default for a client built
+    /// against a newer daemon talking to an older one.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Free labels on this chat, in the order they were added — see
+    /// [`normalize_tags`] for what one may look like. Independent of
+    /// [`role`](Self::role): a chat has at most one role and any number of these.
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+/// The roles a chat can be given, in the order a picker lists them.
+pub const AGENT_ROLES: [&str; 4] = ["lead", "worker", "loop", "watch"];
+
+/// The most labels one chat carries, and the longest one may be.
+pub const MAX_LABELS: usize = 8;
+pub const MAX_LABEL_LEN: usize = 24;
+
+/// Check and tidy a role and a label list as a person typed them.
+///
+/// The role must be one of [`AGENT_ROLES`] or absent. Labels are lowercased and
+/// trimmed of a leading `#`, must be non-empty `[a-z0-9_-]` words of at most
+/// [`MAX_LABEL_LEN`] characters, and repeat nothing; there are at most
+/// [`MAX_LABELS`]. The first problem is returned as the message to show.
+///
+/// One function for every client and the daemon, so a label the terminal
+/// accepts is a label the browser accepts, and the daemon is the last word
+/// rather than the third opinion.
+pub fn normalize_tags(
+    role: Option<&str>,
+    labels: &[String],
+) -> Result<(Option<String>, Vec<String>), String> {
+    let role = match role.map(str::trim).filter(|r| !r.is_empty()) {
+        None => None,
+        Some(r) if AGENT_ROLES.contains(&r) => Some(r.to_string()),
+        Some(r) => {
+            return Err(format!("unknown role {r:?}; expected one of {}", AGENT_ROLES.join(", ")))
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    for raw in labels {
+        let l = raw.trim().trim_start_matches('#').to_ascii_lowercase();
+        if l.is_empty() {
+            continue;
+        }
+        if l.len() > MAX_LABEL_LEN
+            || !l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(format!(
+                "bad label {raw:?}; use up to {MAX_LABEL_LEN} letters, digits, - or _"
+            ));
+        }
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    if out.len() > MAX_LABELS {
+        return Err(format!("too many labels; a chat carries at most {MAX_LABELS}"));
+    }
+    Ok((role, out))
 }
 
 /// One managed-process row.
@@ -512,6 +582,23 @@ pub struct CliUsageDto {
     /// One line for the states that have nothing to meter: why not, and what
     /// would change it.
     pub note: Option<String>,
+}
+
+/// How many times an agent type has been started by a person, for ordering a
+/// picker and drawing a bar beside each name.
+///
+/// Every configured agent has a row, in the picker's order, whether or not it
+/// was ever started. Starts that nobody made — autostart, a restart restore, a
+/// helper another agent spawned in the background — are not counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "protocol.ts"))]
+pub struct AgentUseDto {
+    pub name: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub count: u64,
+    /// Unix epoch seconds of the latest start; 0 when there has not been one.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub last: u64,
 }
 
 /// Every configured CLI's account standing (`GET /v1/usage`).
@@ -1573,6 +1660,8 @@ pub enum ApiRequest {
     },
     System,
     AgentTypes,
+    /// How often each agent type has been started, in the picker's order.
+    AgentUsage,
     /// Every configured CLI's account standing. Machine-scoped, so it takes no
     /// workspace id.
     Usage,
@@ -1655,6 +1744,17 @@ pub enum ApiRequest {
     AckPane {
         ws: SessionId,
         pane: PaneId,
+    },
+    /// Replace an agent's [`role`](AgentDto::role) and [`labels`](AgentDto::labels)
+    /// wholesale. A whole-list write rather than add/remove calls: the menu that
+    /// sends it already holds the full set, and two clients tagging at once end
+    /// on the last word instead of on a merge nobody asked for. Validated by
+    /// [`normalize_tags`].
+    TagAgent {
+        ws: SessionId,
+        pane: PaneId,
+        role: Option<String>,
+        labels: Vec<String>,
     },
     StageFile {
         ws: SessionId,
@@ -1776,6 +1876,7 @@ pub enum ApiReply {
     Search(SearchDto),
     System(SysDto),
     AgentTypes(Vec<String>),
+    AgentUsage(Vec<AgentUseDto>),
     Usage(UsageDto),
     Branches(BranchesDto),
     Browse(BrowseDto),
@@ -1870,5 +1971,32 @@ mod tests {
         assert!(TreeFilter::All.keeps("target", true));
         assert!(!TreeFilter::Docs.keeps("main.rs", false));
         assert!(TreeFilter::Docs.keeps("README.md", false));
+    }
+    fn labels(l: &[&str]) -> Vec<String> {
+        l.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_role_is_one_of_the_four_or_nothing() {
+        for r in AGENT_ROLES {
+            assert_eq!(normalize_tags(Some(r), &[]).unwrap().0.as_deref(), Some(r));
+        }
+        assert_eq!(normalize_tags(None, &[]).unwrap().0, None);
+        assert_eq!(normalize_tags(Some("  "), &[]).unwrap().0, None, "blank is no role");
+        assert!(normalize_tags(Some("boss"), &[]).is_err());
+        assert!(normalize_tags(Some("Lead"), &[]).is_err(), "roles are lowercase words");
+    }
+
+    #[test]
+    fn labels_are_tidied_deduplicated_and_bounded() {
+        let (_, l) =
+            normalize_tags(None, &labels(&["#Review", " bug ", "review", "", "a_b-c"])).unwrap();
+        assert_eq!(l, ["review", "bug", "a_b-c"]);
+        assert!(normalize_tags(None, &labels(&["two words"])).is_err());
+        assert!(normalize_tags(None, &labels(&["naïve"])).is_err());
+        assert!(normalize_tags(None, &labels(&[&"x".repeat(MAX_LABEL_LEN + 1)])).is_err());
+        assert!(normalize_tags(None, &labels(&[&"x".repeat(MAX_LABEL_LEN)])).is_ok());
+        let nine: Vec<String> = (0..=MAX_LABELS).map(|i| format!("l{i}")).collect();
+        assert!(normalize_tags(None, &nine).is_err());
     }
 }

@@ -37,6 +37,7 @@ HTTP_ROUTES = [
     "GET /v1/system",
     "POST /v1/update",
     "GET /v1/agents",
+    "GET /v1/agents/usage",
     "GET /v1/fs",
     "GET /v1/notifications",
     "GET /v1/events",
@@ -61,6 +62,7 @@ HTTP_ROUTES = [
     "DELETE /v1/workspaces/{id}/processes/{pane}",  # legacy alias of the above
     "POST /v1/workspaces/{id}/panes/{pane}/input",
     "POST /v1/workspaces/{id}/panes/{pane}/ack",
+    "PUT /v1/workspaces/{id}/panes/{pane}/tags",
     "POST /v1/workspaces/{id}/changes/stage",
     "POST /v1/workspaces/{id}/changes/unstage",
     "POST /v1/workspaces/{id}/changes/discard",

@@ -3,7 +3,7 @@
 // Fleet, stage and compute share the terminal's three-column geometry. The pure
 // logic/fleet model owns grouping, attention ranking, folding and qualified ids.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 
 import { AgentStatus } from "@/components/AgentStatus";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,7 @@ import { HintBar } from "@/components/HintBar";
 import { Row } from "@/components/Row";
 import { SectionTitle } from "@/components/SectionTitle";
 import { Stat } from "@/components/Stat";
+import { TagMenu } from "@/components/TagMenu";
 import { Stage, type StageEvents } from "@/stage/Stage";
 import { cn } from "@/lib/utils";
 import type { World } from "@/app/world.ts";
@@ -41,6 +42,7 @@ import {
   type SpaceRow,
 } from "@/logic/fleet.ts";
 import type { TermTheme } from "@/logic/palette.ts";
+import { ROLE_TONE, knownLabels, labelsOf, roleOf, toggleLabel, type Tags } from "@/logic/tags.ts";
 import { homeVerbs } from "@/logic/verbs.ts";
 
 import { MARK_TONE, SCROLLER, agentMark, hints, loadTone, num, sysGauges } from "./parts.ts";
@@ -57,6 +59,9 @@ import { MARK_TONE, SCROLLER, agentMark, hints, loadTone, num, sysGauges } from 
 export interface HomeActions {
   /// A footer hint is a button, so clicking one dispatches the key it draws.
   press(surface: string, key: string): void;
+  /// Ask the shell to open a folder as a new workspace — the `+` on the fleet's
+  /// title, which is the terminal's `[+]` on the same border.
+  newWorkspace(): void;
 }
 
 /// View-state changes. Nothing here reaches a daemon — except `start`, which
@@ -84,6 +89,13 @@ export interface HomeCallbacks {
   close(space: SpaceRow): void;
   /// End this exact chat, using its own workspace and machine.
   closeChat(row: AgentRow): void;
+  /// Replace a chat's role and labels. Both together, because that is what the
+  /// daemon takes — see `ApiRequest::TagAgent`.
+  tag(row: AgentRow, next: Tags): void;
+  /// Ask for a label to add to a chat that is not in the menu.
+  newLabel(row: AgentRow): void;
+  /// Open a workspace on this machine, by asking where. Stays on the page.
+  newWorkspace(machine: { daemon: string; label: string }): void;
 }
 
 export interface HomePageProps {
@@ -126,6 +138,29 @@ function where(row: AgentRow): string {
 // FLEET
 // ---------------------------------------------------------------------------
 
+/// A chat's role and labels as words: the role in its colour, the labels dim
+/// with a `#`. Nothing when untagged, so an untagged fleet reads as it did.
+///
+/// Words rather than pills for the same reason state is — see
+/// `components/ui/badge.tsx`.
+function TagWords({ agent }: { agent: { role?: string | null | undefined; labels?: readonly string[] | undefined } }) {
+  const role = roleOf(agent);
+  const labels = labelsOf(agent);
+  if (!role && !labels.length) return null;
+  return (
+    <span className="flex min-w-0 shrink items-center gap-1.5 overflow-hidden text-11">
+      {labels.map((l) => (
+        <span key={l} className="shrink-0 text-dim">#{l}</span>
+      ))}
+      {role ? <span className={cn("shrink-0", ROLE_TONE[role])}>{role}</span> : null}
+    </span>
+  );
+}
+
+/// Where the tag menu opens: at the pointer, or under the element when the
+/// menu was asked for from the keyboard (the context-menu key reports 0,0).
+type TagOpen = (row: AgentRow, e: MouseEvent<HTMLElement>) => void;
+
 function CloseChat({ row, on }: { row: AgentRow; on: HomeCallbacks }) {
   const label = `Close ${row.agent.title} in ${where(row)}`;
   return (
@@ -156,10 +191,12 @@ function Tray({
   rows,
   previewed,
   on,
+  openTags,
 }: {
   rows: readonly AgentRow[];
   previewed: number | null;
   on: HomeCallbacks;
+  openTags: TagOpen;
 }) {
   const tray = homeTray(rows);
   return (
@@ -180,10 +217,12 @@ function Tray({
               // otherwise every waiting agent is two things you can select.
               selected={at === previewed}
               onSelect={() => on.preview(row)}
+              onContextMenu={(e) => openTags(row, e)}
               title={`${row.agent.title} — ${m.label} · ${where(row)}`}
             >
               <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={row.agent} sprite /></span>
               <span className="min-w-0 flex-1 truncate">{row.agent.title}</span>
+              <TagWords agent={row.agent} />
               <span className="shrink-0 truncate text-11 text-dim">{where(row)}</span>
               <CloseChat row={row} on={on} />
             </Row>
@@ -210,12 +249,14 @@ function FleetList({
   previewed,
   folds,
   on,
+  openTags,
 }: {
   list: readonly HomeRow[];
   sel: number;
   previewed: number | null;
   folds: Folds;
   on: HomeCallbacks;
+  openTags: TagOpen;
 }) {
   if (!list.length) return <Empty>no machines connected</Empty>;
   return (
@@ -238,6 +279,23 @@ function FleetList({
               <span className="shrink-0 font-mono text-dim">{r.folded ? ">" : "v"}</span>
               <span className="min-w-0 flex-1 truncate">{r.label ?? ""}</span>
               <Badge variant="outline">{r.agents === 0 ? "nothing open" : r.agents}</Badge>
+              {/* A workspace on this machine. Its own control, so the row's
+                  press stays a fold and nothing is created by a stray click. */}
+              {r.daemon != null ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0 px-1.5"
+                  title={`New workspace on ${r.label ?? "this machine"}`}
+                  aria-label={`New workspace on ${r.label ?? "this machine"}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    on.newWorkspace({ daemon: r.daemon as string, label: r.label ?? "" });
+                  }}
+                >
+                  +
+                </Button>
+              ) : null}
             </Row>
           );
         }
@@ -329,6 +387,7 @@ function FleetList({
             selected={i === sel || r.sel === previewed}
             data-home-row={i}
             onSelect={() => on.preview(r.row)}
+            onContextMenu={(e) => openTags(r.row, e)}
             onKeyDown={(e) => {
               if (e.target === e.currentTarget && e.key === "Enter") {
                 e.preventDefault();
@@ -340,6 +399,20 @@ function FleetList({
             <span className="shrink-0 pl-2 text-dim">{list[i + 1]?.kind === HomeRowKind.Agent ? "├─" : "└─"}</span>
             <span className={cn("shrink-0 font-mono", MARK_TONE[m.tone])}><AgentStatus agent={r.row.agent} sprite /></span>
             <span className="min-w-0 flex-1 truncate">{r.row.agent.title}</span>
+            <TagWords agent={r.row.agent} />
+            <Button
+              size="sm"
+              variant="ghost"
+              className="shrink-0 px-1"
+              title="Role and labels (or right-click)"
+              aria-label={`Tag ${r.row.agent.title}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                openTags(r.row, e);
+              }}
+            >
+              ⋯
+            </Button>
             <Button
               size="sm"
               variant="ghost"
@@ -476,6 +549,24 @@ export function HomePage({
   // to receive the last click. Follow it after keyboard/tray moves so an old
   // focus ring cannot remain on one row while the selection band moves to
   // another. Skip the initial render: BOOTH must not steal focus on entry.
+  // The tag menu: which chat, and where the pointer was. The chat is held by
+  // pane and looked up in the live rows on every render, so a pick shows its
+  // tick as soon as the daemon's answer lands, and a chat that was closed
+  // under the menu closes the menu.
+  const [tagging, setTagging] = useState<{ pane: Qid; x: number; y: number } | null>(null);
+  const openTags: TagOpen = (row, e) => {
+    e.preventDefault();
+    let { clientX: x, clientY: y } = e;
+    if (!x && !y) {
+      const b = e.currentTarget.getBoundingClientRect();
+      x = b.left;
+      y = b.bottom;
+    }
+    setTagging({ pane: row.pane, x, y });
+  };
+  const tagged = tagging ? (rows.find((r) => r.pane === tagging.pane) ?? null) : null;
+  const known = useMemo(() => knownLabels(rows.map((r) => r.agent)), [rows]);
+
   const fleet = useRef<HTMLDivElement | null>(null);
   const previous = useRef(at);
   useEffect(() => {
@@ -491,15 +582,32 @@ export function HomePage({
         className={cn(
           "grid min-h-0 flex-1",
           "[grid-template-columns:1fr] [grid-template-rows:minmax(10rem,40%)_minmax(0,1fr)]",
-          "md:[grid-template-rows:1fr] md:[grid-template-columns:clamp(22ch,25%,40ch)_1fr_clamp(20ch,25%,36ch)]",
+          // The fleet is the column that carries the most per row — a name, a
+          // role, labels and two buttons — so it takes the room the compute
+          // column does not need.
+          "md:[grid-template-rows:1fr] md:[grid-template-columns:clamp(30ch,30%,56ch)_1fr_clamp(20ch,22%,32ch)]",
         )}
       >
         <section className="flex min-h-0 min-w-0 flex-col border-b border-border bg-card md:border-b-0 md:border-r">
-          <SectionTitle>fleet ({rows.length})</SectionTitle>
-          <Tray rows={rows} previewed={previewed} on={on} />
+          <SectionTitle
+            action={
+              <Button
+                size="sm"
+                variant="ghost"
+                title="New workspace (n)"
+                aria-label="New workspace"
+                onClick={() => actions.newWorkspace()}
+              >
+                +
+              </Button>
+            }
+          >
+            fleet ({rows.length})
+          </SectionTitle>
+          <Tray rows={rows} previewed={previewed} on={on} openTags={openTags} />
           <ScrollArea className={cn("min-h-0 flex-1", SCROLLER)}>
             <div className="pb-1" ref={fleet} role="listbox" aria-label="fleet">
-              <FleetList list={list} sel={at} previewed={previewed} folds={folds} on={on} />
+              <FleetList list={list} sel={at} previewed={previewed} folds={folds} on={on} openTags={openTags} />
             </div>
           </ScrollArea>
         </section>
@@ -534,6 +642,23 @@ export function HomePage({
         </section>
       </div>
       <HintBar keys={hints(homeVerbs(), RAIL_COLS, 1, (k) => actions.press("home", k))} />
+      {tagging && tagged ? (
+        <TagMenu
+          at={tagging}
+          chat={tagged.agent}
+          labels={known}
+          onTag={(next) => on.tag(tagged, next)}
+          onToggleLabel={(label) => {
+            const next = toggleLabel(tagged.agent, label);
+            if (next) on.tag(tagged, next);
+          }}
+          onNewLabel={() => {
+            setTagging(null);
+            on.newLabel(tagged);
+          }}
+          onClose={() => setTagging(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -63,7 +63,28 @@ working_since_ms: number,
  * against a newer daemon talking to an older one sees nothing unread and
  * degrades to the behaviour it had before this field existed.
  */
-unread: boolean, };
+unread: boolean, 
+/**
+ * What this chat is *for*, one of [`AGENT_ROLES`], or `null` when the person
+ * never said.
+ *
+ * A fleet of chats reads as a pile of the same word until something sorts
+ * it: this is the one word that does — `lead` for the chat handing out
+ * work, `worker` for one taking it, `loop` for one that runs on repeat,
+ * `watch` for one waiting on an event. It is a person's note, not a state:
+ * butai never sets it, nothing about it changes when the agent does, and it
+ * survives a daemon restart with the chat it belongs to.
+ *
+ * Added after 1.3, and `null` is the honest default for a client built
+ * against a newer daemon talking to an older one.
+ */
+role: string | null, 
+/**
+ * Free labels on this chat, in the order they were added — see
+ * [`normalize_tags`] for what one may look like. Independent of
+ * [`role`](Self::role): a chat has at most one role and any number of these.
+ */
+labels: Array<string>, };
 
 /**
  * Attention state of an agent pane (rendered by the apps as
@@ -72,6 +93,20 @@ unread: boolean, };
  * move.
  */
 export type AgentState = "waiting" | "working" | "finished" | "idle" | "exited";
+
+/**
+ * How many times an agent type has been started by a person, for ordering a
+ * picker and drawing a bar beside each name.
+ *
+ * Every configured agent has a row, in the picker's order, whether or not it
+ * was ever started. Starts that nobody made — autostart, a restart restore, a
+ * helper another agent spawned in the background — are not counted.
+ */
+export type AgentUseDto = { name: string, count: number, 
+/**
+ * Unix epoch seconds of the latest start; 0 when there has not been one.
+ */
+last: number, };
 
 /**
  * A pushed event on the `GET /v1/events` stream.

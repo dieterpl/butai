@@ -367,6 +367,14 @@ In the agent picker, `d` pins the highlighted agent as what `a` spawns; the
 SETTINGS page's **default agent** row does the same thing, and `ask every time`
 is how you unpin.
 
+**The picker is ordered by what you start.** Most-picked first (`[general]
+agent_order`, see [configuration](configuration.md#general)), with the pinned
+agent first of all and marked `★`. On a terminal at least 60 columns by 16 rows a
+bar follows each name, scaled to the agent you start most; an agent you never
+start has an empty track. Never a number, and on a smaller terminal never a bar:
+the list is the names alone, in the same order. A list longer than the box
+scrolls with the cursor, and `▲` / `▼` at its edge say there is more.
+
 ## PROCESSES
 
 Long-running commands: dev servers, watchers, whatever a project needs up. They
@@ -699,6 +707,11 @@ everyone's.
 That is a 100-column terminal, which is where the fallbacks start to bite: the
 meter has shrunk to two cells and project buttons shorten to `[+]`.
 Wider columns spell out the preferred agent, such as `[+ claude]`.
+
+The `[+]` on the FLEET box's top border is different from those: it opens a
+folder as a **new workspace**, the same list `n` and the tab bar's `[+ new]`
+open. It is left out only when the column is too narrow to carry it beside the
+title.
 
 **It is a list of projects that happens to contain agents**, and that is a change
 from what it was. The rows used to be built by walking the agent list and
@@ -1613,6 +1626,8 @@ lockfile in the repo. Two consequences worth knowing:
 | BOOTH: what the compute headline names, and when a disk gets to be it | `crates/butai-client/src/chrome/mod.rs` (`MachineRead`, `machine_read`, `machine_pressure`, `DISK_ALARM_PCT`) |
 | BOOTH: a machine's block, its rows and its widths | `crates/butai-client/src/chrome/mod.rs` (`draw_compute`, `draw_compute_summary`, `draw_compute_block`, `compute_sub_rows`) |
 | BOOTH: which machine a press in COMPUTE lands on, and the height both sides walk | `crates/butai-client/src/chrome/mod.rs` (`compute_machine_h`, `booth_compute_machine_at`), `crates/butai-client/src/hit.rs` (`on_compute`) |
+| BOOTH: the `[+]` that opens a new workspace | `crates/butai-client/src/chrome/mod.rs` (`fleet_new_span`, `FLEET_NEW_LABEL`), `crates/butai-client/src/hit.rs` |
+| The agent picker's order, bars and scroll | `crates/butai-server/src/agent_usage.rs`, `crates/butai-client/src/workbench.rs` (`arrange_agents`), `crates/butai-client/src/chrome/mod.rs` (`overlay_layout`, `meters_fit`) |
 | BOOTH: starting an agent in a row's project | `crates/butai-client/src/workbench.rs` (`spawn_agent_in`, `fleet_agent_picker`, `open_fleet_row`) |
 | BOOTH: putting the cursor and the keyboard in the agent you just started | `crates/butai-client/src/workbench.rs` (`NewAgentFollow`, `follow_new_agent`, `NEW_AGENT_GRACE`) |
 | BOOTH: what a press on the fleet lands on | `crates/butai-client/src/chrome/mod.rs` (`booth_fleet_row_at`), `crates/butai-client/src/hit.rs` (`on_fleet`) |

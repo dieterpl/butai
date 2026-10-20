@@ -117,7 +117,8 @@ from, and where two mechanisms could name the same thing, this is which wins.
 | Workspace scope for the CLI | `--ws NAME` → `$BUTAI_WORKSPACE` (every pane carries it) |
 | Shell for a pane | `[general] default_shell` → `$SHELL` → `/bin/sh` |
 | Workspace name | `butai new -s NAME` / `butai ws create --name` / `POST /v1/workspaces` `name` → the directory's basename |
-| Agent list | `[[agents]]` if the array exists at all → otherwise the six built-ins |
+| Agent list | the six built-ins, each replaced by the `[[agents]]` block of its name, then your other blocks (`builtin_agents = false` drops the built-ins) |
+| Agent picker order | `[general] agent_order` → `frequent` |
 | Agent argv on a restore | `resume_args` when there is a conversation to reopen → otherwise `args` |
 | A pane's palette | `[theme]` role keys → the named theme's `[colors]` → its `extends` chain → `blueprint-dark` |
 | A key after the prefix | `[keys]` → the shipped prefix table |
@@ -127,9 +128,12 @@ from, and where two mechanisms could name the same thing, this is which wins.
 
 Four of those deserve spelling out.
 
-**`[[agents]]` replaces, it does not extend.** The built-in launchers are
-filled in only when the parsed config has *no* agents at all. One `[[agents]]`
-block in your file means one agent in the picker.
+**`[[agents]]` adds to the built-ins, and a block named for one replaces it.**
+A `codex` block takes the built-in `codex`'s place; a `goose` block is appended
+after the six. Before 1.4 the built-ins were filled in only when the file had no
+`[[agents]]` at all, so one block meant one agent in the picker. That is still
+available: `[general] builtin_agents = false` makes the list exactly what the
+file declares.
 
 **A restore replaces the workspace file.** The saved process list already
 contains what `.butai.toml` asked for (they were spawned from it and then
@@ -176,6 +180,8 @@ are listed here in the order the source declares them.
 |---|---|---|---|---|
 | `prefix` | string | `"C-b"` | client | The key that opens a prefix binding. Pressing it twice sends one literal through to the pane. Spelling is the key mini-language: `C-`, `M-`, `S-` prefixes over a character or a named key. |
 | `default_agent` | string | unset | client | The agent `a` and `[+ agent]` spawn with no picker in between. Unset asks every time. Stored as a *name*, so it survives reordering `[[agents]]`. On BOOTH it is the **fallback**: a project's own `[agents] autostart` is asked first — see below. |
+| `agent_order` | string | `"frequent"` | daemon | How the agent picker is ordered, in every client. `frequent` is most started first, `recent` is latest first, `name` is alphabetical, `config` is the order of the launchers. Ties, and every agent before the first start, keep the launcher order, so a fresh install lists exactly as before. A misspelt value is `frequent`. Only starts you make count — a pick in the picker or `a` on the pinned agent — and not autostart, restart restore or a `--background` helper. The counts are kept in `agent_usage.json` beside the session store; delete the file to start the order over. |
+| `builtin_agents` | bool | `true` | daemon | Keep the six built-in launchers alongside your `[[agents]]`. `false` makes the agent list exactly the file's blocks. |
 | `remote_auto_attach` | bool | `true` | client | Whether a `butai` run over ssh inside a pane may pull its machine into this tab bar on its own. Off means machines join only through the machines button or a `[[remote]]` block. |
 | `option_as_alt` | bool | `true` on macOS, `false` elsewhere | client | Read macOS's Option-composed characters back as the Alt layer, so Option-o *is* `alt-o`. Only characters the workbench binds are mapped; the cost is that those characters cannot be typed into a pane. |
 | `default_shell` | string | unset | daemon | The shell a terminal pane runs, and the interpreter `[[processes]]` commands go through. Unset falls back to `$SHELL`, then `/bin/sh`. |
@@ -227,7 +233,7 @@ match on "interrupt" alone pins the pane to busy for as long as that sentence
 is on screen, which means no spinner ever stops and no finished notification
 ever fires.
 
-**The built-ins**, used verbatim when the file declares no `[[agents]]` at all:
+**The built-ins**, always present unless `builtin_agents = false`, and each replaced by the block of its name:
 
 | `name` / `command` | `args` | `resume_args` |
 |---|---|---|
@@ -809,7 +815,8 @@ remote_auto_attach = true      # let `butai` over ssh pull its machine into the 
 option_as_alt = true           # macOS: read Option-composed characters as Alt
 
 # ── agents ─────────────────────────────────────────────────────────────────
-# Declaring any block replaces the six built-ins entirely.
+# A block adds to the six built-ins; one named for a built-in replaces it.
+# builtin_agents = false under [general] drops the six.
 
 [[agents]]
 name = "claude"

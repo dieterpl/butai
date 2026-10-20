@@ -65,6 +65,9 @@ class Config:
             "default_shell": "/bin/sh",
             "exit_when_empty": False,
             "scrollback": 5000,
+            # The suite names every agent it uses; the six built-ins would only
+            # add rows to the lists it asserts on.
+            "builtin_agents": False,
         }
         self.agents = []
         self.theme = {}
