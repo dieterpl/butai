@@ -90,6 +90,10 @@ function Row({
               onKeyDown?.(e);
               if (e.defaultPrevented || !onSelect) return;
               if (e.key !== "Enter" && e.key !== " ") return;
+              // Only the row's own key. A button inside it is a control of its
+              // own, and its Enter is a press on *it*: cancelling that to select
+              // the row made `open`, `x` and `+` unreachable from the keyboard.
+              if (e.target !== e.currentTarget) return;
               // Otherwise `Space` scrolls the list out from under the row it
               // was about to open.
               e.preventDefault();

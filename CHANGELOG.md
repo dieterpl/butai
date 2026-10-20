@@ -122,6 +122,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cursor that walked past them was on a row nobody could see. `▲` and `▼` at
   the edge say there is more.
 
+### Fixed
+
+- **A button inside a fleet row can be pressed from the keyboard.** `enter` on a
+  focused `open`, `x`, `+` or `⋯` in BOOTH did not press it: the row took the
+  key to select itself, and the rail's own `enter` ("open the row under the
+  cursor") ran as well, so a press on `x` navigated away instead. A key pressed
+  on a button is now that button's, in every row.
+
 ## [1.3.0] - 2026-09-29
 
 Stable release of the 1.3 development track, with BOOTH controls, terminal and

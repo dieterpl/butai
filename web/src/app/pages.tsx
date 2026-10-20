@@ -191,6 +191,10 @@ function useRailKeys(run: (key: string) => boolean) {
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey ||
           document.querySelector('[role="dialog"]') ||
           target?.closest('[data-slot="stage"], input, textarea, select, [contenteditable="true"]')) return;
+      // Enter and Space on a focused button are a press on *that button*. The
+      // rail's own `enter` ("open the row under the cursor") used to win and
+      // cancel it, so a row's `x`, `+` and `⋯` could not be used from the keyboard.
+      if ((e.key === "Enter" || e.key === " ") && target?.closest("button, a[href]")) return;
       if (run(keyName(e))) { e.preventDefault(); e.stopPropagation(); }
     };
     window.addEventListener("keydown", listener);
