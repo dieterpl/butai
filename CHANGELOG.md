@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Windows clippy job did not compile `butai-client`'s tests.** The test
+  `a_failed_forward_names_the_exit_and_ssh_first_real_line` calls `failure`,
+  which exists only on Unix; the test is now `#[cfg(unix)]` as well.
+
 - **The Windows build compiled `butai askpass`'s Unix half into nothing and
   failed on it.** `AskKind::name` and `parse` are only called by the unix-socket
   code, and `Context` only by that code too, so on Windows they were an unused

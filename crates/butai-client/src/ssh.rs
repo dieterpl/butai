@@ -513,6 +513,7 @@ mod tests {
         assert_eq!(f.to_string(), "Host key verification failed.");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_forward_names_the_exit_and_ssh_first_real_line() {
         let f = failure("ssh exited (255)".into(), "@@@@\nPermission denied (publickey).\n".into());
