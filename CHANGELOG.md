@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart it`. Installing the new `butai` does not restart a daemon that is
   already running.
 
+### Fixed
+
+- **The Windows build compiled `butai askpass`'s Unix half into nothing and
+  failed on it.** `AskKind::name` and `parse` are only called by the unix-socket
+  code, and `Context` only by that code too, so on Windows they were an unused
+  import and dead code, which CI's `-D warnings` turns into an error. They are
+  now `#[cfg(unix)]` like their callers. Linux and macOS were never affected.
+
 ### Added
 
 - **Drag a rail's border to resize it.** The edge between a rail and the stage,

@@ -16,7 +16,9 @@
 //! The socket lives in a directory only this user can enter, and the answer
 //! crosses it once and is dropped; nothing here logs a prompt's reply.
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
@@ -40,6 +42,7 @@ impl AskKind {
         }
     }
 
+    #[cfg(unix)]
     fn name(self) -> &'static str {
         match self {
             Self::Secret => "secret",
@@ -48,6 +51,7 @@ impl AskKind {
         }
     }
 
+    #[cfg(unix)]
     fn parse(name: &str) -> Self {
         match name {
             "confirm" => Self::Confirm,
