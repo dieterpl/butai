@@ -2647,6 +2647,9 @@ pub struct View {
     /// In LAYOUT mode, holding the geometry it was entered with — so leaving
     /// knows whether anything actually moved and only then writes the file.
     pub layout: Option<RailGeom>,
+    /// A rail border or section divider that is being dragged, from the press
+    /// that grabbed it until the button comes up.
+    pub rail_drag: Option<RailDrag>,
     /// The agent the AGENTS `+` spawns without asking, when one is pinned.
     ///
     /// On the view because the button's *label* names it: a pinned button
@@ -2720,6 +2723,7 @@ impl Default for View {
             pending_menu_action: None,
             confirmed_menu_action: None,
             layout: None,
+            rail_drag: None,
             pinned_agent: None,
             staged: None,
             prefix: "^B".into(),
@@ -7608,6 +7612,91 @@ impl Section {
             Section::Agents => s.agents_h,
             Section::Processes => s.procs_h,
             Section::Changes => s.changes_h,
+        }
+    }
+}
+
+/// A border the pointer can take hold of to resize the rails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailHandle {
+    /// The edge between the left rail and the stage.
+    LeftRail,
+    /// The edge between the stage and the right rail.
+    RightRail,
+    /// The divider between AGENTS and PROCESSES.
+    AgentsProcs,
+    /// The divider between PROCESSES and SYSTEM.
+    ProcsSystem,
+}
+
+/// A handle that is held, and whether the press had to enter LAYOUT mode to
+/// hold it. A press made inside LAYOUT mode leaves the mode where it found it;
+/// one made outside saves on release, the way leaving the mode does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RailDrag {
+    pub handle: RailHandle,
+    pub entered_layout: bool,
+}
+
+/// The handle under `(x, y)`, if any. Rails are only there on the pages that
+/// draw them and outside zen, and the `[+ term]` button on the PROCESSES divider
+/// keeps its cells.
+pub fn rail_handle_at(cols: u16, rows: u16, view: &View, x: u16, y: u16) -> Option<RailHandle> {
+    if view.zen || view.page.owns_full_width() || view.page == Page::Booth {
+        return None;
+    }
+    let g = page_geom(cols, rows, view);
+    let in_rows = |b: LRect| y >= b.y && y < b.y + b.height;
+    if g.left_box.width > 0 && in_rows(g.left_box) {
+        let edge = g.left_box.x + g.left_box.width - 1;
+        if x == edge || x == g.stage_box.x {
+            return Some(RailHandle::LeftRail);
+        }
+    }
+    if g.right_box.width > 0 && in_rows(g.right_box) {
+        let edge = g.stage_box.x + g.stage_box.width.saturating_sub(1);
+        if x == g.right_box.x || x == edge {
+            return Some(RailHandle::RightRail);
+        }
+    }
+    let in_left = x >= g.left_box.x && x < g.left_box.x + g.left_box.width;
+    if in_left && y == g.procs_sep {
+        let (start, end) = procs_add_span(&g);
+        if !(x >= start && x < end) {
+            return Some(RailHandle::AgentsProcs);
+        }
+    }
+    if in_left && y == g.system_sep {
+        return Some(RailHandle::ProcsSystem);
+    }
+    None
+}
+
+/// Move a held handle to the pointer at `(x, y)`.
+///
+/// The target is the pointer's own cell rather than a delta from the last
+/// event, so a drag that the floors stopped picks up again exactly where the
+/// pointer comes back to, instead of carrying the cells it could not move.
+pub fn drag_rail(view: &mut View, cols: u16, rows: u16, handle: RailHandle, x: u16, y: u16) {
+    let g = page_geom(cols, rows, view);
+    let want = system_h_wanted(&view.gauges);
+    match handle {
+        RailHandle::LeftRail => {
+            let target = (x + 1).saturating_sub(g.left_box.x) as i32;
+            resize_rail(&mut view.geom, cols, true, (target - g.left_box.width as i32) as i16);
+        }
+        RailHandle::RightRail => {
+            let edge = (g.right_box.x + g.right_box.width) as i32;
+            let target = edge - x as i32;
+            resize_rail(&mut view.geom, cols, false, (target - g.right_box.width as i32) as i16);
+        }
+        RailHandle::AgentsProcs => {
+            let by = y as i32 - g.procs_sep as i32;
+            resize_section(&mut view.geom, rows, Section::Agents, by as i16, want);
+        }
+        RailHandle::ProcsSystem => {
+            let by = y as i32 - g.system_sep as i32;
+            resize_section(&mut view.geom, rows, Section::Processes, by as i16, want);
         }
     }
 }

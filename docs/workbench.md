@@ -1384,6 +1384,11 @@ fallback that collapses both, and the key appears to do the opposite of what it
 says. `esc` or `enter` leaves and writes `[ui]`, but only if something actually
 moved.
 
+The pointer does the same without the mode: drag the edge between a rail and the
+stage, or the divider between AGENTS, PROCESSES and SYSTEM. The rail ends where
+you drop the border, stops at the same floors, and the geometry is saved when
+you let go.
+
 Layout is workbench-wide, not per project: one gesture moves every tab, which is
 why the HUD says so.
 

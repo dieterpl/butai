@@ -46,6 +46,10 @@ use crate::selection::{self, Drag};
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 /// Loading indicator clock, gated on something actually animating.
 const FAST_TICK: std::time::Duration = std::time::Duration::from_millis(1200);
+/// The least time between two paints. Events from every machine and every
+/// keystroke mark the screen dirty; a burst of them inside this window is one
+/// paint, drawn when the window closes, instead of one paint each.
+const MIN_PAINT: Duration = Duration::from_millis(16);
 /// Occasional refresh for time-dependent labels, separate from animation.
 const HEARTBEAT: Duration = Duration::from_secs(5);
 
@@ -629,6 +633,8 @@ pub async fn run(
     // scans of two different buffers would be two answers.
     let mut screen_links = links::ScreenLinks::default();
     let mut dirty = true;
+    // When the screen was last painted, for [`MIN_PAINT`].
+    let mut last_paint: Option<Instant> = None;
     // What the last frame drew that keeps drawing itself — a title mid-scroll,
     // a sprite mid-stride — which is what [`repaint_on_tick`] asks before it
     // spends a clock tick on another one. Carried across iterations rather than
@@ -866,7 +872,7 @@ pub async fn run(
                 shown.as_ref() == Some(&this) || pending_dialogs.iter().any(|d| d.purpose == this)
             });
         }
-        if dirty {
+        if dirty && last_paint.is_none_or(|t| t.elapsed() >= MIN_PAINT) {
             let rect = chrome::stage_rect(cols, rows, &view);
             // Follow the stage. `watch` is what makes this cost no reconnect —
             // switching panes is a message, not a redial.
@@ -932,9 +938,14 @@ pub async fn run(
                 &drag,
             )?;
             dirty = false;
+            last_paint = Some(Instant::now());
         }
 
         tokio::select! {
+            // A paint that was held back wakes the loop when its window closes.
+            _ = tokio::time::sleep_until(
+                tokio::time::Instant::from_std(last_paint.unwrap_or_else(Instant::now) + MIN_PAINT)
+            ), if dirty => {}
             ev = next_any_event(&mut daemons) => match ev {
                 // The stream task retries the socket for as long as the client
                 // runs, which is the whole answer when the far daemon merely
@@ -8977,6 +8988,20 @@ fn handle_input(
                     }
                 }
                 event::MouseEventKind::Down(event::MouseButton::Left) => {
+                    // A rail border or divider is grabbed before anything under
+                    // it is clicked. Outside LAYOUT mode the press enters it
+                    // for the length of the drag, so the release saves.
+                    if let Some(handle) =
+                        chrome::rail_handle_at(*cols, *rows, view, m.column, m.row)
+                    {
+                        let entered_layout = view.layout.is_none();
+                        if entered_layout {
+                            view.layout = Some(view.geom);
+                        }
+                        view.rail_drag = Some(chrome::RailDrag { handle, entered_layout });
+                        drag.clear();
+                        return Flow::Continue;
+                    }
                     // BOOTH's fleet first: it is the only region whose rows come
                     // from a cross-daemon list, so it is resolved against that
                     // list rather than against the geometry alone.
@@ -9221,6 +9246,10 @@ fn handle_input(
                     return run_click(target, view, tab_count, ws, here);
                 }
                 event::MouseEventKind::Drag(event::MouseButton::Left) => {
+                    if let Some(held) = view.rail_drag {
+                        chrome::drag_rail(view, *cols, *rows, held.handle, m.column, m.row);
+                        return Flow::Continue;
+                    }
                     // A pane that grabbed the mouse gets the drag, unless Alt
                     // is held — which is how you select over `vim` or `less`.
                     let target =
@@ -9234,6 +9263,13 @@ fn handle_input(
                     }
                 }
                 event::MouseEventKind::Up(event::MouseButton::Left) => {
+                    if let Some(held) = view.rail_drag.take() {
+                        return if held.entered_layout {
+                            Flow::ToggleLayout
+                        } else {
+                            Flow::Continue
+                        };
+                    }
                     if let hit::Target::Stage(px, py) =
                         hit::at(*cols, *rows, view, &refs, daemons.len(), ws, m.column, m.row)
                     {
@@ -14623,6 +14659,44 @@ name = \"terminal\"
 
         // Esc leaves.
         assert!(matches!(press(&mut view, key(event::KeyCode::Esc), &keymap), Flow::ToggleLayout));
+    }
+
+    /// A rail edge can be taken with the pointer and dragged to a new width.
+    ///
+    /// The drag lands on the pointer's own cell, so the rail ends exactly where
+    /// the border was dropped, and the floors still stop it.
+    #[test]
+    fn dragging_a_rail_border_resizes_it() {
+        let (cols, rows) = (140, 40);
+        let mut view = View::default();
+        let g = chrome::page_geom(cols, rows, &view);
+        let edge = g.left_box.x + g.left_box.width - 1;
+        let y = g.left_box.y + 2;
+        assert_eq!(
+            chrome::rail_handle_at(cols, rows, &view, edge, y),
+            Some(chrome::RailHandle::LeftRail)
+        );
+        assert_eq!(chrome::rail_handle_at(cols, rows, &view, edge - 3, y), None);
+
+        chrome::drag_rail(&mut view, cols, rows, chrome::RailHandle::LeftRail, edge + 6, y);
+        assert_eq!(view.geom.left_w, g.left_box.width + 6, "the rail did not follow the pointer");
+        chrome::drag_rail(&mut view, cols, rows, chrome::RailHandle::LeftRail, 0, y);
+        assert_eq!(view.geom.left_w, crate::chrome::RAIL_MIN_W, "the floor did not hold");
+
+        // The divider between AGENTS and PROCESSES moves rows, not columns.
+        let g = chrome::page_geom(cols, rows, &view);
+        let (start, end) = chrome::procs_add_span(&g);
+        let free = (g.left_box.x..g.left_box.x + g.left_box.width)
+            .find(|&x| !(x >= start && x < end))
+            .unwrap();
+        assert_eq!(
+            chrome::rail_handle_at(cols, rows, &view, free, g.procs_sep),
+            Some(chrome::RailHandle::AgentsProcs)
+        );
+
+        // Zen draws no rails, so there is nothing to take hold of.
+        view.zen = true;
+        assert_eq!(chrome::rail_handle_at(cols, rows, &view, edge, y), None);
     }
 
     /// Help is a page of its own, and it leaves the file screen alone.

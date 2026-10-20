@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drag a rail's border to resize it.** The edge between a rail and the stage,
+  and the dividers between AGENTS, PROCESSES and SYSTEM, can be taken with the
+  pointer. The rail ends where the border is dropped, held to the same floors
+  the arrow keys stop at, and the geometry is saved on release. Inside LAYOUT
+  mode the drag leaves the mode as it found it; outside, the press enters it for
+  the length of the drag. Zen and the full-width pages draw no rails, so they
+  have no handles.
+
 - **Say what a chat is for: a role and labels, from a right-click in BOOTH.**
   Eight chats in a fleet read as eight copies of `claude`. Right-clicking one
   (or its `⋯`) opens a menu at the pointer with a **role** — `lead` for the chat
@@ -92,6 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boxes keep their own plus. The browser's BOOTH has a `+` on the fleet title.
 
 ### Changed
+
+- **A burst of events is one repaint.** Every machine pushes its status about
+  every two seconds, and each push, each pane frame and each keystroke used to
+  repaint the whole screen on its own — five machines meant five or more full
+  repaints a second at rest, with a keystroke queued behind them. Paints are now
+  at least 16 ms apart, and whatever arrived inside that window is drawn once
+  when it closes. The cost of other machines' traffic on typing is bounded to one
+  repaint per window.
 
 - **A dial you started tells you why it failed, in a window.** `[+ host]` and the
   SETTINGS connect row now open an error window (permission denied, host key
