@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **1.4.1-dev.1: nothing in 1.4.0-dev.2 – dev.5 was broken in the tree, but
+  none of it runs on an older daemon.** Checked end to end on a fresh build —
+  a daemon, the bridge and the browser, not fixtures: `GET /v1/agents` in usage
+  order, `GET /v1/agents/usage`, `PUT .../panes/{pane}/tags` (and its refusal of
+  an unknown role), and BOOTH's right-click menu changing a chat's role on the
+  daemon. The tags, the usage order and the `[+]` all need the new *daemon*; a
+  client at 1.4.x talking to a daemon that was started before the upgrade shows
+  none of them, and the browser says `daemon is <old>, client is <new> —
+  restart it`. Installing the new `butai` does not restart a daemon that is
+  already running.
+
 ### Added
 
 - **Drag a rail's border to resize it.** The edge between a rail and the stage,
