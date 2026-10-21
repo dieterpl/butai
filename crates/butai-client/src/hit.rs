@@ -179,7 +179,7 @@ pub fn at(
     // column came back as `Rail(Agents, n)`, silently selecting a row in a list
     // that is not on screen.
     if view.page == Page::Booth {
-        let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+        let c = chrome::booth_columns_of(cols, &geom, view);
         if c.stage_inner.contains(x, y) {
             return Target::Stage(x - c.stage_inner.x, y - c.stage_inner.y);
         }
@@ -305,7 +305,7 @@ pub fn on_fleet(
         return None;
     }
     let geom = chrome::page_geom(cols, rows, view);
-    let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+    let c = chrome::booth_columns_of(cols, &geom, view);
     // The tray sits above the list and the two rectangles are disjoint, so this
     // is a first look rather than a precedence: only one of them can contain the
     // point. It carries no `[open]` — four rows are too few to spend six columns
@@ -422,7 +422,7 @@ pub fn on_compute(
         return None;
     }
     let geom = chrome::page_geom(cols, rows, view);
-    let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+    let c = chrome::booth_columns_of(cols, &geom, view);
     chrome::booth_compute_machine_at(&c, machines, view, x, y)
 }
 
@@ -599,7 +599,7 @@ pub fn on_page(
     }
     let geom = chrome::page_geom(cols, rows, view);
     if view.page == Page::Docker {
-        let list = chrome::docker_row_area(&geom);
+        let list = chrome::docker_row_area(&geom, view.docker_w);
         if list.contains(x, y) {
             let first = chrome::first_visible(sels.first().copied().unwrap_or(0), list.height);
             return PageTarget::Row { col: 0, row: first + (y - list.y) as usize };
@@ -681,7 +681,7 @@ pub fn on_git_page(
         return GitTarget::Nothing;
     }
     let geom = chrome::page_geom(cols, rows, view);
-    let c = chrome::git_columns(geom.stage_box);
+    let c = chrome::git_columns(geom.stage_box, view.git_w);
 
     let hit_list = |area: crate::layout::Rect,
                     verbs: &[crate::verbs::Verb],

@@ -1920,6 +1920,45 @@ pub async fn run(
                     // Entering snapshots the geometry; leaving writes it out,
                     // but only if it moved — an accidental Alt-l should not
                     // rewrite the user's config file.
+                    Flow::TagLabel(menu, text) => {
+                        let mut next = menu.clone();
+                        let label = text.trim().trim_start_matches('#').to_lowercase();
+                        if !next.labels.contains(&label) {
+                            next.labels.push(label.clone());
+                        }
+                        if !next.known.contains(&label) {
+                            next.known.push(label);
+                        }
+                        // The daemon is the last word on what a label may be,
+                        // and the same function the menu would have used.
+                        match butai_protocol::api::normalize_tags(next.role.as_deref(), &next.labels)
+                            .map_err(|e| anyhow::anyhow!(e))
+                        {
+                            Ok(_) => match send_tags(&daemons, &next).await {
+                                Ok(()) => {
+                                    let sel = next.rows().len().saturating_sub(2);
+                                    view.overlay = Some(Overlay::List(next.overlay(sel)));
+                                }
+                                Err(e) => view.flash = Some(format!("{e:#}")),
+                            },
+                            Err(e) => view.flash = Some(format!("{e:#}")),
+                        }
+                        dirty = true;
+                    }
+                    Flow::MoveTab(d, from, to) => {
+                        // The selected tab follows the one that moved, so a
+                        // drag does not leave the page on a neighbour.
+                        let order = tab_index(&daemons, &hosts);
+                        let flat = |t: usize| order.iter().position(|&(od, ot)| od == d && ot == t);
+                        let selected_moved = flat(from) == Some(view.tab);
+                        daemons[d].state.move_tab(from, to);
+                        if selected_moved {
+                            if let Some(at) = flat(to) {
+                                view.tab = at;
+                            }
+                        }
+                        dirty = true;
+                    }
                     Flow::ToggleLayout => {
                         match view.layout.take() {
                             Some(before) if before != view.geom => {
@@ -2546,6 +2585,43 @@ pub async fn run(
                                             .await
                                     {
                                         view.flash = Some(format!("{e:#}"));
+                                    }
+                                } else if let ListKind::Tags(menu) = list.kind {
+                                    // The menu stays open: a chat usually wants
+                                    // a role and a label or two, and reopening
+                                    // it for each is the slow way to do a quick
+                                    // thing. Escape closes it.
+                                    let sel = list.sel;
+                                    if menu.rows().get(sel) == Some(&chrome::TagRow::NewLabel) {
+                                        view.overlay = Some(Overlay::Prompt(chrome::PromptOverlay {
+                                            title: "NEW LABEL".into(),
+                                            text: String::new(),
+                                            cursor: 0,
+                                            subtitle: Some(
+                                                "a-z 0-9 - _, up to 24 characters".into(),
+                                            ),
+                                            kind: chrome::PromptKind::NewLabel(menu),
+                                        }));
+                                    } else {
+                                        match menu.pick(sel) {
+                                            Some(next) => {
+                                                if let Err(e) = send_tags(&daemons, &next).await {
+                                                    view.flash = Some(format!("{e:#}"));
+                                                    view.overlay =
+                                                        Some(Overlay::List(menu.overlay(sel)));
+                                                } else {
+                                                    view.overlay =
+                                                        Some(Overlay::List(next.overlay(sel)));
+                                                }
+                                            }
+                                            None => {
+                                                view.flash = Some(format!(
+                                                    "a chat carries at most {} labels",
+                                                    butai_protocol::api::MAX_LABELS
+                                                ));
+                                                view.overlay = Some(Overlay::List(menu.overlay(sel)));
+                                            }
+                                        }
                                     }
                                 } else if let ListKind::Menu(target) = list.kind {
                                     // By row index rather than by label: the
@@ -3341,6 +3417,9 @@ async fn act_on_choice(
         // Handled by the loop: its rows are four different calls, and it is
         // the loop that knows which daemon a tab belongs to.
         ListKind::Menu(_) => {}
+        // Handled by the loop: a pick is a PUT to the menu's own daemon, and
+        // the menu stays open after it.
+        ListKind::Tags(_) => {}
         // Themes are client-side now, so this is not a daemon call at all.
         ListKind::Theme => {}
         // Neither is following a link: the browser is on the machine this
@@ -5680,7 +5759,7 @@ fn refresh_git_if_showing(
 /// third column, not the stage, so it needs its own measurement.
 fn git_body_rows(cols: u16, rows: u16, view: &View) -> u16 {
     let band = chrome::page_geom(cols, rows, view).stage_box;
-    chrome::git_columns(band).body_box.height.saturating_sub(3)
+    chrome::git_columns(band, view.git_w).body_box.height.saturating_sub(3)
 }
 
 /// Load everything the GIT page draws, over `/v1/*`.
@@ -5877,6 +5956,11 @@ async fn recv_stage(stage: Option<&mut Stage>) -> Option<ServerMsg> {
 #[derive(Debug)]
 enum Flow {
     Continue,
+    /// Move a workspace tab within its daemon's tabs: `(daemon, from, to)`, as
+    /// indices into that daemon's own list.
+    MoveTab(usize, usize, usize),
+    /// A label typed in the tag menu's `new label…` box.
+    TagLabel(chrome::TagMenu, String),
     Detach,
     /// Take the offered update. Leaves the loop: the download and the swap
     /// need the terminal back first, so they happen in [`crate::run_client`]
@@ -7739,6 +7823,7 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                 view.flash = Some(match p.kind {
                     chrome::PromptKind::SshDestination => "a machine needs a destination".into(),
                     chrome::PromptKind::NewFolder { .. } => "a folder needs a name".into(),
+                    chrome::PromptKind::NewLabel(_) => "a label needs a name".into(),
                     _ => "a commit needs a message".to_string(),
                 });
                 // Every other prompt is entered from the workbench, so refusing
@@ -7763,6 +7848,7 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                 // brings its trailing space with it and `ssh " host"` is not a
                 // host.
                 chrome::PromptKind::SshDestination => Flow::DialHost(p.text.trim().to_string()),
+                chrome::PromptKind::NewLabel(menu) => Flow::TagLabel(menu, p.text),
                 // Trimmed for the same reason, and because ` proj` is a folder
                 // whose name begins with a space — legal, and never what was
                 // meant. The daemon refuses the rest: separators, `.` and `..`.
@@ -8080,13 +8166,32 @@ fn fleet_menu(
     row: usize,
 ) -> Option<Overlay> {
     match rows.get(row)? {
+        // A chat's menu is about what it is for. Ending it is `x`, or the
+        // `[x]` on its row, which still opens the close menu.
         chrome::BoothRow::Agent { sel, .. } => {
             let at = fleet_route(all, *sel)?;
-            Some(menu_overlay(chrome::MenuTarget::Agent {
+            let agent = all.iter().find(|a| a.daemon == at.daemon && a.agent.pane == at.pane)?;
+            let mut known: Vec<String> =
+                chrome::LABEL_SUGGESTIONS.iter().map(|l| l.to_string()).collect();
+            for l in all.iter().flat_map(|a| a.agent.labels.iter()) {
+                if !known.contains(l) {
+                    known.push(l.clone());
+                }
+            }
+            let menu = chrome::TagMenu {
                 daemon: at.daemon,
                 workspace: at.workspace,
                 pane: at.pane,
-            }))
+                title: agent.agent.title.clone(),
+                role: agent
+                    .agent
+                    .role
+                    .clone()
+                    .filter(|r| butai_protocol::api::AGENT_ROLES.contains(&r.as_str())),
+                labels: agent.agent.labels.clone(),
+                known,
+            };
+            Some(Overlay::List(menu.overlay(0)))
         }
         chrome::BoothRow::Space { space, .. } => {
             Some(menu_overlay(chrome::MenuTarget::Tab(space.tab)))
@@ -8107,6 +8212,18 @@ fn fleet_menu_here(
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
     fleet_menu(&chrome::booth_rows(&spaces, &machines, &view.folds), &all, row)
+}
+
+/// Send a chat's role and labels to the daemon it lives on.
+async fn send_tags(daemons: &[Daemon], menu: &chrome::TagMenu) -> Result<()> {
+    let d = daemons.get(menu.daemon).context("that machine has gone")?;
+    let route = format!("/v1/workspaces/{}/panes/{}/tags", menu.workspace, menu.pane);
+    let body = serde_json::to_vec(&serde_json::json!({
+        "role": menu.role,
+        "labels": menu.labels,
+    }))?;
+    d.api.call(hyper::Method::PUT, &route, Some(body)).await?;
+    Ok(())
 }
 
 /// A menu target as the list overlay that shows it. The rows come from
@@ -8225,7 +8342,7 @@ fn page_wheel(
     // them somewhere the user is not pointing.
     if view.page == Page::Booth {
         let geom = chrome::page_geom(cols, rows, view);
-        let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+        let c = chrome::booth_columns_of(cols, &geom, view);
         if c.fleet_box.width > 0 && c.fleet_box.contains(x, y) {
             let was = view.focus;
             // Looking, not choosing — same as the rails.
@@ -8269,7 +8386,7 @@ fn page_wheel(
     // whichever one the pointer is over — not to whichever has focus.
     if view.page == Page::Git {
         let geom = chrome::page_geom(cols, rows, view);
-        let c = chrome::git_columns(geom.stage_box);
+        let c = chrome::git_columns(geom.stage_box, view.git_w);
         let step = |cur: usize, len: usize| {
             (cur as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize
         };
@@ -8555,7 +8672,9 @@ fn page_metrics(
     let gutter = match view.page {
         Page::Diff => diff.gutter_w(chrome::stage_rect(cols, rows, view).width),
         Page::Git => {
-            let body = chrome::git_columns(chrome::page_geom(cols, rows, view).stage_box).body_box;
+            let body =
+                chrome::git_columns(chrome::page_geom(cols, rows, view).stage_box, view.git_w)
+                    .body_box;
             git.body
                 .as_ref()
                 .map(|d| d.gutter_w(body.width.saturating_sub(2)))
@@ -8988,6 +9107,19 @@ fn handle_input(
                     }
                 }
                 event::MouseEventKind::Down(event::MouseButton::Left) => {
+                    if let Some(page) = chrome::split_at(*cols, *rows, view, m.column, m.row) {
+                        view.split_drag = Some(page);
+                        drag.clear();
+                        return Flow::Continue;
+                    }
+                    // BOOTH's column borders, for the same reason as the rails'.
+                    if let Some(handle) =
+                        chrome::booth_handle_at(*cols, *rows, view, m.column, m.row)
+                    {
+                        view.booth_drag = Some(handle);
+                        drag.clear();
+                        return Flow::Continue;
+                    }
                     // A rail border or divider is grabbed before anything under
                     // it is clicked. Outside LAYOUT mode the press enters it
                     // for the length of the drag, so the release saves.
@@ -9242,10 +9374,39 @@ fn handle_input(
                     if let hit::Target::Stage(px, py) = target {
                         forward_mouse(stage, px, py, &m);
                     }
+                    // A press on a tab chip may turn into a drag that moves it.
+                    view.tab_drag = match target {
+                        hit::Target::Tab(i) => tab_index(daemons, hosts)
+                            .get(i)
+                            .and_then(|&(d, t)| Some((d, daemons[d].state.tabs.get(t)?.id))),
+                        _ => None,
+                    };
                     let here = active_daemon(daemons, hosts, view);
                     return run_click(target, view, tab_count, ws, here);
                 }
                 event::MouseEventKind::Drag(event::MouseButton::Left) => {
+                    if let Some((d, id)) = view.tab_drag {
+                        let target =
+                            hit::at(*cols, *rows, view, &refs, daemons.len(), ws, m.column, m.row);
+                        let order = tab_index(daemons, hosts);
+                        if let hit::Target::Tab(over) = target {
+                            let from = daemons[d].state.tabs.iter().position(|t| t.id == id);
+                            if let (Some(from), Some(&(od, to))) = (from, order.get(over)) {
+                                if od == d && to != from {
+                                    return Flow::MoveTab(d, from, to);
+                                }
+                            }
+                        }
+                        return Flow::Continue;
+                    }
+                    if let Some(page) = view.split_drag {
+                        chrome::drag_split(view, *cols, *rows, page, m.column);
+                        return Flow::Continue;
+                    }
+                    if let Some(held) = view.booth_drag {
+                        chrome::drag_booth(view, *cols, *rows, held, m.column);
+                        return Flow::Continue;
+                    }
                     if let Some(held) = view.rail_drag {
                         chrome::drag_rail(view, *cols, *rows, held.handle, m.column, m.row);
                         return Flow::Continue;
@@ -9263,6 +9424,12 @@ fn handle_input(
                     }
                 }
                 event::MouseEventKind::Up(event::MouseButton::Left) => {
+                    if view.booth_drag.take().is_some()
+                        || view.tab_drag.take().is_some()
+                        || view.split_drag.take().is_some()
+                    {
+                        return Flow::Continue;
+                    }
                     if let Some(held) = view.rail_drag.take() {
                         return if held.entered_layout {
                             Flow::ToggleLayout
@@ -9424,7 +9591,10 @@ fn handle_input(
             }
             if view.page == Page::Git && !alt {
                 let ws = active_workspace(daemons, hosts, view).cloned();
-                let band = chrome::git_columns(chrome::page_geom(*cols, *rows, view).stage_box);
+                let band = chrome::git_columns(
+                    chrome::page_geom(*cols, *rows, view).stage_box,
+                    view.git_w,
+                );
                 let list_h = if view.focus == Focus::Refs {
                     band.refs_rows.height
                 } else {
@@ -13942,8 +14112,8 @@ name = \"terminal\"
     }
 
     /// The fleet's context menu names the row it was opened on, wherever that
-    /// row lives — and it is the same menu the rails open, so `Close others`
-    /// means the other agents in *that* project.
+    /// row lives. On a chat it is about what the chat is for — its role and
+    /// labels — and carries the chat's own machine, workspace and pane.
     #[test]
     fn the_fleet_menu_names_the_row_and_its_machine() {
         use butai_protocol::{api::AgentState, SessionId};
@@ -13954,17 +14124,13 @@ name = \"terminal\"
         // Row 3 is the second machine's agent: machine, project, agent, machine,
         // project, agent.
         let Some(Overlay::List(list)) = fleet_menu(&rows, &fleet, 5) else { panic!("no menu") };
+        let ListKind::Tags(menu) = &list.kind else { panic!("not the tag menu: {:?}", list.kind) };
         assert_eq!(
-            list.kind,
-            ListKind::Menu(chrome::MenuTarget::Agent {
-                daemon: 1,
-                workspace: SessionId(1),
-                pane: PaneId(7),
-            })
+            (menu.daemon, menu.workspace, menu.pane),
+            (1, SessionId(1), PaneId(7)),
+            "the menu is about another row"
         );
-        // The same three rows the rails offer — one builder, so the pointer and
-        // `m` cannot come to mean different things on different pages.
-        assert_eq!(list.items, vec!["Close agent", "Close others", "Close all agents"]);
+        assert!(list.title.contains("codex"));
         assert!(fleet_menu(&rows, &fleet, 9).is_none(), "a row that has gone has no menu");
 
         // A project row opens the tab bar's own menu, against *its* chip — the
@@ -13974,6 +14140,89 @@ name = \"terminal\"
         // A machine has none: there is nothing generic to offer about a host
         // here that the tab bar does not already offer about its tabs.
         assert!(fleet_menu(&rows, &fleet, 3).is_none(), "a machine row opened a menu");
+    }
+
+    /// Picking in the tag menu sets a role, toggles a label, and keeps the
+    /// limits the daemon keeps.
+    #[test]
+    fn the_tag_menu_picks_a_role_and_toggles_labels() {
+        use butai_protocol::SessionId;
+        let menu = chrome::TagMenu {
+            daemon: 0,
+            workspace: SessionId(1),
+            pane: PaneId(3),
+            title: "claude".into(),
+            role: None,
+            labels: vec![],
+            known: chrome::LABEL_SUGGESTIONS.iter().map(|l| l.to_string()).collect(),
+        };
+        let lead = menu.pick(0).unwrap();
+        assert_eq!(lead.role.as_deref(), Some("lead"));
+        assert_eq!(lead.pick(0).unwrap().role, None, "the same role again clears it");
+        assert_eq!(lead.pick(1).unwrap().role.as_deref(), Some("worker"));
+        let review = menu.pick(4).unwrap();
+        assert_eq!(review.labels, vec!["review"]);
+        assert!(review.pick(4).unwrap().labels.is_empty());
+        let rows = menu.rows();
+        assert_eq!(rows[rows.len() - 2], chrome::TagRow::NewLabel);
+        assert!(menu.pick(rows.len() - 2).is_none(), "new label is a question, not a change");
+        assert_eq!(review.pick(rows.len() - 1).unwrap().labels, Vec::<String>::new());
+        // A ninth label is refused rather than sent for the daemon to refuse.
+        let full =
+            chrome::TagMenu { labels: (0..8).map(|i| format!("l{i}")).collect(), ..menu.clone() };
+        assert!(full.pick(4).is_none());
+    }
+
+    /// BOOTH's fleet and compute borders can be taken and dragged, and the
+    /// floors hold.
+    #[test]
+    fn dragging_a_booth_border_resizes_its_column() {
+        let (cols, rows) = (180, 40);
+        let mut view = View { page: Page::Booth, ..Default::default() };
+        let g = chrome::page_geom(cols, rows, &view);
+        let c = chrome::booth_columns_of(cols, &g, &view);
+        let edge = c.fleet_box.x + c.fleet_box.width - 1;
+        let y = c.fleet_box.y + 5;
+        assert_eq!(
+            chrome::booth_handle_at(cols, rows, &view, edge, y),
+            Some(chrome::BoothHandle::Fleet)
+        );
+        assert_eq!(chrome::booth_handle_at(cols, rows, &view, edge - 4, y), None);
+        chrome::drag_booth(&mut view, cols, rows, chrome::BoothHandle::Fleet, edge + 6);
+        let wider = chrome::booth_columns_of(cols, &g, &view);
+        assert_eq!(wider.fleet_box.width, c.fleet_box.width + 6);
+        chrome::drag_booth(&mut view, cols, rows, chrome::BoothHandle::Fleet, 0);
+        assert!(chrome::booth_columns_of(cols, &g, &view).fleet_box.width >= 22);
+
+        let c = chrome::booth_columns_of(cols, &g, &view);
+        let cedge = c.compute_box.x;
+        assert_eq!(
+            chrome::booth_handle_at(cols, rows, &view, cedge, y),
+            Some(chrome::BoothHandle::Compute)
+        );
+        chrome::drag_booth(&mut view, cols, rows, chrome::BoothHandle::Compute, cedge - 5);
+        let after = chrome::booth_columns_of(cols, &g, &view);
+        assert_eq!(after.compute_box.width, c.compute_box.width + 5);
+        assert!(after.stage_box.width >= chrome::MIN_STAGE_W, "the stage lost its floor");
+    }
+
+    /// The DOCKER and GIT list columns follow the pointer too.
+    #[test]
+    fn dragging_a_page_split_resizes_its_list() {
+        let (cols, rows) = (160, 40);
+        for page in [Page::Docker, Page::Git] {
+            let mut view = View { page, ..Default::default() };
+            let band = chrome::page_geom(cols, rows, &view).stage_box;
+            let y = band.y + 3;
+            let at = (band.x..band.x + 80)
+                .find(|&x| chrome::split_at(cols, rows, &view, x, y).is_some())
+                .expect("no split to take");
+            chrome::drag_split(&mut view, cols, rows, page, at + 8);
+            let moved = (band.x..band.x + 80)
+                .find(|&x| chrome::split_at(cols, rows, &view, x, y).is_some())
+                .unwrap();
+            assert_eq!(moved, at + 8, "{page:?} did not follow the pointer");
+        }
     }
 
     /// Closing a workspace from BOOTH asks first, and asks about the row's own

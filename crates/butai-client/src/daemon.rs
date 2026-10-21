@@ -94,11 +94,30 @@ pub struct State {
 }
 
 impl State {
+    /// Replace the tab list with the daemon's, keeping the order the user has
+    /// dragged the tabs into. A workspace the client has not seen before goes
+    /// on the end, in the daemon's order.
+    pub fn set_tabs(&mut self, mut list: Vec<WorkspaceSummary>) {
+        let rank =
+            |id: &SessionId| self.tabs.iter().position(|t| t.id == *id).unwrap_or(usize::MAX);
+        list.sort_by_key(|t| rank(&t.id));
+        self.tabs = list;
+    }
+
+    /// Move the tab at `from` to `to`, the others shifting along. Local to this
+    /// client: the daemon keeps no order, and another client's bar is its own.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from < self.tabs.len() && to < self.tabs.len() && from != to {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+        }
+    }
+
     pub fn apply(&mut self, event: &ApiEvent) {
         match event {
             ApiEvent::System(sys) => self.system = sys.clone(),
             ApiEvent::Workspaces(list) => {
-                self.tabs = list.clone();
+                self.set_tabs(list.clone());
                 // A workspace that is gone from the list is gone: keeping its
                 // detail would let a stale rail outlive the tab that showed it.
                 self.detail.retain(|id, _| list.iter().any(|w| w.id == *id));
@@ -197,7 +216,7 @@ impl Daemon {
                 self.state.detail.insert(detail.id, detail);
             }
         }
-        self.state.tabs = tabs;
+        self.state.set_tabs(tabs);
         if let Ok(sys) = self.api.get_as::<SysDto>("/v1/system").await {
             self.state.system = sys;
         }
@@ -353,6 +372,29 @@ mod tests {
         let sys = SysDto { cpu_pct: pct, ..SysDto::default() };
         let data = serde_json::to_string(&ApiEvent::System(sys)).unwrap();
         format!("data: {data}")
+    }
+
+    /// A tab dragged to a new place stays there when the daemon next sends its
+    /// own list, and a workspace opened since goes on the end.
+    #[test]
+    fn a_dragged_tab_order_survives_the_daemons_next_list() {
+        let ws = |id: u64| -> WorkspaceSummary {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": format!("w{id}"), "cwd": "/", "agents": 0, "processes": 0, "changes": 0, "repo_state": "clean", "attached_clients": 0,
+            }))
+            .expect("a workspace summary")
+        };
+        let ids = |s: &State| s.tabs.iter().map(|t| t.id.0).collect::<Vec<_>>();
+        let mut state = State::default();
+        state.set_tabs(vec![ws(1), ws(2), ws(3)]);
+        state.move_tab(2, 0);
+        assert_eq!(ids(&state), [3, 1, 2]);
+        state.set_tabs(vec![ws(1), ws(2), ws(3), ws(4)]);
+        assert_eq!(ids(&state), [3, 1, 2, 4]);
+        state.set_tabs(vec![ws(1), ws(3), ws(4)]);
+        assert_eq!(ids(&state), [3, 1, 4], "a closed workspace leaves a gap, not a hole");
+        state.move_tab(0, 9);
+        assert_eq!(ids(&state), [3, 1, 4], "a move past the end is ignored");
     }
 
     #[test]

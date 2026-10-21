@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **1.5.0-dev.1: BOOTH's columns, the DOCKER and GIT lists, and the workspace
+  tabs can all be dragged.** The edge between FLEET and the stage, and between
+  the stage and COMPUTE, follows the pointer to the cell it is dropped on, held
+  to the floors BOOTH already had and leaving the stage its minimum. The list
+  column on DOCKER and on GIT does the same. A workspace chip in the tab bar can
+  be dragged along the bar to a new place among the chips of its own machine;
+  the chip you are on stays selected. These widths and this order last as long as
+  the client does (the rails' geometry is still the only thing written to
+  `[ui]`), and a list from the daemon does not undo the order — a workspace
+  opened later goes on the end.
+
+- **A role and labels from a right-click in the terminal's BOOTH.** Right-clicking
+  a chat in the fleet opens the menu the browser has: the four roles (picking
+  the one it has clears it), the labels in use across the fleet plus
+  `review`/`blocked`/`bug`/`idea`, `new label…` to type one, and `clear tags`.
+  It stays open while you pick, and a change is the same `PUT .../tags` the
+  browser sends, so the daemon is the last word on what is valid. This replaces
+  the Close agent menu on a chat row; ending a chat is still `x`, and the `[x]`
+  on its row still opens the close menu. The terminal sends tags but does not
+  yet draw them beside the chat's name.
+
 ### Changed
 
 - **1.4.1-dev.1: nothing in 1.4.0-dev.2 – dev.5 was broken in the tree, but

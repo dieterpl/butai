@@ -929,10 +929,13 @@ starts exactly the agent `[+ claude]` would, and `[x]` has no shorter form. What
 neither of them ever costs is a sprite — a folded project that cannot say what is
 in it is a row you have to unfold to read.
 
-`m` or the right button opens that row's menu — `Close agent`, `Close others`, `Close all
-agents`, the same three the AGENTS rail offers, acting on the row's own project
-rather than on the tab you are looking at. Neither asks first, for the reason the
-rail's `x` does not: an agent is a process whose transcript is on disk. On a
+The right button on a chat opens its tag menu: a role (`lead`, `worker`, `loop`,
+`watch`) and labels, the same ones the browser's BOOTH offers, set on the daemon
+and left open while you pick. `m` and the `[x]` on a chat's row open `Close agent`,
+`Close others`, `Close all agents`, the same three the AGENTS rail offers, acting
+on the row's own project rather than on the tab you are looking at. Neither asks
+first, for the reason the rail's `x` does not: an agent is a process whose
+transcript is on disk. On a
 project row the menu is the tab bar's own, against *its* chip; a machine row has
 none, because there is nothing generic to offer about a host here that the tab
 bar does not already offer about its tabs.
@@ -1388,6 +1391,11 @@ The pointer does the same without the mode: drag the edge between a rail and the
 stage, or the divider between AGENTS, PROCESSES and SYSTEM. The rail ends where
 you drop the border, stops at the same floors, and the geometry is saved when
 you let go.
+
+The same works on BOOTH (the borders either side of the stage), on the list
+column of DOCKER and GIT, and on the workspace chips in the tab bar, which you
+drag along the bar to reorder. Those widths and that order are kept for the
+session only.
 
 Layout is workbench-wide, not per project: one gesture moves every tab, which is
 why the HUD says so.

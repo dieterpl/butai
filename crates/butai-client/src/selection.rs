@@ -242,14 +242,14 @@ fn page_region(
             [(column, column), text, text, text]
         }
         Page::Docker => {
-            let logs = c::docker_logs_inner(geom.stage_box);
-            let list = c::docker_row_area(geom);
+            let logs = c::docker_logs_inner(geom.stage_box, view.docker_w);
+            let list = c::docker_row_area(geom, view.docker_w);
             [(list, list), (logs, logs), (logs, logs), (logs, logs)]
         }
         // BOOTH is three columns and a tray, and the tray is a list of its own —
         // the same agent appears in both, so a drag must not run between them.
         Page::Booth => {
-            let h = c::booth_columns(c::booth_area(cols, geom));
+            let h = c::booth_columns_of(cols, geom, view);
             [
                 (h.tray_rows, h.tray_rows),
                 (h.fleet_rows, h.fleet_rows),
@@ -260,7 +260,7 @@ fn page_region(
         // Three real columns: the two lists never share a drag, and the body
         // is a diff, so it clips like one.
         Page::Git => {
-            let g = c::git_columns(geom.stage_box);
+            let g = c::git_columns(geom.stage_box, view.git_w);
             let body = trim_left(inner_of(g.body_box), gutter);
             [
                 (g.refs_rows, g.refs_rows),
@@ -456,8 +456,8 @@ mod tests {
             let geom = crate::chrome::page_geom(COLS, ROWS, &view);
             let (list, body) = if page == Page::Docker {
                 (
-                    crate::chrome::docker_row_area(&geom),
-                    crate::chrome::docker_logs_inner(geom.stage_box),
+                    crate::chrome::docker_row_area(&geom, None),
+                    crate::chrome::docker_logs_inner(geom.stage_box, None),
                 )
             } else {
                 (
@@ -520,7 +520,7 @@ mod tests {
             let view = View { page, ..Default::default() };
             let geom = crate::chrome::page_geom(COLS, ROWS, &view);
             let body = match page {
-                Page::Git => inner_of(crate::chrome::git_columns(geom.stage_box).body_box),
+                Page::Git => inner_of(crate::chrome::git_columns(geom.stage_box, None).body_box),
                 _ => to_lrect(geom.stage_inner),
             };
             let clip =

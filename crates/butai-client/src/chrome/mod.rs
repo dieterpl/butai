@@ -2101,6 +2101,8 @@ pub struct PromptOverlay {
 /// What pressing Enter in a prompt does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
+    /// A label of one's own for the chat the tag menu was opened on.
+    NewLabel(TagMenu),
     Commit {
         all: bool,
     },
@@ -2264,6 +2266,104 @@ pub struct ListOverlay {
     pub kind: ListKind,
 }
 
+/// Labels offered before anyone has made one; the others in use in the fleet
+/// are added as they appear. The browser's menu offers the same four.
+pub const LABEL_SUGGESTIONS: [&str; 4] = ["review", "blocked", "bug", "idea"];
+
+/// A chat's role and labels as the tag menu holds them, with where to send a
+/// change. Carried by the menu rather than read from the fleet when it is
+/// answered, so a pick shows its tick before the daemon's event comes back and
+/// the cursor having moved does not retarget it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMenu {
+    pub daemon: usize,
+    pub workspace: SessionId,
+    pub pane: PaneId,
+    pub title: String,
+    pub role: Option<String>,
+    pub labels: Vec<String>,
+    /// Labels to offer: the suggestions plus any in use elsewhere in the fleet.
+    pub known: Vec<String>,
+}
+
+/// What a row of the tag menu does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagRow {
+    Role(&'static str),
+    Label(String),
+    NewLabel,
+    Clear,
+}
+
+impl TagMenu {
+    /// Every row, in order. One table for the drawing and the dispatch, as
+    /// [`MenuTarget::rows`] is.
+    pub fn rows(&self) -> Vec<TagRow> {
+        let mut rows: Vec<TagRow> =
+            butai_protocol::api::AGENT_ROLES.iter().map(|r| TagRow::Role(r)).collect();
+        // A label the chat carries that is not offered must still be shown, or
+        // it could be added and never taken off.
+        let extra = self.labels.iter().filter(|l| !self.known.contains(l));
+        rows.extend(self.known.iter().chain(extra).cloned().map(TagRow::Label));
+        rows.push(TagRow::NewLabel);
+        rows.push(TagRow::Clear);
+        rows
+    }
+
+    /// The menu as a list overlay, with the cursor kept on `sel`.
+    pub fn overlay(&self, sel: usize) -> ListOverlay {
+        let items = self
+            .rows()
+            .iter()
+            .map(|r| match r {
+                TagRow::Role(name) => {
+                    let on = self.role.as_deref() == Some(*name);
+                    format!("{} role  {name}", if on { "●" } else { "○" })
+                }
+                TagRow::Label(l) => {
+                    format!("{} label #{l}", if self.labels.contains(l) { "✓" } else { " " })
+                }
+                TagRow::NewLabel => "  new label…".to_string(),
+                TagRow::Clear => "  clear tags".to_string(),
+            })
+            .collect::<Vec<_>>();
+        ListOverlay {
+            title: format!("TAG {}", self.title),
+            sel: sel.min(items.len().saturating_sub(1)),
+            items,
+            values: None,
+            meters: None,
+            kind: ListKind::Tags(self.clone()),
+        }
+    }
+
+    /// The menu after row `row` is chosen, or `None` for a row that is not a
+    /// change (`new label…`) or one that would break a limit.
+    pub fn pick(&self, row: usize) -> Option<TagMenu> {
+        let mut next = self.clone();
+        match self.rows().get(row)? {
+            TagRow::Role(r) => {
+                next.role = (self.role.as_deref() != Some(*r)).then(|| (*r).to_string());
+            }
+            TagRow::Label(l) => {
+                if let Some(at) = next.labels.iter().position(|x| x == l) {
+                    next.labels.remove(at);
+                } else if next.labels.len() < butai_protocol::api::MAX_LABELS {
+                    next.labels.push(l.clone());
+                } else {
+                    return None;
+                }
+            }
+            TagRow::Clear => {
+                next.role = None;
+                next.labels.clear();
+            }
+            TagRow::NewLabel => return None,
+        }
+        Some(next)
+    }
+}
+
 /// Why a list is open, so the loop knows what Enter means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListKind {
@@ -2294,6 +2394,9 @@ pub enum ListKind {
     /// capability, and it carries what it was opened on rather than reading the
     /// cursor: by the time it is answered the cursor may have moved.
     Menu(MenuTarget),
+    /// The right-click menu on a BOOTH chat: its role and labels. Rows are read
+    /// by index, as [`TagMenu::rows`] lays them out.
+    Tags(TagMenu),
     /// Bring another machine into the tab bar. Rows are `~/.ssh/config`
     /// aliases, read here rather than fetched: the file is the *client's*, and
     /// which machines this person uses is not something the daemon they happen
@@ -2650,6 +2753,18 @@ pub struct View {
     /// A rail border or section divider that is being dragged, from the press
     /// that grabbed it until the button comes up.
     pub rail_drag: Option<RailDrag>,
+    /// BOOTH's column widths where the pointer has set them.
+    pub booth_w: BoothWidths,
+    /// A BOOTH column border that is being dragged, until the button comes up.
+    pub booth_drag: Option<BoothHandle>,
+    /// The width of the DOCKER and GIT pages' list columns where the pointer has
+    /// set one, and the split being dragged.
+    pub docker_w: Option<u16>,
+    pub git_w: Option<u16>,
+    pub split_drag: Option<Page>,
+    /// A workspace tab that is being dragged to a new place in the bar: the
+    /// daemon it lives on and its id, from the press on its chip until release.
+    pub tab_drag: Option<(usize, SessionId)>,
     /// The agent the AGENTS `+` spawns without asking, when one is pinned.
     ///
     /// On the view because the button's *label* names it: a pinned button
@@ -2724,6 +2839,12 @@ impl Default for View {
             confirmed_menu_action: None,
             layout: None,
             rail_drag: None,
+            booth_w: BoothWidths::default(),
+            booth_drag: None,
+            docker_w: None,
+            git_w: None,
+            split_drag: None,
+            tab_drag: None,
             pinned_agent: None,
             staged: None,
             prefix: "^B".into(),
@@ -3622,13 +3743,41 @@ pub struct BoothColumns {
 /// unusable the side columns collapse to zero and BOOTH degrades to the pane
 /// alone, which is what every other page does when the rails will not fit.
 pub fn booth_columns(stage_box: LRect) -> BoothColumns {
+    booth_columns_with(stage_box, BoothWidths::default())
+}
+
+/// [`booth_columns`] with the widths the pointer has set, off the page's own
+/// geometry. Every caller that has a [`View`] goes through here, so the drawing,
+/// the hit-testing and the size the pane is told to be cannot disagree.
+pub fn booth_columns_of(cols: u16, geom: &Geom, view: &View) -> BoothColumns {
+    booth_columns_with(booth_area(cols, geom), view.booth_w)
+}
+
+/// Column widths the pointer has chosen for BOOTH, where it has: `None` is the
+/// width BOOTH works out for itself from the terminal's.
+///
+/// Held on the [`View`] only, so it lasts as long as the client does — a width
+/// picked on one terminal is not a good guess for the next one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoothWidths {
+    pub fleet: Option<u16>,
+    pub compute: Option<u16>,
+}
+
+/// [`booth_columns`] given a say in the widths. A chosen width is held to the
+/// same floors as the default and leaves the stage [`MIN_STAGE_W`].
+pub fn booth_columns_with(stage_box: LRect, pref: BoothWidths) -> BoothColumns {
     let w = stage_box.width;
     let mut fleet_w = (w / 4).clamp(BOOTH_FLEET_MIN_W, 40);
-    // COMPUTE takes the same share as FLEET rather than a fifth. Its rows are
-    // now a trace apiece drawn across the full width of the column, and every
-    // cell it gains is two more samples of every machine's history — the one
-    // column here where width buys information rather than just fewer ellipses.
     let mut compute_w = (w / 4).clamp(BOOTH_COMPUTE_MIN_W, 36);
+    if let Some(f) = pref.fleet {
+        let hi = w.saturating_sub(compute_w + MIN_STAGE_W).max(BOOTH_FLEET_MIN_W);
+        fleet_w = f.clamp(BOOTH_FLEET_MIN_W, hi);
+    }
+    if let Some(c) = pref.compute {
+        let hi = w.saturating_sub(fleet_w + MIN_STAGE_W).max(BOOTH_COMPUTE_MIN_W);
+        compute_w = c.clamp(BOOTH_COMPUTE_MIN_W, hi);
+    }
     if w < fleet_w + compute_w + MIN_STAGE_W {
         fleet_w = 0;
         compute_w = 0;
@@ -4127,7 +4276,7 @@ fn draw_booth_page(
     view: &View,
     theme: &Theme,
 ) -> Painted {
-    let cols = booth_columns(booth_area(width, geom));
+    let cols = booth_columns_of(width, geom, view);
     let focused = view.focus == Focus::AllAgents;
     let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
     let spines = fleet_spines(&rows);
@@ -4586,10 +4735,10 @@ fn fill_row(buf: &mut Buffer, x0: u16, y: u16, bound: u16, bg: Color) {
 pub fn stage_rect(cols: u16, rows: u16, view: &View) -> Rect {
     let geom = page_geom(cols, rows, view);
     if view.page == Page::Docker {
-        return to_rect(docker_logs_inner(geom.stage_box));
+        return to_rect(docker_logs_inner(geom.stage_box, view.docker_w));
     }
     if view.page == Page::Booth {
-        return to_rect(booth_columns(booth_area(cols, &geom)).stage_inner);
+        return to_rect(booth_columns_of(cols, &geom, view).stage_inner);
     }
     to_rect(geom.stage_inner)
 }
@@ -4600,8 +4749,8 @@ pub fn stage_rect(cols: u16, rows: u16, view: &View) -> Rect {
 /// Public because a selection is clipped to the column it began in, and this is
 /// that column — a drag over the logs that wrapped at the band's edge instead
 /// would carry a container name onto the front of every line it copied.
-pub fn docker_logs_inner(stage_box: LRect) -> LRect {
-    let list_w = tree_width(stage_box.width);
+pub fn docker_logs_inner(stage_box: LRect, pref: Option<u16>) -> LRect {
+    let list_w = tree_width_with(stage_box.width, pref);
     LRect::new(
         stage_box.x + list_w + 1,
         stage_box.y + 1,
@@ -4621,8 +4770,12 @@ pub fn diff_body_rows(cols: u16, rows: u16, view: &View) -> u16 {
 /// where a tree row is one: lane glyphs, a short sha, a ref chip and a summary.
 /// At 40 cells the summary was down to a dozen characters, which is a column of
 /// ellipses.
-fn git_list_width(band_w: u16) -> u16 {
-    (band_w / 3).clamp(30, 52).min(band_w.saturating_sub(MIN_STAGE_W))
+fn git_list_width(band_w: u16, pref: Option<u16>) -> u16 {
+    let room = band_w.saturating_sub(MIN_STAGE_W);
+    match pref {
+        Some(w) => w.clamp(30, room.max(30)).min(room),
+        None => (band_w / 3).clamp(30, 52).min(room),
+    }
 }
 
 /// The GIT page's three boxes: REFS over HISTORY on the left, the body right.
@@ -4642,8 +4795,8 @@ pub struct GitColumns {
 /// keeps the graph usable — below it REFS collapses to nothing and the page
 /// degrades to history alone, which is the same way every other surface here
 /// gives up its side column.
-pub fn git_columns(band: LRect) -> GitColumns {
-    let list_w = git_list_width(band.width);
+pub fn git_columns(band: LRect, pref: Option<u16>) -> GitColumns {
+    let list_w = git_list_width(band.width, pref);
     let body_w = band.width.saturating_sub(list_w);
 
     // The floor check comes first, and it has to: `clamp` panics when its low
@@ -6446,6 +6599,15 @@ fn tree_width(stage_w: u16) -> u16 {
     (stage_w / 3).clamp(16, 40).min(stage_w.saturating_sub(20))
 }
 
+/// [`tree_width`] where the pointer has chosen a width: held to the same floor,
+/// and leaving the logs the twenty cells they need.
+fn tree_width_with(stage_w: u16, pref: Option<u16>) -> u16 {
+    match pref {
+        Some(w) => w.clamp(16, stage_w.saturating_sub(20).max(16)),
+        None => tree_width(stage_w),
+    }
+}
+
 /// Cells one Finder column takes, its left separator included.
 ///
 /// Twenty leaves nineteen to write in, which is a change marker, a space, about
@@ -6562,9 +6724,9 @@ pub fn files_body_inner(geom: &Geom, depth: usize) -> LRect {
 }
 
 /// The Docker page's list column, on the same terms.
-pub fn docker_row_area(geom: &Geom) -> LRect {
+pub fn docker_row_area(geom: &Geom, pref: Option<u16>) -> LRect {
     let outer = geom.stage_box;
-    let w = tree_width(outer.width);
+    let w = tree_width_with(outer.width, pref);
     LRect::new(outer.x + 1, outer.y + 1, w.saturating_sub(2), outer.height.saturating_sub(2))
 }
 
@@ -6983,7 +7145,7 @@ fn draw_git_page(
     view: &View,
     theme: &Theme,
 ) {
-    let cols = git_columns(geom.stage_box);
+    let cols = git_columns(geom.stage_box, view.git_w);
     let changes = ws.and_then(|w| w.changes.as_ref());
     let here = ws.map(|w| w.id);
     let empty = Git::default();
@@ -7364,7 +7526,7 @@ fn draw_docker_page(
     theme: &Theme,
 ) {
     let outer = geom.stage_box;
-    let list_w = tree_width(outer.width);
+    let list_w = tree_width_with(outer.width, view.docker_w);
     let list_box = LRect::new(outer.x, outer.y, list_w, outer.height);
     let logs_box =
         LRect::new(outer.x + list_w, outer.y, outer.width.saturating_sub(list_w), outer.height);
@@ -7670,6 +7832,92 @@ pub fn rail_handle_at(cols: u16, rows: u16, view: &View, x: u16, y: u16) -> Opti
         return Some(RailHandle::ProcsSystem);
     }
     None
+}
+
+/// A border between two of BOOTH's columns that the pointer can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoothHandle {
+    /// The edge between FLEET and the stage.
+    Fleet,
+    /// The edge between the stage and COMPUTE.
+    Compute,
+}
+
+/// The BOOTH border under `(x, y)`, if any. Both cells of an edge count — the
+/// column's own border and the stage's — so the handle is two cells wide, as
+/// the rails' is. Nothing when the columns have collapsed to the pane alone.
+pub fn booth_handle_at(cols: u16, rows: u16, view: &View, x: u16, y: u16) -> Option<BoothHandle> {
+    if view.page != Page::Booth || view.zen {
+        return None;
+    }
+    let g = page_geom(cols, rows, view);
+    let c = booth_columns_of(cols, &g, view);
+    if c.fleet_box.width == 0 || y < c.stage_box.y || y >= c.stage_box.y + c.stage_box.height {
+        return None;
+    }
+    // FLEET's top border carries the `[+]`, which is at its right end.
+    if y == c.fleet_box.y {
+        if let Some((start, end)) = fleet_new_span(c.fleet_box) {
+            if x >= start && x < end {
+                return None;
+            }
+        }
+    }
+    if x == c.fleet_box.x + c.fleet_box.width - 1 || x == c.stage_box.x {
+        return Some(BoothHandle::Fleet);
+    }
+    if x == c.compute_box.x || x == c.stage_box.x + c.stage_box.width - 1 {
+        return Some(BoothHandle::Compute);
+    }
+    None
+}
+
+/// The edge between the list column and the body on the DOCKER or GIT page, if
+/// `(x, y)` is on it. Both cells of the edge count, as on the rails.
+pub fn split_at(cols: u16, rows: u16, view: &View, x: u16, y: u16) -> Option<Page> {
+    if view.zen || !matches!(view.page, Page::Docker | Page::Git) {
+        return None;
+    }
+    let g = page_geom(cols, rows, view);
+    let band = g.stage_box;
+    if y < band.y || y >= band.y + band.height {
+        return None;
+    }
+    let list_w = match view.page {
+        Page::Docker => tree_width_with(band.width, view.docker_w),
+        _ => git_columns(band, view.git_w)
+            .refs_box
+            .width
+            .max(git_columns(band, view.git_w).hist_box.width),
+    };
+    (list_w > 0 && (x + 1 == band.x + list_w || x == band.x + list_w)).then_some(view.page)
+}
+
+/// Move a held DOCKER or GIT split to the pointer's column.
+pub fn drag_split(view: &mut View, cols: u16, rows: u16, page: Page, x: u16) {
+    let band = page_geom(cols, rows, view).stage_box;
+    let want = Some((x + 1).saturating_sub(band.x));
+    match page {
+        Page::Docker => view.docker_w = want,
+        _ => view.git_w = want,
+    }
+}
+
+/// Move a held BOOTH border to the pointer's column. As with the rails the
+/// target is the pointer's own cell, so a drag the floors stopped picks up where
+/// the pointer comes back to.
+pub fn drag_booth(view: &mut View, cols: u16, rows: u16, handle: BoothHandle, x: u16) {
+    let g = page_geom(cols, rows, view);
+    let c = booth_columns_of(cols, &g, view);
+    match handle {
+        BoothHandle::Fleet => {
+            view.booth_w.fleet = Some((x + 1).saturating_sub(c.fleet_box.x));
+        }
+        BoothHandle::Compute => {
+            let edge = c.compute_box.x + c.compute_box.width;
+            view.booth_w.compute = Some(edge.saturating_sub(x));
+        }
+    }
 }
 
 /// Move a held handle to the pointer at `(x, y)`.
@@ -12546,7 +12794,7 @@ index 1111111..2222222 100644
     #[test]
     fn the_git_columns_survive_a_short_terminal() {
         for h in 0..40u16 {
-            let c = git_columns(LRect::new(0, 1, 100, h));
+            let c = git_columns(LRect::new(0, 1, 100, h), None);
             assert_eq!(c.refs_box.height + c.hist_box.height, h, "at height {h}");
             // Below the two floors REFS yields entirely rather than shrinking
             // into a box with no rows in it.
@@ -12602,7 +12850,7 @@ index 1111111..2222222 100644
         };
         // The narrowest column the page will ever draw.
         let mut b = buf(60, 30);
-        let cols = git_columns(LRect::new(0, 1, 50, 28));
+        let cols = git_columns(LRect::new(0, 1, 50, 28), None);
         let view = View { page: Page::Git, focus: Focus::Refs, ..View::default() };
         draw_git_refs(&mut b, &cols, &git, None, None, &view, &Theme::default());
     }
