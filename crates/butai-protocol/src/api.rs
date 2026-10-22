@@ -119,7 +119,16 @@ pub struct AgentDto {
     /// [`role`](Self::role): a chat has at most one role and any number of these.
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Who started this chat: `cli`, `tui`, `web` or `agent` (a `butai agent
+    /// spawn` run inside another butai pane). Set once by the daemon from the
+    /// spawn request and never changed. Absent for chats started before it
+    /// existed, or by a client too old to say, and skipped on the wire then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
+
+/// Where a chat can have been started from, as [`AgentDto::origin`] names it.
+pub const AGENT_ORIGINS: [&str; 4] = ["cli", "tui", "web", "agent"];
 
 /// The roles a chat can be given, in the order a picker lists them.
 pub const AGENT_ROLES: [&str; 4] = ["lead", "worker", "loop", "watch"];
@@ -1714,6 +1723,7 @@ pub enum ApiRequest {
         ws: SessionId,
         name: String,
         background: bool,
+        origin: Option<String>,
     },
     NewProcess {
         ws: SessionId,
@@ -1998,5 +2008,22 @@ mod tests {
         assert!(normalize_tags(None, &labels(&[&"x".repeat(MAX_LABEL_LEN)])).is_ok());
         let nine: Vec<String> = (0..=MAX_LABELS).map(|i| format!("l{i}")).collect();
         assert!(normalize_tags(None, &nine).is_err());
+    }
+
+    /// `origin` is optional both ways. A row from a daemon that predates it
+    /// parses with none, and a row that has none leaves the key out, so a
+    /// client built before it sees exactly the row it always did.
+    #[test]
+    fn an_agents_origin_is_optional_on_the_wire() {
+        let old = r#"{"pane":3,"title":"claude","state":"idle","exited":null,
+            "question":false,"started_ms":0,"working_since_ms":null}"#;
+        let row: AgentDto = serde_json::from_str(old).unwrap();
+        assert_eq!(row.origin, None);
+        assert!(!serde_json::to_string(&row).unwrap().contains("origin"));
+
+        let cli = AgentDto { origin: Some("cli".into()), ..row };
+        let json = serde_json::to_string(&cli).unwrap();
+        assert!(json.contains(r#""origin":"cli""#), "{json}");
+        assert_eq!(serde_json::from_str::<AgentDto>(&json).unwrap(), cli);
     }
 }

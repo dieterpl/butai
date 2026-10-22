@@ -78,6 +78,8 @@ pub struct AgentMeta {
     pub role: Option<String>,
     /// Free labels, same reasoning as [`role`](Self::role).
     pub labels: Vec<String>,
+    /// Who started it — see [`AgentDto::origin`](butai_protocol::api::AgentDto::origin).
+    pub origin: Option<String>,
 }
 
 pub struct Workspace {

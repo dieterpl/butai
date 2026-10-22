@@ -304,7 +304,12 @@ async fn route(
         (&Method::POST, ["v1", "workspaces", id, "agents"]) => {
             match (sid(id), parse::<SpawnAgentBody>(&body)) {
                 (Some(ws), Ok(b)) => {
-                    let req = ApiRequest::SpawnAgent { ws, name: b.kind, background: b.background };
+                    let req = ApiRequest::SpawnAgent {
+                        ws,
+                        name: b.kind,
+                        background: b.background,
+                        origin: b.origin,
+                    };
                     call(&events, req).await
                 }
                 (None, _) => ApiReply::BadRequest(format!("bad workspace id {id:?}")),
@@ -1128,6 +1133,10 @@ struct SpawnAgentBody {
     /// unaffected.
     #[serde(default)]
     background: bool,
+    /// Who is asking — see `AgentDto::origin`. Optional, so an older client's
+    /// body still parses; an unknown value is dropped rather than refused.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 #[derive(Deserialize)]

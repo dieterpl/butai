@@ -232,8 +232,10 @@ export const api = {
   deleteFile: (id: string, path: string): Promise<OkReply> =>
     req<OkReply>("DELETE", `/workspaces/${ws(id)}/file?path=${encodeURIComponent(path)}`),
   killWorkspace: (id: string): Promise<OkReply> => req<OkReply>("DELETE", `/workspaces/${ws(id)}`),
+  // `origin` is what the agent list reports back as who started the chat; a
+  // daemon older than 1.5.0-dev.2 ignores it.
   spawnAgent: (id: string, type: string): Promise<OkReply> =>
-    req<OkReply>("POST", `/workspaces/${ws(id)}/agents`, { type }),
+    req<OkReply>("POST", `/workspaces/${ws(id)}/agents`, { type, origin: "web" }),
   newProcess: (id: string, name: string, command: string): Promise<OkReply> =>
     req<OkReply>("POST", `/workspaces/${ws(id)}/processes`, { name, command }),
   restartProcess: (id: string, pane: string): Promise<OkReply> =>

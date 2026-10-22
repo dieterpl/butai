@@ -894,6 +894,7 @@ mod tests {
             unread: false,
             role: None,
             labels: Vec::new(),
+            origin: None,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let fleet = vec![
@@ -1011,6 +1012,7 @@ mod tests {
             unread: false,
             role: None,
             labels: Vec::new(),
+            origin: None,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let row = |ws, id, a| chrome::AllAgentRow {
@@ -1168,6 +1170,7 @@ mod tests {
             unread: false,
             role: None,
             labels: Vec::new(),
+            origin: None,
         };
         let calm = agent("claude", 1, AgentState::Idle);
         let asking = agent("codex", 2, AgentState::Waiting);
@@ -1663,6 +1666,7 @@ mod tests {
                     unread: false,
                     role: None,
                     labels: Vec::new(),
+                    origin: None,
                 })
                 .collect(),
             processes: (0..procs)

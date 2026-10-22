@@ -931,7 +931,26 @@ in it is a row you have to unfold to read.
 
 The right button on a chat opens its tag menu: a role (`lead`, `worker`, `loop`,
 `watch`) and labels, the same ones the browser's BOOTH offers, set on the daemon
-and left open while you pick. `m` and the `[x]` on a chat's row open `Close agent`,
+and left open while you pick. Like every right-click menu it opens beside the
+pointer, below and right of it, and flips above or to the left where the screen
+has no room; the same menu from `m` has no pointer to follow and is centred.
+
+What the menu sets is drawn on the chat's row, in BOOTH's fleet, in NEEDS YOU
+and on the workspace's AGENTS rail, followed by who started the chat (`cli`,
+`tui`, `web`, or `agent` for a `butai agent spawn` run inside a pane):
+
+```
+├─ !  codex    lead #review cli [open] [x]
+```
+
+Each role has a colour of its own (`lead` accent, `worker` ok, `loop` info,
+`watch` attention), the four suggested labels have fixed ones (`review` info,
+`blocked` danger, `bug` attention, `idea` ok), and any other label takes a slot
+picked from its name, so it is the same colour on every row. All of them are
+the theme's own roles. A narrow row gives way in order — every label, then a
+count of them (`lead +2 cli`), then the origin, then the count, then the role —
+and never cuts into the chat's name; NEEDS YOU, the narrowest list, draws tags
+only beside a name that fits whole. `m` and the `[x]` on a chat's row open `Close agent`,
 `Close others`, `Close all agents`, the same three the AGENTS rail offers, acting
 on the row's own project rather than on the tab you are looking at. Neither asks
 first, for the reason the rail's `x` does not: an agent is a process whose

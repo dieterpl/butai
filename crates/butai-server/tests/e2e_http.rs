@@ -779,6 +779,47 @@ async fn http_api_tags_an_agent() {
     assert_eq!(status, 404);
 }
 
+/// The agent list says who started each chat, taken from the spawn request.
+///
+/// A body without `origin` is how every client before 1.5.0-dev.2 spawns, so it
+/// must still work and report nothing; a value the daemon does not know is
+/// dropped rather than refused, for the same reason. Tagging a chat leaves its
+/// origin alone: the two are written by different people.
+#[tokio::test]
+async fn http_api_records_who_started_an_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = start_daemon_with_shell_agent(&tmp).await;
+    let (status, body) =
+        http(&socket, "POST", "/v1/workspaces", Some(r#"{"name":"origins"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+
+    for spawn in
+        [r#"{"type":"sh"}"#, r#"{"type":"sh","origin":"cli"}"#, r#"{"type":"sh","origin":"x"}"#]
+    {
+        let (status, body) = http(&socket, "POST", "/v1/workspaces/1/agents", Some(spawn)).await;
+        assert_eq!(status, 200, "{spawn} answered {body}");
+    }
+    let body = poll_until(&socket, "/v1/workspaces/1/agents", "three agents", |b| {
+        b.matches("\"pane\"").count() == 3
+    })
+    .await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let origins: Vec<Option<&str>> = rows.iter().map(|r| r["origin"].as_str()).collect();
+    assert_eq!(origins, [None, Some("cli"), None], "body: {body}");
+    // Absent, not `null`: an older client's strict decoder never sees a field
+    // it does not know.
+    assert!(rows[0].get("origin").is_none(), "body: {body}");
+
+    let cli = rows[1]["pane"].as_u64().unwrap();
+    let route = format!("/v1/workspaces/1/panes/{cli}/tags");
+    let (status, _) = http(&socket, "PUT", &route, Some(r#"{"role":"worker"}"#)).await;
+    assert_eq!(status, 200);
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows[1]["origin"], "cli", "a tag write cleared the origin: {body}");
+    assert_eq!(rows[1]["role"], "worker");
+}
+
 /// An agent can be killed over HTTP, via a route that says so. `KillPane` was
 /// always pane-generic, but the only path to it lived under `processes`, so every
 /// GUI concluded agents could not be killed.

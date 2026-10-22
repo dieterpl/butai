@@ -1999,6 +1999,7 @@ pub async fn run(
                                 sel: 0,
                                 kind: chrome::ListKind::Links,
                                 meters: None,
+                                anchor: None,
                             }));
                         }
                         dirty = true;
@@ -2590,8 +2591,11 @@ pub async fn run(
                                     // The menu stays open: a chat usually wants
                                     // a role and a label or two, and reopening
                                     // it for each is the slow way to do a quick
-                                    // thing. Escape closes it.
-                                    let sel = list.sel;
+                                    // thing. Escape closes it. It stays where
+                                    // it was opened, too: a menu that jumped
+                                    // after every click would move the next
+                                    // row out from under the pointer.
+                                    let (sel, anchor) = (list.sel, list.anchor);
                                     if menu.rows().get(sel) == Some(&chrome::TagRow::NewLabel) {
                                         view.overlay = Some(Overlay::Prompt(chrome::PromptOverlay {
                                             title: "NEW LABEL".into(),
@@ -2607,11 +2611,15 @@ pub async fn run(
                                             Some(next) => {
                                                 if let Err(e) = send_tags(&daemons, &next).await {
                                                     view.flash = Some(format!("{e:#}"));
-                                                    view.overlay =
-                                                        Some(Overlay::List(menu.overlay(sel)));
+                                                    view.overlay = Some(Overlay::List(ListOverlay {
+                                                        anchor,
+                                                        ..menu.overlay(sel)
+                                                    }));
                                                 } else {
-                                                    view.overlay =
-                                                        Some(Overlay::List(next.overlay(sel)));
+                                                    view.overlay = Some(Overlay::List(ListOverlay {
+                                                        anchor,
+                                                        ..next.overlay(sel)
+                                                    }));
                                                 }
                                             }
                                             None => {
@@ -2619,7 +2627,10 @@ pub async fn run(
                                                     "a chat carries at most {} labels",
                                                     butai_protocol::api::MAX_LABELS
                                                 ));
-                                                view.overlay = Some(Overlay::List(menu.overlay(sel)));
+                                                view.overlay = Some(Overlay::List(ListOverlay {
+                                                    anchor,
+                                                    ..menu.overlay(sel)
+                                                }));
                                             }
                                         }
                                     }
@@ -3469,7 +3480,7 @@ async fn spawn_agent_in(
     let before: Vec<PaneId> =
         d.api.get_as::<Vec<AgentDto>>(&route).await?.iter().map(|a| a.pane).collect();
 
-    d.api.post(&route, &serde_json::json!({ "type": name })).await?;
+    d.api.post(&route, &serde_json::json!({ "type": name, "origin": "tui" })).await?;
 
     // The spawn is synchronous in the daemon, but the agent list is rebuilt on
     // its own tick, so the new row can be a moment behind the reply.
@@ -3613,6 +3624,7 @@ async fn pick_overlay(
         sel: 0,
         kind: ListKind::Pick(target),
         meters: None,
+        anchor: None,
     }))
 }
 
@@ -3822,6 +3834,7 @@ fn git_menu_overlay(
                 sel: 0,
                 kind: ListKind::GitGroups,
                 meters: None,
+                anchor: None,
             })
         }
         Some(g) => {
@@ -3834,6 +3847,7 @@ fn git_menu_overlay(
                 sel: 0,
                 kind: ListKind::GitGroup(g),
                 meters: None,
+                anchor: None,
             })
         }
     }
@@ -3970,6 +3984,7 @@ fn browse_overlay(dto: butai_protocol::api::BrowseDto) -> Overlay {
         sel: 0,
         kind: ListKind::Browse { dir: dto.path },
         meters: None,
+        anchor: None,
     })
 }
 
@@ -4591,6 +4606,7 @@ async fn agent_picker(
         sel: 0,
         kind: ListKind::SpawnAgent,
         meters: rows.meters,
+        anchor: None,
     }))
 }
 
@@ -4719,6 +4735,7 @@ fn machine_picker(daemons: &[Daemon], hosts: &[Option<String>]) -> Overlay {
         sel: 0,
         kind: ListKind::Machine,
         meters: None,
+        anchor: None,
     })
 }
 
@@ -4777,6 +4794,7 @@ fn space_picker(
         sel: Page::ORDER.iter().position(|p| *p == view.page).unwrap_or(0),
         kind: ListKind::Space,
         meters: None,
+        anchor: None,
     })
 }
 
@@ -4899,6 +4917,7 @@ fn host_overlay(
         sel: 0,
         kind: ListKind::Host,
         meters: None,
+        anchor: None,
     })
 }
 
@@ -4950,6 +4969,7 @@ async fn branch_picker(
         sel: 0,
         kind,
         meters: None,
+        anchor: None,
     }))
 }
 
@@ -8238,6 +8258,7 @@ fn menu_overlay(kind: chrome::MenuTarget) -> Overlay {
         sel: 0,
         kind: ListKind::Menu(kind),
         meters: None,
+        anchor: None,
     })
 }
 
@@ -9081,11 +9102,9 @@ fn handle_input(
                         m.row,
                     ) {
                         if let hit::FleetHit::EndAgent { daemon, workspace, pane } = fleet_hit {
-                            view.overlay = Some(menu_overlay(chrome::MenuTarget::Agent {
-                                daemon,
-                                workspace,
-                                pane,
-                            }));
+                            let menu =
+                                menu_overlay(chrome::MenuTarget::Agent { daemon, workspace, pane });
+                            view.overlay = Some(menu.at(m.column, m.row));
                             return Flow::Continue;
                         }
                         let (hit::FleetHit::Row(row)
@@ -9096,14 +9115,17 @@ fn handle_input(
                         else {
                             return Flow::Continue;
                         };
-                        view.overlay = fleet_menu_here(daemons, hosts, view, row);
+                        view.overlay = fleet_menu_here(daemons, hosts, view, row)
+                            .map(|menu| menu.at(m.column, m.row));
                         return Flow::Continue;
                     }
                     let target =
                         hit::at(*cols, *rows, view, &refs, daemons.len(), ws, m.column, m.row);
                     let here = active_daemon(daemons, hosts, view);
+                    // Drawn where the button went down, which is what a context
+                    // menu is: `m` opens the same one centred, having no pointer.
                     if let Some(menu) = menu_for(target, ws, daemons, hosts, here) {
-                        view.overlay = Some(menu);
+                        view.overlay = Some(menu.at(m.column, m.row));
                     }
                 }
                 event::MouseEventKind::Down(event::MouseButton::Left) => {
@@ -10494,6 +10516,7 @@ async fn fleet_agent_picker(
         sel: 0,
         kind: ListKind::SpawnAgentIn { daemon, workspace },
         meters: rows.meters,
+        anchor: None,
     }))
 }
 
@@ -11891,6 +11914,7 @@ mod tests {
             unread: false,
             role: None,
             labels: Vec::new(),
+            origin: None,
         }
     }
 
@@ -12857,6 +12881,7 @@ mod tests {
             sel: 0,
             kind: ListKind::Branch,
             meters: None,
+            anchor: None,
         };
         assert_eq!(list.chosen(), Some("main"), "the marker must not reach git");
         assert_eq!(list.chosen_label(), Some("* main"), "but the reader keeps it");
@@ -12869,6 +12894,7 @@ mod tests {
             sel: 0,
             kind: ListKind::SpawnAgent,
             meters: None,
+            anchor: None,
         };
         assert_eq!(plain.chosen(), Some("claude"));
         assert_eq!(plain.chosen_label(), Some("claude"));
@@ -13347,6 +13373,7 @@ name = \"terminal\"
                 sel,
                 kind: ListKind::SpawnAgent,
                 meters: None,
+                anchor: None,
             })
         };
 
@@ -13372,6 +13399,7 @@ name = \"terminal\"
                 sel: 0,
                 kind: ListKind::Branch,
                 meters: None,
+                anchor: None,
             })),
             ..Default::default()
         };
@@ -14724,6 +14752,7 @@ name = \"terminal\"
                 sel: 1,
                 kind: ListKind::Links,
                 meters: None,
+                anchor: None,
             })),
             ..Default::default()
         };
@@ -14740,6 +14769,7 @@ name = \"terminal\"
             sel: 0,
             kind: ListKind::Branch,
             meters: None,
+            anchor: None,
         }));
         assert!(matches!(handle_overlay_key(y, &mut view), Flow::Continue));
         assert!(view.overlay.is_some(), "`y` dismissed a branch list");
@@ -15175,6 +15205,37 @@ name = \"terminal\"
         assert!(menu_for(hit::Target::Footer("[help]"), Some(&ws), &[], &[], 0).is_none());
         // The CHANGES rail's rows are files, not panes.
         assert!(menu_for(hit::Target::Rail(Focus::Changes, 0), Some(&ws), &[], &[], 0).is_none());
+    }
+
+    /// A menu the right button opened is clicked where it was drawn: beside the
+    /// pointer. The rows are hit-tested against the anchored box, so the second
+    /// row under the pointer's corner is the second row, and a click where the
+    /// centred box would have been is outside it.
+    #[test]
+    fn a_click_on_an_anchored_menu_picks_the_row_under_it() {
+        use chrome::MenuTarget;
+        let (cols, rows) = (120, 40);
+        let target = MenuTarget::Agent { daemon: 0, workspace: SessionId(1), pane: PaneId(2) };
+        let click = |x, y| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        let mut view = View { overlay: Some(menu_overlay(target).at(10, 5)), ..Default::default() };
+        // The box's corner is at (11, 6); its rows start one cell in.
+        let flow = overlay_mouse(&click(14, 8), &mut view, cols, rows);
+        assert!(matches!(flow, Flow::Choose), "{flow:?}");
+        let Some(Overlay::List(list)) = &view.overlay else { panic!("the menu closed") };
+        assert_eq!(list.sel, 1, "picked {:?}", list.items[list.sel]);
+        assert_eq!(list.anchor, Some((10, 5)));
+
+        // `m` has no pointer, so the same menu from the keyboard is centred and
+        // a click beside where the pointer would have been misses it.
+        let mut view = View { overlay: Some(menu_overlay(target)), ..Default::default() };
+        let flow = overlay_mouse(&click(14, 8), &mut view, cols, rows);
+        assert!(matches!(flow, Flow::Continue) && view.overlay.is_none(), "{flow:?}");
     }
 
     /// `m` opens the same menu the right button does, on the same row.

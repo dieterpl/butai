@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.2: a chat's role and labels are drawn on its row, in colour.**
+  BOOTH's fleet, NEEDS YOU and the workspace's AGENTS rail all show them after
+  the chat's name, e.g. `codex  lead #review cli`. Each role has its own colour
+  (`lead` accent, `worker` ok, `loop` info, `watch` attention). The four
+  suggested labels have fixed colours (`review` info, `blocked` danger, `bug`
+  attention, `idea` ok), and any other label takes a colour picked from its
+  name, so it is the same colour on every row. The tag menu uses the same
+  colours. All of them come from the theme, so a custom theme still applies. A
+  narrow row drops detail in this order: every label, then a count (`lead +2`),
+  then the origin, then the count, then the role. It never cuts into the name.
+  NEEDS YOU draws tags only when the whole name still fits. This finishes the
+  1.5.0-dev.1 menu, which set tags without drawing them, so a pick looked like
+  it had done nothing.
+
+- **The agent list says who started each chat.** The spawn request takes an
+  optional `origin`, which the daemon keeps with the chat, saves with the session
+  and reports as `origin` on the agent row. The values are `cli` for `butai agent
+  spawn`, `agent` for the same command run inside a butai pane, `tui` for the
+  terminal's pickers and `web` for the browser. The terminal draws it faintly
+  after the tags. A client that does not send `origin` spawns as before and its
+  chats report none. A value the daemon does not know is dropped, not refused.
+  The field is left out of the reply when there is none, so older clients see
+  the agent rows they always did.
+
 - **1.5.0-dev.1: BOOTH's columns, the DOCKER and GIT lists, and the workspace
   tabs can all be dragged.** The edge between FLEET and the stage, and between
   the stage and COMPUTE, follows the pointer to the cell it is dropped on, held
@@ -44,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already running.
 
 ### Fixed
+
+- **1.5.0-dev.2: a right-click menu in the terminal opens at the pointer.** It
+  used to open in the middle of the screen, however far from the click. It now
+  opens below and to the right of the cell you clicked, and flips above or to
+  the left when there is no room. Rows are still clicked where they are drawn,
+  and a tag pick keeps the menu where it is. The same menu opened with `m` has
+  no pointer, so it stays centred.
 
 - **The Windows clippy job did not compile `butai-client`'s tests.** The test
   `a_failed_forward_names_the_exit_and_ssh_first_real_line` calls `failure`,

@@ -84,7 +84,14 @@ role: string | null,
  * [`normalize_tags`] for what one may look like. Independent of
  * [`role`](Self::role): a chat has at most one role and any number of these.
  */
-labels: Array<string>, };
+labels: Array<string>, 
+/**
+ * Who started this chat: `cli`, `tui`, `web` or `agent` (a `butai agent
+ * spawn` run inside another butai pane). Set once by the daemon from the
+ * spawn request and never changed. Absent for chats started before it
+ * existed, or by a client too old to say, and skipped on the wire then.
+ */
+origin?: string | null, };
 
 /**
  * Attention state of an agent pane (rendered by the apps as

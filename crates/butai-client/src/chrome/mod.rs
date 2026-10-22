@@ -2264,6 +2264,22 @@ pub struct ListOverlay {
     pub meters: Option<Vec<u8>>,
     /// What the caller does with the chosen row.
     pub kind: ListKind,
+    /// The cell the right button went down on, for a context menu it opened;
+    /// the box is drawn beside it rather than centred. `None` everywhere else,
+    /// including the same menu reached with `m`, which has no pointer to follow.
+    /// Read only for [`ListKind::Menu`] and [`ListKind::Tags`].
+    pub anchor: Option<(u16, u16)>,
+}
+
+impl Overlay {
+    /// This overlay, drawn at the pointer if it is a list. See
+    /// [`ListOverlay::anchor`].
+    pub fn at(mut self, x: u16, y: u16) -> Self {
+        if let Overlay::List(list) = &mut self {
+            list.anchor = Some((x, y));
+        }
+        self
+    }
 }
 
 /// Labels offered before anyone has made one; the others in use in the fleet
@@ -2334,6 +2350,7 @@ impl TagMenu {
             values: None,
             meters: None,
             kind: ListKind::Tags(self.clone()),
+            anchor: None,
         }
     }
 
@@ -3391,6 +3408,9 @@ pub fn draw_overlay_layer(buf: &mut Buffer, cols: u16, rows: u16, view: &View, t
 /// its own layout is the defect this exists to make impossible — and it is why
 /// the daemon needed seven `list_overlay_hit` calls, one per modal, each with
 /// its own hard-coded width.
+///
+/// A context menu opened by the pointer is the one modal that is not centred:
+/// it carries the cell it was opened on, and [`menu_origin`] places it there.
 fn overlay_layout(cols: u16, rows: u16, overlay: &Overlay) -> OverlayRows {
     let mut o = overlay_rows(overlay);
     if let Overlay::List(ListOverlay { meters: Some(meters), .. }) = overlay {
@@ -3416,13 +3436,33 @@ fn overlay_layout(cols: u16, rows: u16, overlay: &Overlay) -> OverlayRows {
     }
     let w = want_w.min(cols.saturating_sub(4)).max(12);
     let h = (o.lines.len() as u16 + 2).min(rows.saturating_sub(4)).max(3);
-    o.rect = LRect::new(cols.saturating_sub(w) / 2, rows.saturating_sub(h) / 2, w, h);
+    let anchor = match overlay {
+        Overlay::List(l) if matches!(l.kind, ListKind::Menu(_) | ListKind::Tags(_)) => l.anchor,
+        _ => None,
+    };
+    let (x, y) = match anchor {
+        Some(at) => menu_origin(cols, rows, w, h, at),
+        None => (cols.saturating_sub(w) / 2, rows.saturating_sub(h) / 2),
+    };
+    o.rect = LRect::new(x, y, w, h);
     // Scrolled by the rule every other list uses, so the line under the cursor
     // is always drawn. A box shorter than its list used to show the first rows
     // and nothing else, and a cursor that walked off the end walked out of
     // sight.
     o.first = o.sel.map_or(0, |sel| first_visible(sel, h.saturating_sub(2)));
     o
+}
+
+/// Where a `w`×`h` context menu opened at `(ax, ay)` puts its top-left corner.
+///
+/// Below and right of the pointer, the way a desktop menu opens, so the cell
+/// you clicked stays visible. On whichever axis that would run off the screen
+/// it flips to the other side of the pointer, and a box taller or wider than
+/// the room on both sides is held against the top or left edge.
+fn menu_origin(cols: u16, rows: u16, w: u16, h: u16, (ax, ay): (u16, u16)) -> (u16, u16) {
+    let x = if ax + 1 + w <= cols { ax + 1 } else { ax.saturating_sub(w) };
+    let y = if ay + 1 + h <= rows { ay + 1 } else { ay.saturating_sub(h) };
+    (x.min(cols.saturating_sub(w)), y.min(rows.saturating_sub(h)))
 }
 
 /// Cells in the bar beside an agent in the picker.
@@ -3525,7 +3565,8 @@ fn overlay_rows(overlay: &Overlay) -> OverlayRows {
     }
 }
 
-/// A centred modal box, sized to its content and clamped to the screen.
+/// A modal box, sized to its content and clamped to the screen: centred, or
+/// at the pointer for a context menu (see [`menu_origin`]).
 fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme: &Theme) {
     // Everything is drawn as "a title, some lines, maybe a highlighted one,
     // maybe a caret". Five modals with one renderer rather than five, because
@@ -3553,6 +3594,10 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
     let inner_w = w.saturating_sub(2);
     let bound = x + w - 1;
     let visible = h.saturating_sub(2) as usize;
+    let tag_rows = match overlay {
+        Overlay::List(ListOverlay { kind: ListKind::Tags(menu), .. }) => Some(menu.rows()),
+        _ => None,
+    };
     for (i, line) in lines.iter().enumerate().skip(first).take(visible) {
         let ly = y + 1 + (i - first) as u16;
         let cursor = sel == Some(i);
@@ -3579,6 +3624,30 @@ fn draw_overlay(buf: &mut Buffer, cols: u16, rows: u16, overlay: &Overlay, theme
             _ => {
                 let text = ellipsize(line, room);
                 put_str(buf, x + 2, ly, &text, bound, Pen::new(theme.ink, bg));
+            }
+        }
+        // The tag menu's rows in the colours the fleet will draw them in, so
+        // the menu is also the legend. `● role  lead` and `✓ label #bug` both
+        // put the word at column 8 and the mark at column 0.
+        if let Some(tag_rows) = &tag_rows {
+            let ink = match tag_rows.get(i) {
+                Some(TagRow::Role(r)) => Some((role_color(r, theme), true)),
+                Some(TagRow::Label(l)) => Some((label_color(l, theme), false)),
+                _ => None,
+            };
+            if let Some((fg, bold)) = ink {
+                let n = line.chars().count() as u16;
+                for col in (0..1).chain(8..n) {
+                    let cx = x + 2 + col;
+                    if cx < bound {
+                        if let Some(cell) = buf.cell_mut((cx, ly)) {
+                            cell.set_fg(fg);
+                            if bold {
+                                cell.modifier.insert(Modifier::BOLD);
+                            }
+                        }
+                    }
+                }
             }
         }
         // The caret is a reversed cell rather than the terminal's own: the real
@@ -4009,6 +4078,105 @@ pub(crate) fn fleet_machine_name_span(area: LRect, agents: usize) -> (u16, u16) 
     (start, (area.x + area.width).saturating_sub(count_width + 1).max(start))
 }
 
+/// Cells of a chat's title kept clear of its tags on a narrow fleet row.
+const FLEET_TITLE_KEEP: usize = 8;
+
+/// What a run of [`fleet_tags`] is, so the row can colour it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagInk {
+    Role,
+    Label,
+    Origin,
+}
+
+/// A role's colour. One slot each, so a fleet sorted by eye reads by colour
+/// before it reads by word.
+fn role_color(role: &str, theme: &Theme) -> Color {
+    match role {
+        "lead" => theme.accent,
+        "worker" => theme.ok,
+        "loop" => theme.info,
+        "watch" => theme.attention,
+        _ => theme.ink,
+    }
+}
+
+/// A label's colour: fixed for the four suggestions, and for any other label a
+/// slot chosen by its name, so `#infra` is the same colour on every row and on
+/// every client.
+fn label_color(label: &str, theme: &Theme) -> Color {
+    match label {
+        "review" => theme.info,
+        "blocked" => theme.danger,
+        "bug" => theme.attention,
+        "idea" => theme.ok,
+        other => {
+            let slots = [theme.accent, theme.info, theme.ok, theme.attention];
+            // FNV-1a: stable across builds and platforms, unlike `Hash`.
+            let h =
+                other.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+            slots[h as usize % slots.len()]
+        }
+    }
+}
+
+/// Paint [`fleet_tags`] runs from `x`: the role bold in its colour, each label
+/// in its own, the origin faint.
+fn put_tags(
+    buf: &mut Buffer,
+    mut x: u16,
+    y: u16,
+    tags: &[(String, TagInk)],
+    bound: u16,
+    bg: Color,
+    theme: &Theme,
+) {
+    for (t, kind) in tags {
+        let word = t.trim_start().trim_start_matches('#');
+        let pen = match kind {
+            TagInk::Role => Pen { fg: role_color(word, theme), bg, bold: true },
+            TagInk::Label if word.starts_with('+') => Pen::new(theme.muted, bg),
+            TagInk::Label => Pen::new(label_color(word, theme), bg),
+            TagInk::Origin => Pen::new(theme.faint, bg),
+        };
+        put_str(buf, x, y, t, bound, pen);
+        x += t.chars().count() as u16;
+    }
+}
+
+/// A chat's role, labels and origin as fleet-row runs, at most `room` cells.
+///
+/// Gives way in a fixed order as the column narrows: every label, then a count
+/// of them, then the origin, then the count, then the role.
+fn fleet_tags(agent: &AgentDto, room: usize) -> Vec<(String, TagInk)> {
+    let role = agent.role.clone().map(|r| (r, TagInk::Role));
+    let origin = agent.origin.clone().map(|o| (o, TagInk::Origin));
+    let labels: Vec<_> = agent.labels.iter().map(|l| (format!("#{l}"), TagInk::Label)).collect();
+    let count =
+        (!agent.labels.is_empty()).then(|| (format!("+{}", agent.labels.len()), TagInk::Label));
+    // The person's own words outlast the daemon's note on who started it.
+    let tries: [Vec<(String, TagInk)>; 7] = [
+        role.iter().cloned().chain(labels.iter().cloned()).chain(origin.clone()).collect(),
+        role.iter().cloned().chain(count.clone()).chain(origin.clone()).collect(),
+        role.iter().cloned().chain(count).collect(),
+        role.iter().cloned().chain(origin.clone()).collect(),
+        role.iter().cloned().collect(),
+        origin.into_iter().collect(),
+        Vec::new(),
+    ];
+    for parts in tries {
+        let mut runs = Vec::new();
+        for (i, (t, k)) in parts.into_iter().enumerate() {
+            runs.push((if i == 0 { t } else { format!(" {t}") }, k));
+        }
+        let w: usize = runs.iter().map(|(t, _)| t.chars().count()).sum();
+        if w <= room {
+            return runs;
+        }
+    }
+    Vec::new()
+}
+
 /// The per-row jump button on BOOTH's fleet list.
 pub const FLEET_OPEN_LABEL: &str = "[open]";
 
@@ -4349,13 +4517,24 @@ fn draw_booth_page(
                         put_str(buf, x, y, glyph, title_end, Pen::new(color, bg));
                         x += glyph.chars().count() as u16 + 1;
                     }
-                    let (text, moving) = marquee(
-                        &format!("{title} · {where_}"),
-                        title_end.saturating_sub(x) as usize,
-                        view.tick,
-                    );
+                    let name = format!("{title} · {where_}");
+                    // Only beside a name that fits whole: the tray is the
+                    // narrowest list on the page, and a name that has to
+                    // scroll to make room for its tags says neither.
+                    let room = (title_end.saturating_sub(x) as usize)
+                        .saturating_sub(name.chars().count() + 1);
+                    let tags = fleet_tags(row.agent, room);
+                    let tags_w: usize = tags.iter().map(|(t, _)| t.chars().count()).sum();
+                    let title_end = if tags.is_empty() {
+                        title_end
+                    } else {
+                        title_end.saturating_sub(tags_w as u16 + 1)
+                    };
+                    let (text, moving) =
+                        marquee(&name, title_end.saturating_sub(x) as usize, view.tick);
                     out.wants_anim |= moving;
                     put_str(buf, x, y, &text, title_end, Pen::new(theme.ink, bg));
+                    put_tags(buf, title_end + 1, y, &tags, bound, bg, theme);
                     if let Some((start, end)) = close {
                         put_str(buf, start, y, FLEET_CLOSE_LABEL, end, Pen::new(theme.danger, bg));
                     }
@@ -4479,10 +4658,23 @@ fn draw_booth_page(
                             put_str(buf, tx, y, glyph, title_end, Pen::new(color, bg));
                             tx += glyph.chars().count() as u16 + 1;
                         }
+                        // The tags take what the title leaves, never the
+                        // title's first few cells: the name is what you
+                        // scan for, and the tags are what tell two apart.
+                        let room = (title_end.saturating_sub(tx) as usize)
+                            .saturating_sub(title.chars().count().min(FLEET_TITLE_KEEP) + 1);
+                        let tags = fleet_tags(row.agent, room);
+                        let tags_w: usize = tags.iter().map(|(t, _)| t.chars().count()).sum();
+                        let title_end = if tags.is_empty() {
+                            title_end
+                        } else {
+                            title_end.saturating_sub(tags_w as u16 + 1)
+                        };
                         let (text, moving) =
                             marquee(title, title_end.saturating_sub(tx) as usize, view.tick);
                         out.wants_anim |= moving;
                         put_str(buf, tx, y, &text, title_end, Pen::new(theme.ink, bg));
+                        put_tags(buf, title_end + 1, y, &tags, bound, bg, theme);
                         if let Some((start, _)) = open {
                             // Brighter on the row the cursor is on, so the one
                             // that answers Enter is the one that looks pressable
@@ -5751,6 +5943,17 @@ fn draw_left_rail(
         // of token as a file's `M`, and a `◐` towed through the row by the
         // marquee is a moving target where a fixed one said the same thing.
         let (glyph, title) = split_status_glyph(&a.title);
+        let pin_w = if glyph.is_empty() { 0 } else { glyph.width() + 1 };
+        let room = (rows.width as usize)
+            .saturating_sub(2 + pin_w + status.width() + 1)
+            .saturating_sub(title.chars().count().min(FLEET_TITLE_KEEP) + 1);
+        let tags = fleet_tags(a, room);
+        let tags_w: usize = tags.iter().map(|(t, _)| t.chars().count()).sum();
+        let right = if tags.is_empty() {
+            status.clone()
+        } else {
+            format!("{}{status}", " ".repeat(tags_w + 1))
+        };
         scrolling |= draw_row(
             buf,
             rows,
@@ -5760,11 +5963,16 @@ fn draw_left_rail(
             glyph,
             title,
             theme.role(name_role),
-            &status,
+            &right,
             theme.role(status_role),
             view.tick,
             theme,
         );
+        if !tags.is_empty() {
+            let right_edge = rows.x + rows.width;
+            let tx = right_edge.saturating_sub(right.width() as u16);
+            put_tags(buf, tx, y, &tags, right_edge, theme.row_bg(cursor), theme);
+        }
     }
     if let Some(hint) = geom.agents_hint {
         let pinned = view.pinned_agent.is_some();
@@ -10319,6 +10527,7 @@ mod tests {
             unread: false,
             role: None,
             labels: Vec::new(),
+            origin: None,
         }
     }
 
@@ -10399,6 +10608,160 @@ mod tests {
         assert!(joined.contains("claude"), "{joined}");
         assert!(joined.contains("WAIT"), "a waiting agent should say so:\n{joined}");
         assert!(joined.contains("idle"), "{joined}");
+    }
+
+    fn tagged(pane: u64, title: &str, state: AgentState) -> AgentDto {
+        AgentDto {
+            role: Some("lead".into()),
+            labels: vec!["review".into(), "bug".into()],
+            origin: Some("cli".into()),
+            ..agent(pane, title, state)
+        }
+    }
+
+    fn joined(runs: &[(String, TagInk)]) -> String {
+        runs.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    /// The tags give way one step at a time as the row narrows, the person's
+    /// own words last: every label, then a count of them, then the origin, then
+    /// the count, then the role. Every step fits in the room it was given.
+    #[test]
+    fn fleet_tags_give_way_in_order() {
+        let a = tagged(1, "claude", AgentState::Idle);
+        for (room, want) in [
+            (40, "lead #review #bug cli"),
+            (11, "lead +2 cli"),
+            (8, "lead +2"),
+            (4, "lead"),
+            (3, "cli"),
+            (2, ""),
+        ] {
+            let runs = fleet_tags(&a, room);
+            assert_eq!(joined(&runs), want, "in {room} cells");
+            assert!(joined(&runs).chars().count() <= room);
+        }
+        // An untagged chat from an older client draws nothing at all.
+        assert!(fleet_tags(&agent(2, "codex", AgentState::Idle), 40).is_empty());
+        // The runs say what they are, so the row can colour them.
+        let kinds: Vec<TagInk> = fleet_tags(&a, 40).into_iter().map(|(_, k)| k).collect();
+        assert_eq!(kinds, [TagInk::Role, TagInk::Label, TagInk::Label, TagInk::Origin]);
+    }
+
+    /// Each role has a slot of its own, the four suggestions have fixed ones,
+    /// and any other label is the same colour every time it is asked for.
+    #[test]
+    fn tags_take_their_colours_from_the_theme() {
+        let t = Theme::default();
+        let roles: Vec<Color> =
+            butai_protocol::api::AGENT_ROLES.iter().map(|r| role_color(r, &t)).collect();
+        assert_eq!(roles, [t.accent, t.ok, t.info, t.attention]);
+        assert_eq!(label_color("blocked", &t), t.danger);
+        assert_eq!(label_color("review", &t), t.info);
+        assert_eq!(label_color("infra", &t), label_color("infra", &t));
+        let slots = [t.accent, t.info, t.ok, t.attention];
+        for l in ["infra", "perf", "docs", "x"] {
+            assert!(slots.contains(&label_color(l, &t)), "#{l} left the theme");
+        }
+    }
+
+    /// A context menu opens below and right of the pointer, flips to the other
+    /// side of it on an axis that has no room, and never leaves the screen.
+    #[test]
+    fn a_context_menu_opens_beside_the_pointer() {
+        let (cols, rows, w, h) = (100, 30, 20, 10);
+        assert_eq!(menu_origin(cols, rows, w, h, (10, 5)), (11, 6), "below and right");
+        assert_eq!(menu_origin(cols, rows, w, h, (95, 5)), (75, 6), "flipped left at the edge");
+        assert_eq!(menu_origin(cols, rows, w, h, (10, 25)), (11, 15), "flipped up at the bottom");
+        assert_eq!(menu_origin(cols, rows, w, h, (95, 25)), (75, 15), "both at the corner");
+        // Taller than the room on either side of the pointer: against the top.
+        assert_eq!(menu_origin(cols, 12, w, h, (10, 6)), (11, 0));
+    }
+
+    /// The anchored box is hit-tested where it is drawn: its first row is the
+    /// line under the pointer's corner, not the centred box's. A list that is
+    /// not a context menu ignores the anchor and stays centred.
+    #[test]
+    fn an_anchored_menu_is_clicked_where_it_is_drawn() {
+        let (cols, rows) = (120, 40);
+        let menu = Overlay::List(ListOverlay {
+            title: "AGENT".into(),
+            items: vec!["Close agent".into(), "Close others".into()],
+            values: None,
+            sel: 0,
+            meters: None,
+            kind: ListKind::Menu(MenuTarget::Tab(0)),
+            anchor: None,
+        });
+        let centred = overlay_layout(cols, rows, &menu).rect;
+        let at = menu.clone().at(10, 5);
+        let rect = overlay_layout(cols, rows, &at).rect;
+        assert_eq!((rect.x, rect.y), (11, 6));
+        assert_ne!((rect.x, rect.y), (centred.x, centred.y));
+        assert_eq!(overlay_hit(cols, rows, &at, 13, 7), Some(0));
+        assert_eq!(overlay_hit(cols, rows, &at, 13, 8), Some(1));
+        assert_eq!(overlay_hit(cols, rows, &at, centred.x + 3, centred.y + 1), None);
+
+        let Overlay::List(mut space) = menu else { unreachable!() };
+        space.kind = ListKind::Space;
+        let space = Overlay::List(space);
+        let alone = overlay_layout(cols, rows, &space).rect;
+        let anchored = overlay_layout(cols, rows, &space.at(10, 5)).rect;
+        assert_eq!(anchored, alone, "only a context menu follows the pointer");
+    }
+
+    /// The workspace's AGENTS rail draws a chat's tags between its name and its
+    /// status, in their colours.
+    #[test]
+    fn the_agents_rail_shows_tags_before_the_status() {
+        let mut b = buf(160, 40);
+        let ws = detail(vec![tagged(1, "claude", AgentState::Waiting)], None);
+        let view =
+            View { geom: RailGeom { left_w: 44, ..View::default().geom }, ..View::default() };
+        let theme = Theme::default();
+        draw(&mut b, 160, 40, &scene(&[], Some(&ws), &SysDto::default(), &[]), &view, &theme);
+        let (y, row) = (0..40)
+            .map(|y| (y, text_of(&b, y)))
+            .find(|(_, r)| r.contains("claude"))
+            .expect("a claude row");
+        let at = |s: &str| row.find(s).unwrap_or_else(|| panic!("no `{s}` in {row:?}"));
+        assert!(at("claude") < at("lead") && at("lead") < at("WAIT"), "{row:?}");
+        assert!(row.contains("#review #bug cli"), "{row:?}");
+        let x = row[..at("lead")].chars().count() as u16;
+        let cell = b.cell((x, y)).unwrap();
+        assert_eq!(cell.fg, theme.accent, "the role wears its colour");
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        let x = row[..at("#review")].chars().count() as u16;
+        assert_eq!(b.cell((x, y)).unwrap().fg, theme.info);
+    }
+
+    /// BOOTH's fleet rows carry the tags, and NEEDS YOU carries them only when
+    /// the whole name still fits: a name that had to scroll to make room for
+    /// its tags would say neither.
+    #[test]
+    fn booth_rows_show_tags_and_the_tray_never_cuts_a_name_for_them() {
+        let agents = [
+            tagged(1, "claude", AgentState::Idle),
+            tagged(2, "codex", AgentState::Waiting),
+            agent(3, "aider", AgentState::Working),
+            agent(4, "gemini", AgentState::Waiting),
+        ];
+        let all = booth_fleet(&agents);
+        let sys = SysDto::default();
+        let ms = machines(&sys, &all);
+        let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        let mut b = buf(160, 40);
+        let spaces = booth_spaces(&all);
+        let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
+        draw(&mut b, 160, 40, &scene, &view, &Theme::default());
+        let rows: Vec<String> = (0..40).map(|y| text_of(&b, y)).collect();
+        let tree = rows
+            .iter()
+            .find(|r| r.contains("claude") && r.contains("[open] [x]"))
+            .unwrap_or_else(|| panic!("no claude fleet row in:\n{}", rows.join("\n")));
+        assert!(tree.contains("lead"), "the fleet row lost its role: {tree:?}");
+        let tray = rows.iter().find(|r| r.contains("codex · ")).expect("codex in NEEDS YOU");
+        assert!(tray.contains("codex · butai"), "the tray cut a name for its tags: {tray:?}");
     }
 
     /// An agent's own spinner holds one column while the name scrolls past it.
@@ -10917,6 +11280,7 @@ mod tests {
                 sel: 0,
                 kind: ListKind::SpawnAgent,
                 meters: None,
+                anchor: None,
             })),
             ..Default::default()
         };
@@ -10942,6 +11306,7 @@ mod tests {
                 sel,
                 kind: ListKind::SpawnAgent,
                 meters,
+                anchor: None,
             })),
             ..Default::default()
         }
@@ -11066,6 +11431,7 @@ mod tests {
             sel: 0,
             kind: ListKind::SpawnAgent,
             meters: None,
+            anchor: None,
         };
         list.move_sel(-1);
         assert_eq!(list.sel, 0, "should not walk off the top");
@@ -11779,6 +12145,7 @@ mod tests {
             sel: 0,
             kind: ListKind::SpawnAgent,
             meters: None,
+            anchor: None,
         };
         assert_eq!(list.chosen(), None);
         let mut b = buf(80, 24);

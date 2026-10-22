@@ -536,6 +536,8 @@ struct PersistedAgent {
     role: Option<String>,
     #[serde(default)]
     labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -1560,6 +1562,7 @@ impl ServerCore {
             ) {
                 Ok(pane) => {
                     self.set_agent_tags(pane, a.role.clone(), a.labels.clone());
+                    self.set_agent_origin(pane, a.origin.clone());
                     if saved.stage.as_deref() == Some(a.dump.as_str()) {
                         staged = Some(pane);
                     }
@@ -1728,11 +1731,11 @@ impl ServerCore {
         else {
             return false;
         };
-        let Some((name, role, labels)) = self
+        let Some((name, role, labels, origin)) = self
             .workspaces
             .get(&sid)
             .and_then(|w| w.agent_meta.get(&pane))
-            .map(|m| (m.name.clone(), m.role.clone(), m.labels.clone()))
+            .map(|m| (m.name.clone(), m.role.clone(), m.labels.clone(), m.origin.clone()))
         else {
             return false;
         };
@@ -1781,6 +1784,7 @@ impl ServerCore {
         };
         // The restarted pane is the same chat to the person who tagged it.
         self.set_agent_tags(fresh, role, labels);
+        self.set_agent_origin(fresh, origin);
         // Put it back where it was: the rails are ordered, and the pane dumps
         // are keyed by position, so appending would silently renumber both.
         if let Some(ws) = self.workspaces.get_mut(&sid) {
@@ -1969,6 +1973,7 @@ impl ServerCore {
                                 spoke: meta.spoke,
                                 role: meta.role.clone(),
                                 labels: meta.labels.clone(),
+                                origin: meta.origin.clone(),
                             })
                         })
                         .collect();
@@ -2970,12 +2975,16 @@ impl ServerCore {
                     ApiReply::NotFound(format!("no workspace {sid}"))
                 }
             }
-            ApiRequest::SpawnAgent { ws, name, background } => {
+            ApiRequest::SpawnAgent { ws, name, background, origin } => {
                 if !self.workspaces.contains_key(&ws) {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
                 }
                 match self.spawn_agent_restoring(ws, &name, None, None, false, background) {
-                    Ok(_) => {
+                    Ok(pane) => {
+                        let origin = origin.filter(|o| {
+                            butai_protocol::api::AGENT_ORIGINS.contains(&o.as_str())
+                        });
+                        self.set_agent_origin(pane, origin);
                         // `background` is how a helper an agent starts for
                         // itself says so; that is not a pick.
                         if !background {
@@ -3453,6 +3462,7 @@ impl ServerCore {
             unread: track.is_some_and(|tr| tr.unread),
             role: meta.and_then(|m| m.role.clone()),
             labels: meta.map(|m| m.labels.clone()).unwrap_or_default(),
+            origin: meta.and_then(|m| m.origin.clone()),
         })
     }
 
@@ -3466,6 +3476,14 @@ impl ServerCore {
         meta.role = role;
         meta.labels = labels;
         true
+    }
+
+    /// Record who started an agent. Once, at spawn; carried across a respawn
+    /// and a restore like the tags are.
+    fn set_agent_origin(&mut self, pane: PaneId, origin: Option<String>) {
+        if let Some(meta) = self.workspaces.values_mut().find_map(|w| w.agent_meta.get_mut(&pane)) {
+            meta.origin = origin;
+        }
     }
 
     fn build_agents(&self, sid: SessionId) -> Vec<AgentDto> {
@@ -4585,6 +4603,7 @@ impl ServerCore {
                     spoke: resumed,
                     role: None,
                     labels: Vec::new(),
+                    origin: None,
                 },
             );
             if !background {
@@ -5298,16 +5317,20 @@ mod tests {
             spoke: true,
             role: Some("lead".into()),
             labels: vec!["review".into(), "bug".into()],
+            origin: Some("tui".into()),
         };
         let back: PersistedAgent =
             serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
         assert_eq!(back.role.as_deref(), Some("lead"));
         assert_eq!(back.labels, ["review", "bug"]);
+        // Who started it comes back with it, so a restart does not forget.
+        assert_eq!(back.origin.as_deref(), Some("tui"));
 
         let old: PersistedAgent =
             serde_json::from_str(r#"{"agent":"claude","dump":"agent-0.bin"}"#).unwrap();
         assert_eq!(old.role, None);
         assert!(old.labels.is_empty());
+        assert_eq!(old.origin, None);
     }
 
     /// A buffer whose rows are the given lines, left-aligned and space-padded.

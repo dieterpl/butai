@@ -468,7 +468,7 @@ is aborted rather than completed, and no decoder in the list above minds.
 |---|---|---|
 | GET | `/v1/workspaces` | list workspaces + agent/process/change counts |
 | GET | `/v1/workspaces/{id}` | full detail: agents, processes, changes |
-| GET | `/v1/workspaces/{id}/agents` | agent rows (`state`: `waiting`/`working`/`finished`/`idle`/`exited`; `exited` also carries the code; `unread` = reached a your-move state and not looked at since, cleared by staging/input/`ack`; `role` = one of `lead`/`worker`/`loop`/`watch` or `null`, `labels` = free words, both set with `PUT .../tags`) |
+| GET | `/v1/workspaces/{id}/agents` | agent rows (`state`: `waiting`/`working`/`finished`/`idle`/`exited`; `exited` also carries the code; `unread` = reached a your-move state and not looked at since, cleared by staging/input/`ack`; `role` = one of `lead`/`worker`/`loop`/`watch` or `null`, `labels` = free words, both set with `PUT .../tags`; `origin` = who started it, `cli`/`tui`/`web`/`agent`, absent when the spawn did not say) |
 | GET | `/v1/workspaces/{id}/processes` | process rows (`status`: `ok`/`run`/`done`/`FAIL(n)`/`...`) |
 | GET | `/v1/workspaces/{id}/changes` | git branch, staged/unstaged/**conflicted** files, recent commits, upstream + ahead/behind, and `state` (see [Git operations](#git-operations)) |
 | GET | `/v1/workspaces/{id}/tree?path=&filter=` | one directory listing (lazy file tree); `path` relative to cwd, `""`=root. `filter` is `all` (default, and what this route has always answered) or `docs` — markdown, READMEs, and every directory but `target` and `node_modules`. **It decides the rows *and* their `changed` markers**, which is the whole reason it is a parameter and not a client's own filter: a directory's `changed` is "something under here changed", so a client that filtered the reply afterwards kept directories marked for files it had just dropped, and following one down landed on an empty listing. Any other value is a `400` rather than a silently unfiltered listing |
@@ -498,7 +498,7 @@ is aborted rather than completed, and no decoder in the list above minds.
 | POST | `/v1/workspaces` | `{name?,layout?,path?}` create → `201 {"id"}`; an empty body is valid |
 | POST | `/v1/fs/mkdir` | `{path?,name}` create a directory, returns the new listing |
 | DELETE | `/v1/workspaces/{id}` | kill workspace |
-| POST | `/v1/workspaces/{id}/agents` | `{type}` spawn an agent (`name`/`agent` accepted as aliases). `{background:true}` leaves the stage and focus alone, for a helper spawned by another agent |
+| POST | `/v1/workspaces/{id}/agents` | `{type}` spawn an agent (`name`/`agent` accepted as aliases). `{background:true}` leaves the stage and focus alone, for a helper spawned by another agent. `{origin}` names the asker — `cli`, `tui`, `web`, or `agent` for a spawn from inside a pane — and comes back on the agent row; optional, and any other value is dropped rather than refused |
 | POST | `/v1/workspaces/{id}/processes` | `{name,command}` start a process. An omitted or empty `command` starts the workspace's default shell — what a `[+ term]` button asks for |
 | POST | `/v1/workspaces/{id}/processes/{pane}/restart` | restart a process (**allocates a new pane id**) |
 | DELETE | `/v1/workspaces/{id}/panes/{pane}` | kill any pane — agent, process, editor, tree |

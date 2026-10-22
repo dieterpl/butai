@@ -397,7 +397,14 @@ async fn spawn(
     let known: Vec<PaneId> = before.iter().map(|a| a.pane).collect();
 
     let head = if wait { Some(notification_head(&ctx.api).await?) } else { None };
-    ctx.api.post(&path, &serde_json::json!({ "type": kind, "background": background })).await?;
+    // Run from inside a butai pane, the asker is the program in that pane.
+    let origin = if std::env::var_os("BUTAI_PANE").is_some() { "agent" } else { "cli" };
+    ctx.api
+        .post(
+            &path,
+            &serde_json::json!({ "type": kind, "background": background, "origin": origin }),
+        )
+        .await?;
 
     let after: Vec<AgentDto> = ctx.api.get_as(&path).await?;
     let Some(fresh) = after.iter().map(|a| a.pane).filter(|p| !known.contains(p)).max() else {
