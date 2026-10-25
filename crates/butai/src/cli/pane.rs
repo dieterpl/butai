@@ -294,6 +294,24 @@ struct PaneRow {
     label: String,
     status: String,
     staged: bool,
+    /// An agent's role and labels, and who started it. Left out of the JSON
+    /// when unset, so a process row and an untagged agent read as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+}
+
+/// An agent's tags as one line of text: `lead #review #bug (cli)`. The role is
+/// bare, each label carries its `#` and the origin is in brackets, so the three
+/// cannot be mistaken for one another. Empty when there is nothing to say.
+pub fn tag_words(role: Option<&str>, labels: &[String], origin: Option<&str>) -> String {
+    let mut words: Vec<String> = role.map(str::to_string).into_iter().collect();
+    words.extend(labels.iter().map(|l| format!("#{l}")));
+    words.extend(origin.map(|o| format!("({o})")));
+    words.join(" ")
 }
 
 async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
@@ -309,6 +327,9 @@ async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
             label: a.title.clone(),
             status: format!("{:?}", a.state).to_lowercase(),
             staged: detail.stage == Some(a.pane),
+            role: a.role.clone(),
+            labels: a.labels.clone(),
+            origin: a.origin.clone(),
         });
     }
     for p in &detail.processes {
@@ -318,6 +339,9 @@ async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
             label: p.name.clone(),
             status: p.status.clone(),
             staged: detail.stage == Some(p.pane),
+            role: None,
+            labels: Vec::new(),
+            origin: None,
         });
     }
 
@@ -331,7 +355,15 @@ async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
             // about a pane list is which one it is looking out of.
             let mark = if me == Some(r.pane) { " <- you" } else { "" };
             let stage = if r.staged { " [stage]" } else { "" };
-            writeln!(w, "{}\t{}\t{}\t{}{}{}", r.pane, r.kind, r.status, r.label, stage, mark)?;
+            write!(w, "{}\t{}\t{}\t{}{}{}", r.pane, r.kind, r.status, r.label, stage, mark)?;
+            // A fifth column only when there is something in it, so a process
+            // row and an untagged agent are the four columns they always were.
+            let tags = tag_words(r.role.as_deref(), &r.labels, r.origin.as_deref());
+            if tags.is_empty() {
+                writeln!(w)?;
+            } else {
+                writeln!(w, "\t{tags}")?;
+            }
         }
         Ok(())
     })?;

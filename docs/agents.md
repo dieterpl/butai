@@ -82,6 +82,21 @@ Text is delivered as a paste, so it arrives inside the agent's bracketed-paste
 guard rather than looking like implausibly fast typing. Input never attaches,
 resizes, or takes the stage.
 
+## Tagging
+
+```sh
+butai agent spawn codex --background --role worker --label review
+butai agent tag $BUTAI_PANE --role lead     # say what you are for
+butai agent tag 7 --label blocked           # adds; keeps the others
+butai agent tag 7                           # pane 7 worker #review #blocked (agent)
+```
+
+A role and labels are what a person sees on the agent's row in the terminal and
+the browser, so an orchestrating agent can mark its helpers the same way a
+person would from the right-click menu. An agent spawned from inside a pane is
+recorded as started by `agent`; the same command typed in a shell says `cli`.
+See [`agent tag`](cli.md#agent-tag).
+
 ## Waiting
 
 ```sh

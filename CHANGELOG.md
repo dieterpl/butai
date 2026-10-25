@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.4: tags can be read and set from the CLI.** `butai agent tag
+  <TARGET>` prints an agent's role, labels and who started it, e.g. `pane 7 lead
+  #review (cli)`. `--role`, `--no-role`, `--label`, `--unlabel` and `--clear`
+  change them and keep everything else, so `--label bug` adds to the labels
+  already there. `butai agent spawn` takes `--role` and `--label` too, so an
+  agent can start out tagged. Both check the daemon's rules before sending
+  anything: a bad role or label is exit 64, and a spawn with one starts no agent.
+  `agent ls` and `pane ls` add the same tags as a fifth column, including the
+  origin, so an agent started with `butai agent spawn` shows `(cli)`, or
+  `(agent)` when the spawn ran inside a butai pane. Rows with nothing to show
+  keep their four columns. In `--json`, the new `role`, `labels` and `origin`
+  fields are left out when empty.
+
 - **1.5.0-dev.2: a chat's role and labels are drawn on its row, in colour.**
   BOOTH's fleet, NEEDS YOU and the workspace's AGENTS rail all show them after
   the chat's name, e.g. `codex  lead #review cli`. Each role has its own colour

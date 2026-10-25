@@ -309,12 +309,16 @@ One tab-separated row per addressable pane — agents first, then processes:
 ```
 42	agent	working	⠐ Refactor help button to separate screen
 71	agent	working	⠂ Create comprehensive documentation <- you
-106	agent	idle	✳ Claude Code [stage]
+106	agent	idle	✳ Claude Code [stage]	lead #review (cli)
 ```
 
 Columns are pane id, kind (`agent` or `process`), status, then the label with
 ` [stage]` appended when that pane is on the stage and ` <- you` when it is the
-caller's own. `no panes in workspace N` when there are none.
+caller's own. An agent with a role, labels or a known origin gets a fifth
+column: the role bare, each label after a `#`, and who started it in brackets
+(`cli`, `agent`, `tui` or `web`; see [`agent tag`](#agent-tag)). Process rows and
+agents with none of those keep four columns. `no panes in workspace N` when
+there are none.
 
 ### `pane read`
 
@@ -365,7 +369,8 @@ keystroke.
 | command | signature |
 |---|---|
 | `ls` (alias `list`) | `butai agent ls [TARGET]` |
-| `spawn` | `butai agent spawn <KIND> [--background] [--prompt TEXT] [--wait] [--timeout MS]` |
+| `spawn` | `butai agent spawn <KIND> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]...` |
+| `tag` | `butai agent tag <TARGET> [--role ROLE \| --no-role] [--label LABEL]... [--unlabel LABEL]... [--clear]` |
 | `send` | `butai agent send <TARGET> [TEXT...] [--wait] [--until SET] [--timeout MS]` |
 | `read` | `butai agent read <TARGET> [-l N] [--source S] [--format F]` |
 | `wait` | `butai agent wait <TARGET> [--until SET] [--timeout MS] [--since-seq N]` |
@@ -384,6 +389,8 @@ has no verb for it.
 | `--prompt <TEXT>` | string | none | send this prompt once the agent is up |
 | `--wait` | bool | off | with `--prompt`, block until the agent finishes it |
 | `--timeout <MS>` | u64 | `300000` | give up after this many milliseconds when waiting |
+| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` | none | give the new agent this role |
+| `--label <LABEL>` | string, repeatable or comma-separated | none | give the new agent these labels |
 
 `<KIND>` is an agent type as configured under `[[agents]]` — see
 [configuration.md](configuration.md). The workspace comes from `--ws` or
@@ -416,6 +423,42 @@ as is `--timeout` with no wait. The wait reads the notification feed's head
 the default `--until` set (`finished,exited`) — `spawn` has no `--until` of its
 own. Its outcome reaches you through the exit code, plus a stderr line if it
 timed out.
+
+The spawn records who asked for it as the agent's `origin`: `cli`, or `agent`
+when the command runs inside a butai pane (`$BUTAI_PANE` is set). `--role` and
+`--label` are checked before the agent starts, so a bad label is exit 64 and no
+agent, and set with the same write [`agent tag`](#agent-tag) makes once it is up.
+
+### `agent tag`
+
+| flag | type | default | effect |
+|---|---|---|---|
+| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` | none | set the role |
+| `--no-role` | bool | off | take the role off |
+| `--label <LABEL>` | string, repeatable or comma-separated | none | add a label |
+| `--unlabel <LABEL>` | string, repeatable or comma-separated | none | take a label off |
+| `--clear` | bool | off | take the role and every label off first |
+
+The same role and labels the terminal's and the browser's tag menus set. With
+no flags it only prints them. With flags it changes what they name and keeps the
+rest, so `--label bug` adds to the labels already there. They apply in the order
+`--clear`, `--role`/`--no-role`, `--unlabel`, `--label`, so `--clear --label
+review` leaves exactly one label. Labels are lowercased, may be written with
+their `#`, and follow the daemon's rules: at most 8 per agent, each up to 24
+letters, digits, `-` or `_`. A bad role or label is exit 64 before anything is
+sent, and so is a target that is a process.
+
+The output is the agent's tags as the daemon now holds them, plus who started it
+(`origin`, which `tag` cannot change):
+
+```
+pane 7 lead #review #bug (cli)
+pane 8 has no tags
+```
+
+Under `--json` it is `{pane, role, labels, origin}`. Unlike `send` and `wait`,
+`tag` works on your own pane: an agent saying what it is for is one of the
+things tags are for.
 
 ### `agent send`
 
@@ -764,7 +807,8 @@ shape:
 |---|---|
 | `ls` | `SessionInfo[]` — `{id, name, windows, attached_clients, cwd}` |
 | `whoami` | `{inside_butai, pane, workspace, socket}` |
-| `pane ls`, `agent ls` | `{pane, kind, label, status, staged}[]` |
+| `pane ls`, `agent ls` | `{pane, kind, label, status, staged, role?, labels?, origin?}[]` |
+| `agent tag` | `{pane, role, labels, origin}` |
 | `agent spawn` | `{"pane":42}` |
 | `agent wait`, `agent send --wait` | `{pane, state, exited, timed_out, waited_ms}` |
 

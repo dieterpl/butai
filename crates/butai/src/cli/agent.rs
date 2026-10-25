@@ -15,7 +15,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use butai_protocol::api::{AgentDto, AgentState, NotificationsDto, PaneOutputDto};
+use butai_protocol::api::{normalize_tags, AgentDto, AgentState, NotificationsDto, PaneOutputDto};
 use butai_protocol::PaneId;
 use clap::Subcommand;
 use serde::Serialize;
@@ -63,6 +63,35 @@ pub enum AgentCmd {
         /// Give up after this many milliseconds when waiting
         #[arg(long, value_name = "MS", default_value_t = 300_000)]
         timeout: u64,
+        /// Give the new agent a role: lead, worker, loop or watch
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Give the new agent a label (repeatable, or comma-separated)
+        #[arg(long = "label", value_name = "LABEL", value_delimiter = ',')]
+        labels: Vec<String>,
+    },
+    /// Show or change an agent's role and labels
+    ///
+    /// With no flags it prints them, and who started the agent. The flags apply
+    /// in the order --clear, --role/--no-role, --unlabel, --label.
+    Tag {
+        /// Pane id, agent name, or `stage`
+        target: String,
+        /// Set the role: lead, worker, loop or watch
+        #[arg(long, value_name = "ROLE", conflicts_with = "no_role")]
+        role: Option<String>,
+        /// Take the role off
+        #[arg(long)]
+        no_role: bool,
+        /// Add a label (repeatable, or comma-separated)
+        #[arg(long = "label", value_name = "LABEL", value_delimiter = ',')]
+        add: Vec<String>,
+        /// Take a label off (repeatable, or comma-separated)
+        #[arg(long = "unlabel", value_name = "LABEL", value_delimiter = ',')]
+        remove: Vec<String>,
+        /// Take the role and every label off first
+        #[arg(long)]
+        clear: bool,
     },
     /// Type a prompt into an agent, optionally blocking until it answers
     Send {
@@ -118,8 +147,12 @@ pub enum AgentCmd {
 pub async fn run(cmd: AgentCmd, ctx: &Ctx) -> Result<u8> {
     match cmd {
         AgentCmd::Ls { target } => ls(ctx, target).await,
-        AgentCmd::Spawn { kind, background, prompt, wait, timeout } => {
-            spawn(ctx, &kind, background, prompt, wait, timeout).await
+        AgentCmd::Spawn { kind, background, prompt, wait, timeout, role, labels } => {
+            let tags = TagEdit { role, add: labels, ..TagEdit::default() };
+            spawn(ctx, &kind, background, prompt, wait, timeout, tags).await
+        }
+        AgentCmd::Tag { target, role, no_role, add, remove, clear } => {
+            tag(ctx, &target, TagEdit { role, no_role, add, remove, clear }).await
         }
         AgentCmd::Send { target, text, wait, until, timeout } => {
             send(ctx, &target, text, wait, until, timeout).await
@@ -386,7 +419,11 @@ async fn spawn(
     prompt: Option<String>,
     wait: bool,
     timeout: u64,
+    tags: TagEdit,
 ) -> Result<u8> {
+    // Checked before anything starts, so a typo in a label is not a running
+    // agent with no tags and an error after it.
+    let tags = if tags.is_empty() { None } else { Some(tags.apply(None, Vec::new())?) };
     let ws = pane::resolve_ws(&ctx.api, ctx.ws.clone(), "the new agent").await?;
     let path = format!("/v1/workspaces/{ws}/agents");
 
@@ -411,6 +448,9 @@ async fn spawn(
         anyhow::bail!("the daemon accepted the spawn but no new agent appeared");
     };
     let at = Resolved { ws, pane: fresh };
+    if let Some((role, labels)) = tags {
+        put_tags(&ctx.api, at, role, labels).await?;
+    }
 
     // The pane id on stdout, bare, so `P=$(butai agent spawn claude)` works —
     // the same shape `butai ws create` already has.
@@ -468,6 +508,115 @@ async fn send(
     report(ctx, &outcome)
 }
 
+// ---------------------------------------------------------------------------
+// tag
+// ---------------------------------------------------------------------------
+
+/// What `agent tag` (or `agent spawn --role/--label`) was asked to change.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct TagEdit {
+    role: Option<String>,
+    no_role: bool,
+    add: Vec<String>,
+    remove: Vec<String>,
+    clear: bool,
+}
+
+impl TagEdit {
+    /// No change asked for, which `agent tag` reads as "show them".
+    fn is_empty(&self) -> bool {
+        self.role.is_none()
+            && !self.no_role
+            && self.add.is_empty()
+            && self.remove.is_empty()
+            && !self.clear
+    }
+
+    /// The role and labels after this edit, from what the agent carries now,
+    /// checked by the same [`normalize_tags`] the daemon runs — so a bad label
+    /// is a usage error here rather than a 400 after the fact.
+    ///
+    /// The daemon's write replaces both together, so an edit is a read, this,
+    /// and a whole-list write: `--label bug` keeps the labels already there.
+    fn apply(
+        &self,
+        role: Option<String>,
+        labels: Vec<String>,
+    ) -> Result<(Option<String>, Vec<String>)> {
+        let (mut role, mut labels) = if self.clear { (None, Vec::new()) } else { (role, labels) };
+        if self.no_role {
+            role = None;
+        }
+        if let Some(r) = &self.role {
+            role = Some(r.trim().to_ascii_lowercase());
+        }
+        let bare = |l: &str| l.trim().trim_start_matches('#').to_ascii_lowercase();
+        labels.retain(|l| !self.remove.iter().any(|r| bare(r) == *l));
+        labels.extend(self.add.iter().cloned());
+        match normalize_tags(role.as_deref(), &labels) {
+            Ok(tags) => Ok(tags),
+            Err(e) => exit::usage(e),
+        }
+    }
+}
+
+/// The agent row for a resolved pane, or why there is none.
+async fn agent_at(api: &Api, at: Resolved) -> Result<AgentDto> {
+    let agents: Vec<AgentDto> = api.get_as(&format!("/v1/workspaces/{}/agents", at.ws)).await?;
+    match agents.into_iter().find(|a| a.pane == at.pane) {
+        Some(a) => Ok(a),
+        // `resolve` found the pane, so it is a process: tags are a chat's.
+        None => exit::usage(format!("pane {} is not an agent; only agents carry tags", at.pane)),
+    }
+}
+
+async fn put_tags(
+    api: &Api,
+    at: Resolved,
+    role: Option<String>,
+    labels: Vec<String>,
+) -> Result<()> {
+    let body = serde_json::to_vec(&serde_json::json!({ "role": role, "labels": labels }))?;
+    api.call(hyper::Method::PUT, &format!("{}/tags", at.route()), Some(body)).await?;
+    Ok(())
+}
+
+/// `agent tag`'s answer, the same shape on stdout whether or not it changed.
+#[derive(Serialize)]
+struct TagsOut {
+    pane: PaneId,
+    role: Option<String>,
+    labels: Vec<String>,
+    origin: Option<String>,
+}
+
+/// Show an agent's tags, or change them and show the result.
+///
+/// Not refused on your own pane, unlike `send` and `wait`: an agent saying
+/// what it is for is one of the things tags are for.
+async fn tag(ctx: &Ctx, target: &str, edit: TagEdit) -> Result<u8> {
+    let at = pane::resolve(&ctx.api, target, ctx.ws.as_deref()).await?;
+    let mut agent = agent_at(&ctx.api, at).await?;
+    if !edit.is_empty() {
+        let (role, labels) = edit.apply(agent.role.clone(), agent.labels.clone())?;
+        put_tags(&ctx.api, at, role, labels).await?;
+        // Read back rather than echo the request: the daemon is the last word.
+        agent = agent_at(&ctx.api, at).await?;
+    }
+    let out =
+        TagsOut { pane: at.pane, role: agent.role, labels: agent.labels, origin: agent.origin };
+    ctx.out.emit_owned(&out, |w| {
+        let words = pane::tag_words(out.role.as_deref(), &out.labels, out.origin.as_deref());
+        if words.is_empty() {
+            writeln!(w, "pane {} has no tags", out.pane)?;
+        } else {
+            writeln!(w, "pane {} {words}", out.pane)?;
+        }
+        Ok(())
+    })?;
+    Ok(exit::OK)
+}
+
 /// Block until a freshly spawned agent has drawn something, or `timeout`.
 /// Answers whether it drew.
 ///
@@ -510,6 +659,41 @@ async fn deliver(ctx: &Ctx, at: Resolved, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labels(l: &[&str]) -> Vec<String> {
+        l.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// An edit keeps what it was not asked about: the daemon's write replaces
+    /// the whole list, so `--label bug` has to carry the labels already there.
+    #[test]
+    fn a_tag_edit_changes_only_what_it_names() {
+        let now = (Some("lead".to_string()), labels(&["review"]));
+        let edit = |e: TagEdit| e.apply(now.0.clone(), now.1.clone()).unwrap();
+
+        let add = edit(TagEdit { add: labels(&["#Bug", "review"]), ..Default::default() });
+        assert_eq!(add, (Some("lead".into()), labels(&["review", "bug"])));
+        let off = edit(TagEdit { remove: labels(&["#review"]), ..Default::default() });
+        assert_eq!(off, (Some("lead".into()), vec![]));
+        let role = edit(TagEdit { role: Some("Worker".into()), ..Default::default() });
+        assert_eq!(role, (Some("worker".into()), labels(&["review"])));
+        let bare = edit(TagEdit { no_role: true, ..Default::default() });
+        assert_eq!(bare, (None, labels(&["review"])));
+        // --clear goes first, so it can be followed by what to put back.
+        let fresh = edit(TagEdit { clear: true, add: labels(&["idea"]), ..Default::default() });
+        assert_eq!(fresh, (None, labels(&["idea"])));
+        assert!(TagEdit::default().is_empty());
+    }
+
+    /// The daemon's own rules, checked before anything is sent or spawned.
+    #[test]
+    fn a_bad_tag_is_a_usage_error() {
+        let bad = |e: TagEdit| exit::code_for(&e.apply(None, vec![]).unwrap_err());
+        assert_eq!(bad(TagEdit { role: Some("boss".into()), ..Default::default() }), exit::USAGE);
+        assert_eq!(bad(TagEdit { add: labels(&["no spaces"]), ..Default::default() }), exit::USAGE);
+        let nine: Vec<String> = (0..9).map(|i| format!("l{i}")).collect();
+        assert_eq!(bad(TagEdit { add: nine, ..Default::default() }), exit::USAGE);
+    }
 
     #[test]
     fn the_default_set_is_finished_and_exited_but_never_idle() {
