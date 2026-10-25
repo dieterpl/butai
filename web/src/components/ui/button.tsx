@@ -1,7 +1,7 @@
 // The only button, and in this client it is written **`[+ agent]`**.
 //
 //     [+ agent]   [+ host]   [+ new]   [+ term]   [open]   [agents v]
-//     [layout] [detach] [help] [settings]
+//     [resize] [detach] [help] [settings]
 //
 // Every one of those is off `docs/images/workbench.svg` and `settings.svg`,
 // which are real captures. Square brackets, no fill, no border, no radius, no
@@ -20,7 +20,7 @@
 //                tab are drawn when they are the thing you are looking at.
 //   outline      an ordinary button: `--fg`, hover takes the selection band.
 //   ghost        `[+ agent]` — `--faint`, hover brightens to `--fg`.
-//   secondary    the status bar's `[layout] [detach]` — `--dim`.
+//   secondary    the status bar's `[resize] [detach]` — `--dim`.
 //   destructive  `x kill` — `--bad`.
 //   link         unchanged; the one shape a terminal has no answer for.
 //

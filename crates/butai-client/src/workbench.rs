@@ -2596,7 +2596,23 @@ pub async fn run(
                                     // after every click would move the next
                                     // row out from under the pointer.
                                     let (sel, anchor) = (list.sel, list.anchor);
-                                    if menu.rows().get(sel) == Some(&chrome::TagRow::NewLabel) {
+                                    // A close row is the close menu's own row,
+                                    // and closes the menu with the chat.
+                                    if let Some(chrome::TagRow::Close(row)) = menu.rows().get(sel) {
+                                        if let Err(e) = run_menu_row(
+                                            &mut daemons,
+                                            &mut hosts,
+                                            &mut view,
+                                            &mut forwards,
+                                            &mut sockets,
+                                            menu.target(),
+                                            *row,
+                                        )
+                                        .await
+                                        {
+                                            view.flash = Some(format!("{e:#}"));
+                                        }
+                                    } else if menu.rows().get(sel) == Some(&chrome::TagRow::NewLabel) {
                                         view.overlay = Some(Overlay::Prompt(chrome::PromptOverlay {
                                             title: "NEW LABEL".into(),
                                             text: String::new(),
@@ -4155,7 +4171,7 @@ fn page_bar_click(
             | Target::CloseTab
             | Target::NewWorkspace
             | Target::Machines
-            | Target::Footer("[layout]")
+            | Target::Footer("[resize]")
             | Target::Footer("[detach]")
     ) {
         view.page = ret;
@@ -7999,7 +8015,7 @@ fn run_click(
         // them.
         Target::Machines => Flow::PickHost,
         Target::Spaces => Flow::PickSpace,
-        Target::Footer("[layout]") => Flow::ToggleLayout,
+        Target::Footer("[resize]") => Flow::ToggleLayout,
         Target::Footer("[detach]") => Flow::Detach,
         Target::Footer("[help]") => run_view(ViewVerb::Help, view),
         // The same two flows the chip used to send, so the button and `alt-s`
@@ -8147,8 +8163,11 @@ fn menu_for(
     use chrome::MenuTarget;
     let ws = ws?;
     let kind = match target {
+        // A chat's menu is the same one BOOTH opens on it: its role and labels,
+        // then the close rows the rail used to offer on their own.
         hit::Target::Rail(Focus::Agents, row) => {
-            MenuTarget::Agent { daemon: here, workspace: ws.id, pane: ws.agents.get(row)?.pane }
+            let all = all_agent_rows(daemons, hosts);
+            return Some(tag_menu(here, ws.id, ws.agents.get(row)?, &all));
         }
         hit::Target::Rail(Focus::Processes, row) => {
             MenuTarget::Process(ws.processes.get(row)?.pane)
@@ -8186,38 +8205,47 @@ fn fleet_menu(
     row: usize,
 ) -> Option<Overlay> {
     match rows.get(row)? {
-        // A chat's menu is about what it is for. Ending it is `x`, or the
-        // `[x]` on its row, which still opens the close menu.
+        // A chat's menu is about what it is for, then how to end it. The
+        // `[x]` on its row still opens the close menu on its own.
         chrome::BoothRow::Agent { sel, .. } => {
             let at = fleet_route(all, *sel)?;
             let agent = all.iter().find(|a| a.daemon == at.daemon && a.agent.pane == at.pane)?;
-            let mut known: Vec<String> =
-                chrome::LABEL_SUGGESTIONS.iter().map(|l| l.to_string()).collect();
-            for l in all.iter().flat_map(|a| a.agent.labels.iter()) {
-                if !known.contains(l) {
-                    known.push(l.clone());
-                }
-            }
-            let menu = chrome::TagMenu {
-                daemon: at.daemon,
-                workspace: at.workspace,
-                pane: at.pane,
-                title: agent.agent.title.clone(),
-                role: agent
-                    .agent
-                    .role
-                    .clone()
-                    .filter(|r| butai_protocol::api::AGENT_ROLES.contains(&r.as_str())),
-                labels: agent.agent.labels.clone(),
-                known,
-            };
-            Some(Overlay::List(menu.overlay(0)))
+            Some(tag_menu(at.daemon, at.workspace, agent.agent, all))
         }
         chrome::BoothRow::Space { space, .. } => {
             Some(menu_overlay(chrome::MenuTarget::Tab(space.tab)))
         }
         chrome::BoothRow::Machine { .. } => None,
     }
+}
+
+/// A chat's context menu: its role and labels, then the close rows.
+///
+/// One builder for the AGENTS rail and BOOTH's fleet, so a chat offers the same
+/// rows wherever it is right-clicked. `all` is the whole fleet, for the labels
+/// in use elsewhere — a label made on one machine is offered on the next.
+fn tag_menu(
+    daemon: usize,
+    workspace: SessionId,
+    agent: &butai_protocol::api::AgentDto,
+    all: &[chrome::AllAgentRow<'_>],
+) -> Overlay {
+    let mut known: Vec<String> = chrome::LABEL_SUGGESTIONS.iter().map(|l| l.to_string()).collect();
+    for l in all.iter().flat_map(|a| a.agent.labels.iter()) {
+        if !known.contains(l) {
+            known.push(l.clone());
+        }
+    }
+    let menu = chrome::TagMenu {
+        daemon,
+        workspace,
+        pane: agent.pane,
+        title: agent.title.clone(),
+        role: agent.role.clone().filter(|r| butai_protocol::api::AGENT_ROLES.contains(&r.as_str())),
+        labels: agent.labels.clone(),
+        known,
+    };
+    Overlay::List(menu.overlay(0))
 }
 
 /// [`fleet_menu`] against the live fleet, for the two call sites that have
@@ -9927,7 +9955,7 @@ fn alt_verb(code: event::KeyCode) -> Option<ViewVerb> {
         // dials it directly — there is no daemon in the middle relaying a
         // second daemon's screen any more.
         K::Char('h') => ViewVerb::Host,
-        // Alt-l: resize the rails. Also the `[layout]` button, which is where
+        // Alt-l: resize the rails. Also the `[resize]` button, which is where
         // the mode is discoverable from.
         K::Char('l') => ViewVerb::Layout,
         // Alt-t: a new shell, always on the work page, because that is where
@@ -14192,9 +14220,10 @@ name = \"terminal\"
         assert_eq!(review.labels, vec!["review"]);
         assert!(review.pick(4).unwrap().labels.is_empty());
         let rows = menu.rows();
-        assert_eq!(rows[rows.len() - 2], chrome::TagRow::NewLabel);
-        assert!(menu.pick(rows.len() - 2).is_none(), "new label is a question, not a change");
-        assert_eq!(review.pick(rows.len() - 1).unwrap().labels, Vec::<String>::new());
+        let new = rows.iter().position(|r| *r == chrome::TagRow::NewLabel).unwrap();
+        assert_eq!(rows[new + 1], chrome::TagRow::Clear);
+        assert!(menu.pick(new).is_none(), "new label is a question, not a change");
+        assert_eq!(review.pick(new + 1).unwrap().labels, Vec::<String>::new());
         // A ninth label is refused rather than sent for the daemon to refuse.
         let full =
             chrome::TagMenu { labels: (0..8).map(|i| format!("l{i}")).collect(), ..menu.clone() };
@@ -14909,17 +14938,17 @@ name = \"terminal\"
     ///
     /// While it is on, `h`/`l` resize rather than reaching a pane — which is
     /// the whole point of a mode, and why the footer says so for as long as it
-    /// lasts. `[layout]` used to toggle zen instead, which is a different
+    /// lasts. `[resize]` used to toggle zen instead, which is a different
     /// feature that already has its own key.
     #[test]
     fn layout_mode_resizes_the_rail_the_cursor_is_in() {
         let keymap = Keymap::default();
         let mut view = View::default();
         assert!(matches!(
-            run_click(hit::Target::Footer("[layout]"), &mut view, 1, None, 0),
+            run_click(hit::Target::Footer("[resize]"), &mut view, 1, None, 0),
             Flow::ToggleLayout
         ));
-        assert!(!view.zen, "[layout] is not the zen key");
+        assert!(!view.zen, "[resize] is not the zen key");
 
         // Entering is the loop's job; do it the way the loop does.
         view.layout = Some(view.geom);
@@ -15179,7 +15208,7 @@ name = \"terminal\"
     /// nothing to offer.
     ///
     /// It carries the *pane*, not the cursor: the cursor can move between
-    /// opening the menu and answering it, and "Close agent" has to mean the one
+    /// opening the menu and answering it, and "close agent" has to mean the one
     /// you right-clicked.
     #[test]
     fn a_right_click_menu_names_the_row_it_was_opened_on() {
@@ -15189,14 +15218,24 @@ name = \"terminal\"
         let menu = menu_for(hit::Target::Rail(Focus::Agents, 1), Some(&ws), &[], &[], 0)
             .expect("an agent row has a menu");
         let Overlay::List(list) = &menu else { panic!("not a list") };
-        let ListKind::Menu(MenuTarget::Agent { workspace, pane, .. }) = list.kind else {
-            panic!("{:?}", list.kind)
-        };
-        assert_eq!(pane, second, "the menu named a different agent");
+        // The same menu BOOTH opens on a chat: the role and labels first.
+        let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
+        assert_eq!(tags.pane, second, "the menu named a different agent");
         // And it named the workspace the row is in, not just the pane: that is
         // what "close others" acts on, and what a fleet row can differ on.
-        assert_eq!(workspace, ws.id);
-        assert_eq!(list.items, vec!["Close agent", "Close others", "Close all agents"]);
+        assert_eq!(tags.target(), MenuTarget::Agent { daemon: 0, workspace: ws.id, pane: second });
+        assert_eq!(list.items[0], "○ role  lead");
+        // Then the close rows, which the rail has no `[x]` to reach otherwise.
+        assert_eq!(
+            list.items[list.items.len() - 3..],
+            ["  close agent", "  close others", "  close all agents"]
+        );
+        let rows = tags.rows();
+        assert_eq!(
+            rows[rows.len() - 3..],
+            [chrome::TagRow::Close(0), chrome::TagRow::Close(1), chrome::TagRow::Close(2)]
+        );
+        assert!(tags.pick(rows.len() - 1).is_none(), "a close row is not a tag change");
 
         // A row past the end of the rail has nothing to offer, and neither does
         // empty chrome — a menu there would be a menu about nothing.
@@ -15255,17 +15294,14 @@ name = \"terminal\"
         assert_eq!(menu_target(&view), hit::Target::Rail(Focus::Agents, 1));
         let menu = menu_for(menu_target(&view), Some(&ws), &[], &[], 0).expect("an agent menu");
         let Overlay::List(list) = &menu else { panic!("not a list") };
+        let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
         assert_eq!(
-            list.kind,
-            ListKind::Menu(MenuTarget::Agent {
-                daemon: 0,
-                workspace: ws.id,
-                pane: ws.agents[1].pane
-            })
+            tags.target(),
+            MenuTarget::Agent { daemon: 0, workspace: ws.id, pane: ws.agents[1].pane }
         );
         // The rows that exist nowhere else in the interface.
-        assert!(list.items.iter().any(|i| i == "Close others"));
-        assert!(list.items.iter().any(|i| i == "Close all agents"));
+        assert!(list.items.iter().any(|i| i == "  close others"));
+        assert!(list.items.iter().any(|i| i == "  close all agents"));
 
         let view = View { focus: Focus::Processes, proc_sel: 2, ..Default::default() };
         assert_eq!(menu_target(&view), hit::Target::Rail(Focus::Processes, 2));
@@ -15315,7 +15351,7 @@ name = \"terminal\"
             hit::Target::Spaces,
             hit::Target::NewWorkspace,
             hit::Target::Machines,
-            hit::Target::Footer("[layout]"),
+            hit::Target::Footer("[resize]"),
             hit::Target::Rail(Focus::Agents, 0),
             hit::Target::AgentsVerb('a'),
             hit::Target::ProcsVerb('t'),
@@ -15396,7 +15432,7 @@ name = \"terminal\"
                 hit::Target::Footer(_) => {
                     let mut view = View::default();
                     for (label, code) in [
-                        ("[layout]", event::KeyCode::Char('l')),
+                        ("[resize]", event::KeyCode::Char('l')),
                         ("[detach]", event::KeyCode::Char('d')),
                         ("[settings]", event::KeyCode::Char('s')),
                     ] {

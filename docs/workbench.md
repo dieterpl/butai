@@ -43,7 +43,7 @@ on the last row. The band is carved left to right — left rail, stage, right ra
 │DSK /media/fast   901/916G││                              ││d diff · p push                │
 │DSK /             202/215G││                              ││c commit · g git · ? keys      │
 └──────────────────────────┘└──────────────────────────────┘└───────────────────────────────┘
- butai ~/Projects/butai (main)  ● codex is waiting           [layout] [detach] [help] [settings]
+ butai ~/Projects/butai (main)  ● codex is waiting           [resize] [detach] [help] [settings]
 ```
 
 ### The tab bar
@@ -241,7 +241,7 @@ each other on a narrow terminal.
   AGENTS rail it reads `● name is waiting · alt-w`, because there the footer is
   the only thing on screen naming *which* agent is blocked. Cut down to fit, and
   on a phone-width screen down to a bare `●`.
-- **Right** — `[layout] [detach] [help] [settings]`. `[help]` and `[settings]`
+- **Right** — `[resize] [detach] [help] [settings]`. `[help]` and `[settings]`
   name pages rather than actions, so they are lit while you are on them and a
   second press is the way back out.
 
@@ -357,10 +357,12 @@ row so its final output stays one Enter away — `x` is what dismisses it.
 | `A`, `alt-enter` | always ask |
 | `j` `k`, `enter` | move · put it on the stage |
 | `x` | kill the row. It does not ask — an agent's transcript is on disk |
-| `m` | the row's menu: **Close agent · Close others · Close all agents** |
+| `m` | the row's menu: its role and labels, then **close agent · close others · close all agents** |
 
-`m` is the right button's menu opened from the keyboard, and the last two rows of
-it live nowhere else in the interface. It is bound and documented but not drawn:
+`m` is the right button's menu opened from the keyboard. It is the chat's tag
+menu, the same one BOOTH opens on a chat (see [BOOTH](#booth)), with the three
+close rows at the bottom; the last two of those live nowhere else in the
+interface. It is bound and documented but not drawn:
 the rail's one verb row is already full at `a new · A new... · x kill`.
 
 In the agent picker, `d` pins the highlighted agent as what `a` spawns; the
@@ -738,8 +740,11 @@ The terminal follows the existing `x` key behavior and closes immediately;
 the web client uses its existing confirmation dialog.
 
 **The fleet list** is grouped by machine and then by project, and its order is a
-pure function of identity — daemon, then tab order, then spawn order. It reads no
-agent state at all, so a row is where it was an hour ago and a status change
+pure function of identity — machine, then tab order, then spawn order. Machines
+are `local` first and then by name, not in the order they connected: remembered
+machines are dialled in parallel at start, so that order changed from one
+restart to the next. NEEDS YOU breaks its ties and COMPUTE lists its machines in
+the same order. It reads no agent state at all, so a row is where it was an hour ago and a status change
 redraws a glyph in place. (Sorting by urgency was measured and rejected: rows
 travelled ~174 positions per ten sampler ticks at 24 agents, and hysteresis only
 brought that to 169.) Projects are grouped by *id* rather than by name: two
@@ -929,9 +934,10 @@ starts exactly the agent `[+ claude]` would, and `[x]` has no shorter form. What
 neither of them ever costs is a sprite — a folded project that cannot say what is
 in it is a row you have to unfold to read.
 
-The right button on a chat opens its tag menu: a role (`lead`, `worker`, `loop`,
-`watch`) and labels, the same ones the browser's BOOTH offers, set on the daemon
-and left open while you pick. Like every right-click menu it opens beside the
+The right button on a chat opens its tag menu, here and on a workspace's AGENTS
+rail alike: a role (`lead`, `worker`, `loop`, `watch`) and labels, the same ones
+the browser's BOOTH offers, set on the daemon and left open while you pick, then
+`close agent`, `close others` and `close all agents`, which close it. Like every right-click menu it opens beside the
 pointer, below and right of it, and flips above or to the left where the screen
 has no room; the same menu from `m` has no pointer to follow and is centred.
 
@@ -950,9 +956,9 @@ picked from its name, so it is the same colour on every row. All of them are
 the theme's own roles. A narrow row gives way in order — every label, then a
 count of them (`lead +2 cli`), then the origin, then the count, then the role —
 and never cuts into the chat's name; NEEDS YOU, the narrowest list, draws tags
-only beside a name that fits whole. `m` and the `[x]` on a chat's row open `Close agent`,
-`Close others`, `Close all agents`, the same three the AGENTS rail offers, acting
-on the row's own project rather than on the tab you are looking at. Neither asks
+only beside a name that fits whole. `m` opens the same menu, and the `[x]` on a
+chat's row opens just its three close rows. Either acts on the row's own project
+rather than on the tab you are looking at. Neither asks
 first, for the reason the rail's `x` does not: an agent is a process whose
 transcript is on disk. On a
 project row the menu is the tab bar's own, against *its* chip; a machine row has

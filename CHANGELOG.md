@@ -69,6 +69,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.3: BOOTH lists machines in the same order on every start.** The
+  fleet listed machines in the order their connections came up. Remembered
+  machines are dialled in parallel, so on a restart where a different one
+  answered first, they swapped places. BOOTH now lists `local` first and the
+  rest by name. Projects keep their tab order and chats their spawn order, as
+  before. The NEEDS YOU tray breaks ties in the same machine order, and COMPUTE
+  lists machines in it too. The tab bar still follows connection order.
+
+- **1.5.0-dev.3: the AGENTS rail's right-click menu can tag a chat.** A chat
+  opened a different menu depending on where you right-clicked it. In BOOTH it
+  was the tag menu, and on a workspace's AGENTS rail it was only `Close agent`,
+  `Close others` and `Close all agents`, so roles and labels could only be set
+  from BOOTH. Both places, and `m`, now open the same menu: the role and labels
+  first, then `close agent`, `close others` and `close all agents`. The `[x]` on
+  a BOOTH row still opens just the close rows.
+
 - **1.5.0-dev.2: a right-click menu in the terminal opens at the pointer.** It
   used to open in the middle of the screen, however far from the click. It now
   opens below and to the right of the cell you clicked, and flips above or to

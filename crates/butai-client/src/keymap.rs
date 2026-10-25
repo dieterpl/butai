@@ -288,7 +288,7 @@ pub fn parse_action(s: &str) -> Result<Action, ParseError> {
             let rest: String = std::iter::once(name).chain(words).collect::<Vec<_>>().join(" ");
             Command::RenameWindow(rest)
         }
-        // Bare `layout` is the rail-resizing mode the `[layout]` button opens.
+        // Bare `layout` is the rail-resizing mode the `[resize]` button opens.
         // Named, it is the old preset-applying command, which the workbench has
         // nothing for — kept parseable so an existing binding explains itself.
         "layout" => match arg {

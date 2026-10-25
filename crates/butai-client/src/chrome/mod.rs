@@ -2309,6 +2309,10 @@ pub enum TagRow {
     Label(String),
     NewLabel,
     Clear,
+    /// A row of the chat's close menu, by its index in [`MenuTarget::rows`].
+    /// Here so the AGENTS rail's right button, which has no `[x]` beside it,
+    /// still reaches "close others" and "close all agents".
+    Close(usize),
 }
 
 impl TagMenu {
@@ -2323,11 +2327,18 @@ impl TagMenu {
         rows.extend(self.known.iter().chain(extra).cloned().map(TagRow::Label));
         rows.push(TagRow::NewLabel);
         rows.push(TagRow::Clear);
+        rows.extend((0..self.target().rows().len()).map(TagRow::Close));
         rows
+    }
+
+    /// The chat as the close menu names it, for the [`TagRow::Close`] rows.
+    pub fn target(&self) -> MenuTarget {
+        MenuTarget::Agent { daemon: self.daemon, workspace: self.workspace, pane: self.pane }
     }
 
     /// The menu as a list overlay, with the cursor kept on `sel`.
     pub fn overlay(&self, sel: usize) -> ListOverlay {
+        let close = self.target().rows();
         let items = self
             .rows()
             .iter()
@@ -2341,6 +2352,9 @@ impl TagMenu {
                 }
                 TagRow::NewLabel => "  new label…".to_string(),
                 TagRow::Clear => "  clear tags".to_string(),
+                TagRow::Close(i) => {
+                    format!("  {}", close.get(*i).map_or("", |r| r.0).to_lowercase())
+                }
             })
             .collect::<Vec<_>>();
         ListOverlay {
@@ -2355,7 +2369,7 @@ impl TagMenu {
     }
 
     /// The menu after row `row` is chosen, or `None` for a row that is not a
-    /// change (`new label…`) or one that would break a limit.
+    /// change (`new label…`, a close row) or one that would break a limit.
     pub fn pick(&self, row: usize) -> Option<TagMenu> {
         let mut next = self.clone();
         match self.rows().get(row)? {
@@ -2375,7 +2389,7 @@ impl TagMenu {
                 next.role = None;
                 next.labels.clear();
             }
-            TagRow::NewLabel => return None,
+            TagRow::NewLabel | TagRow::Close(_) => return None,
         }
         Some(next)
     }
@@ -3890,10 +3904,32 @@ pub fn booth_columns_with(stage_box: LRect, pref: BoothWidths) -> BoothColumns {
     }
 }
 
+/// Where a machine sits in BOOTH: `local` first, then the rest by name.
+///
+/// By name rather than by daemon index, because the index is the order the
+/// links came up in. Remembered machines are dialled in parallel at start and
+/// each is appended when its ssh lands, so two of them swapped places on any
+/// restart where the other one answered first.
+fn machine_sort_key(label: &str) -> (bool, &str) {
+    (label != "local", label)
+}
+
+/// The daemons in the order BOOTH lists them, as indices into `machines`.
+///
+/// One order for the fleet, the tray's ties and the COMPUTE column, so the
+/// three never disagree about which machine comes first. Stable, so two
+/// machines with the same name keep their daemon order between them.
+pub fn booth_machine_order(machines: &[MachineRow<'_>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..machines.len()).collect();
+    order.sort_by_key(|&d| machine_sort_key(machines[d].label));
+    order
+}
+
 /// The fleet column's rows: machine, then space, then its agents.
 ///
-/// The order is a pure function of *identity* — daemon index, then tab order,
-/// then spawn order — and reads no agent state at all. That is what makes it
+/// The order is a pure function of *identity* — machine name (see
+/// [`booth_machine_order`]), then tab order, then spawn order — and reads no
+/// agent state at all. That is what makes it
 /// safe to click: `all_agent_rows` is already in this order, so an agent's row
 /// is where it was an hour ago and a state change redraws the glyph in place
 /// rather than moving the row out from under the cursor.
@@ -3916,7 +3952,8 @@ pub fn booth_rows<'a>(
     folds: &Folds,
 ) -> Vec<BoothRow<'a>> {
     let mut out = Vec::new();
-    for (daemon, m) in machines.iter().enumerate() {
+    for daemon in booth_machine_order(machines) {
+        let m = &machines[daemon];
         let mine = spaces.iter().filter(|s| s.daemon == daemon);
         let agents = mine.clone().map(|s| s.agents.len()).sum();
         let folded = folds.machine_folded(m.label);
@@ -4030,10 +4067,16 @@ fn tray_rank(a: &AgentDto) -> Option<u8> {
 /// fleet order: the sort decides which agents are visible in four rows, not
 /// which of two equally urgent ones is on top, and a tie that re-broke itself
 /// every tick would put the shuffling back that ranking is here to avoid.
+/// Fleet order means the fleet's machine order too, not `all`'s daemon order,
+/// or two machines' ties would swap places on a restart.
 pub fn booth_tray<'a>(all: &'a [AllAgentRow<'a>]) -> Vec<(usize, &'a AllAgentRow<'a>)> {
     let mut out: Vec<_> =
         all.iter().enumerate().filter(|(_, r)| tray_rank(r.agent).is_some()).collect();
-    out.sort_by_key(|(_, r)| tray_rank(r.agent).unwrap_or(u8::MAX));
+    out.sort_by_key(|(_, r)| {
+        // `host` is the machine's label whenever there is more than one, and
+        // with one there is nothing to order.
+        (tray_rank(r.agent).unwrap_or(u8::MAX), machine_sort_key(r.host.unwrap_or("local")))
+    });
     out
 }
 
@@ -4774,7 +4817,8 @@ pub fn booth_compute_machine_at(
     }
     let bottom = area.y + area.height;
     let mut top = area.y;
-    for (i, m) in machines.iter().enumerate().skip(view.booth_compute_scroll) {
+    for i in booth_machine_order(machines).into_iter().skip(view.booth_compute_scroll) {
+        let m = &machines[i];
         // `draw_compute`'s own stop. Without it the walk carries on past the
         // foot of the column and the machine after a clipped one answers for
         // rows it never had.
@@ -4805,7 +4849,8 @@ fn draw_compute(
     let bottom = area.y + area.height;
     let mut y = area.y;
 
-    for m in machines.iter().skip(view.booth_compute_scroll) {
+    for d in booth_machine_order(machines).into_iter().skip(view.booth_compute_scroll) {
+        let m = &machines[d];
         if y >= bottom {
             break;
         }
@@ -8535,7 +8580,7 @@ fn draw_right_rail(
 /// client and not the workspace live — the layout, the connection, the
 /// reference. It replaced `[:cmd]`, which advertised a keystroke rather than a
 /// place and was the one button here that opened a box to type in.
-pub const FOOTER_BUTTONS: &str = "[layout] [detach] [help] [settings]";
+pub const FOOTER_BUTTONS: &str = "[resize] [detach] [help] [settings]";
 
 /// Each footer button and the columns it occupies, or nothing when the screen
 /// is too narrow for the row (in which case none of them was drawn either).
@@ -8550,7 +8595,7 @@ pub fn footer_button_spans(width: u16) -> Vec<(&'static str, u16, u16)> {
         let w = label.len() as u16;
         out.push((
             match label {
-                "[layout]" => "[layout]",
+                "[resize]" => "[resize]",
                 "[detach]" => "[detach]",
                 "[help]" => "[help]",
                 _ => "[settings]",
@@ -8895,6 +8940,79 @@ mod tests {
         let ms2 = machines(&sys, &all2);
         let spaces2 = booth_spaces(&all2);
         assert_eq!(shape(&booth_rows(&spaces2, &ms2, &open)), before, "state changed the order");
+    }
+
+    /// Remembered machines land in whatever order their ssh links come up, so
+    /// the daemon index is a race and the page must not read it. The same three
+    /// machines connected in two orders draw the same fleet and the same tray:
+    /// `local` first, then by name.
+    #[test]
+    fn the_fleet_orders_machines_by_name_not_by_who_answered_first() {
+        let sys = SysDto::default();
+        // One waiting agent per machine, named after it, so a row says which
+        // machine it came from.
+        let agents = [
+            agent(1, "local", AgentState::Waiting),
+            agent(2, "alpha", AgentState::Waiting),
+            agent(3, "zeta", AgentState::Waiting),
+        ];
+        let draw = |hosts: [&'static str; 3]| {
+            let all: Vec<AllAgentRow<'_>> = hosts
+                .iter()
+                .enumerate()
+                .map(|(d, h)| AllAgentRow {
+                    workspace: "proj",
+                    workspace_id: SessionId(1),
+                    agent: agents.iter().find(|a| a.title == *h).unwrap(),
+                    host: (*h != "local").then_some(*h),
+                    daemon: d,
+                })
+                .collect();
+            let ms: Vec<MachineRow<'_>> = hosts
+                .iter()
+                .map(|label| MachineRow { label, sys: &sys, agents: 1, live: true })
+                .collect();
+            let spaces: Vec<SpaceRow<'_>> = (0..3)
+                .map(|d| SpaceRow {
+                    name: "proj",
+                    id: SessionId(1),
+                    daemon: d,
+                    agents: &all[d..d + 1],
+                    first: d,
+                    preferred: None,
+                    tab: d,
+                })
+                .collect();
+            // An agent row's fleet index differs between the two orders by
+            // design, so only its name is compared.
+            let rows: Vec<String> = shape(&booth_rows(&spaces, &ms, &Folds::default()))
+                .into_iter()
+                .map(|r| match r.strip_prefix("agent:") {
+                    Some(rest) => format!("agent:{}", rest.split(':').next().unwrap()),
+                    None => r,
+                })
+                .collect();
+            let tray: Vec<String> =
+                booth_tray(&all).iter().map(|(_, r)| r.agent.title.clone()).collect();
+            (rows, tray)
+        };
+        let (rows, tray) = draw(["local", "zeta", "alpha"]);
+        assert_eq!(
+            rows,
+            vec![
+                "machine:local",
+                "space:proj",
+                "agent:local",
+                "machine:alpha",
+                "space:proj",
+                "agent:alpha",
+                "machine:zeta",
+                "space:proj",
+                "agent:zeta",
+            ]
+        );
+        assert_eq!(tray, vec!["local", "alpha", "zeta"], "the tray breaks ties in fleet order");
+        assert_eq!(draw(["local", "alpha", "zeta"]), (rows, tray), "connection order leaked in");
     }
 
     /// What the rows say, as one string apiece — the shape both order tests and
@@ -9460,8 +9578,11 @@ mod tests {
                     .collect()
             };
 
+            // In the order the column draws them, which is by name; the hit
+            // test still answers with the machine's own index.
             let mut top = area.y;
-            for (i, m) in ms.iter().enumerate().skip(scroll) {
+            for i in booth_machine_order(&ms).into_iter().skip(scroll) {
+                let m = &ms[i];
                 if top >= bottom {
                     break;
                 }
@@ -9500,10 +9621,11 @@ mod tests {
             let c = BoothColumns { compute_rows: area, ..c };
             let mut b = buf(34, height);
             draw_compute(&mut b, area, &ms, &collapsed, &Theme::default());
+            let order = booth_machine_order(&ms);
             for y in 0..height {
                 assert_eq!(
                     booth_compute_machine_at(&c, &ms, &collapsed, 1, y),
-                    (y < ms.len() as u16).then_some(y as usize),
+                    order.get(y as usize).copied(),
                 );
             }
         }
