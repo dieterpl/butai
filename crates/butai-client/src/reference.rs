@@ -700,6 +700,11 @@ and each of them acts on the row's own machine and project, not on the tab you
 are looking at. `a`/`A` are the AGENTS rail's verbs and `z`/`Z` are the diff's
 folds; nothing here is a key this workbench did not already have.
 
+`?` on the fleet, or the `[?]` on its border, puts those keys on a card beside
+the list, with what the buttons and icons mean. The keys still work while it
+is up; `esc`, `?` or a click on it takes it down. This page is the footer's
+`[help]` from there.
+
 `x` ends what the row *is*. On an agent that is the session and it does not ask;
 on a project it is the workspace and everything running in it, and it does. The
 `✕` on a chat is the same press, and so is the `✕` on the project row the

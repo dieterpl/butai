@@ -8078,6 +8078,10 @@ fn run_click(
             view.browse_daemon = None;
             Flow::Browse(String::new())
         }
+        Target::BoothKeys => {
+            view.booth_keys = !view.booth_keys;
+            Flow::Continue
+        }
         // The MACHINES picker. It opens with the machines already here at the
         // top of the list and the cursor on the first of them, each one saying
         // that Enter drops it — which is the whole reason a count is worth
@@ -9773,6 +9777,18 @@ fn handle_input(
             }
             match (k.code, alt) {
                 (event::KeyCode::Char('q'), false) => return Flow::Detach,
+                // On the fleet, `?` is the page's own card; the whole reference
+                // is still the footer's `[help]`.
+                (event::KeyCode::Char('?'), false)
+                    if view.page == Page::Booth && view.focus == Focus::AllAgents =>
+                {
+                    view.booth_keys = !view.booth_keys;
+                    return Flow::Continue;
+                }
+                (event::KeyCode::Esc, false) if view.booth_keys => {
+                    view.booth_keys = false;
+                    return Flow::Continue;
+                }
                 (event::KeyCode::Char('?'), false) => return run_view(ViewVerb::Help, view),
                 // `a` spawns what the rail's `+` advertises — the pinned agent
                 // when there is one. `A` is the deliberate "let me choose",
@@ -15434,6 +15450,7 @@ name = \"terminal\"
             hit::Target::ChangesVerb('s'),
             hit::Target::System(chrome::Gauge::Cpu),
             hit::Target::Stage(0, 0),
+            hit::Target::BoothKeys,
             hit::Target::Nothing,
         ] {
             match target {
@@ -15559,6 +15576,20 @@ name = \"terminal\"
                     press(&mut view, key(event::KeyCode::Enter), &Keymap::default());
                     assert_eq!(view.focus, Focus::Stage, "Enter did not reach the stage");
                     assert_eq!(alt_verb(event::KeyCode::Esc), Some(ViewVerb::Focus(Focus::Agents)));
+                }
+                // BOOTH's `[?]` is `?` on the fleet, and `esc` takes it down.
+                hit::Target::BoothKeys => {
+                    let mut view =
+                        View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+                    press(&mut view, key(event::KeyCode::Char('?')), &Keymap::default());
+                    assert!(view.booth_keys, "`?` on the fleet did not open the card");
+                    press(&mut view, key(event::KeyCode::Esc), &Keymap::default());
+                    assert!(!view.booth_keys, "esc left the card up");
+                    assert!(matches!(
+                        run_click(hit::Target::BoothKeys, &mut view, 1, None, 0),
+                        Flow::Continue
+                    ));
+                    assert!(view.booth_keys, "the chip did not open it");
                 }
                 // Blank chrome. There is nothing to reach, which is the one
                 // honest answer this test accepts.

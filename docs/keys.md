@@ -184,7 +184,11 @@ machine, or the project the cursor names · `a` start that project's agent, or o
 a machine row open a folder there · `A` pick which · `x` end what the row is: the
 session on an agent, the workspace and
 everything in it on a project (which asks) · `z` fold this machine or project ·
-`Z` fold every project · `tab` the preview · `m` the row's menu.
+`Z` fold every project · `tab` the preview · `m` the row's menu · `?` the key
+card: all of these beside the list, with what the buttons and icons mean.
+`esc`, `?` or a click on the card closes it, and the keys work while it is up.
+On the fleet `?` is the card rather than the whole reference, which is still
+the footer's `[help]`.
 
 Ten keys, and every one of them is a key this workbench already had: `a` and `A`
 are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`

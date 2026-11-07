@@ -46,6 +46,8 @@ pub enum Target {
     /// same route the git menu and the machine picker take.
     Spaces,
     NewWorkspace,
+    /// BOOTH's `[?]`, or the key card it opened: either press toggles it.
+    BoothKeys,
     /// The machines button on the tab bar.
     ///
     /// One target because there is now one control. `NewHost` and `Hosts` were
@@ -180,6 +182,10 @@ pub fn at(
     // that is not on screen.
     if view.page == Page::Booth {
         let c = chrome::booth_columns_of(cols, &geom, view);
+        // Over the stage, so before it.
+        if chrome::booth_keys_card(cols, &geom, view).is_some_and(|r| r.contains(x, y)) {
+            return Target::BoothKeys;
+        }
         if c.stage_inner.contains(x, y) {
             return Target::Stage(x - c.stage_inner.x, y - c.stage_inner.y);
         }
@@ -189,6 +195,11 @@ pub fn at(
             if let Some((start, end)) = chrome::fleet_new_span(c.fleet_box) {
                 if x >= start && x < end {
                     return Target::NewWorkspace;
+                }
+            }
+            if let Some((start, end)) = chrome::fleet_keys_span(c.fleet_box) {
+                if x >= start && x < end {
+                    return Target::BoothKeys;
                 }
             }
         }

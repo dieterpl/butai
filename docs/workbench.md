@@ -753,6 +753,14 @@ afford the buttons — the icon, a few cells of title and the five cells `+ ↗ 
 take — a row is all title and the keys are the way, which is what it was before
 there were buttons.
 
+The `[?]` beside it, or `?` on the fleet, opens the **key card**: every key the
+fleet answers, then what `↗` `✕` `+` and the map's `━` do, then the icons. It
+hangs off FLEET's right edge over the stage and is not modal, so the keys it
+lists keep working while you read it. `esc`, `?` again, or a click on the card
+closes it. It is a click and not a hover because butai asks the terminal for
+motion only while a button is held (`term::ENABLE`), so a resting pointer is
+never reported.
+
 The `[+]` on the FLEET box's top border opens a folder as a **new workspace**,
 the same list `n` and the tab bar's `[+ new]` open, which asks which machine
 first when there is more than one. A machine row's `+` skips that question,

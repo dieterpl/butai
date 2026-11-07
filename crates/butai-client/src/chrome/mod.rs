@@ -2737,6 +2737,8 @@ pub struct View {
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
     pub(crate) fleet_clicks: crate::hit::FleetClicks,
+    /// BOOTH's key card is up: [`FLEET_KEYS_LABEL`] or `?` on the fleet.
+    pub booth_keys: bool,
     pub zen: bool,
     pub geom: RailGeom,
     /// Which interfaces the SYSTEM rail draws. Read from `[ui] net` and held
@@ -2852,6 +2854,7 @@ impl Default for View {
             booth_sel: 0,
             folds: Folds::default(),
             fleet_clicks: crate::hit::FleetClicks::default(),
+            booth_keys: false,
             zen: false,
 
             net: NetSelect::default(),
@@ -3408,6 +3411,7 @@ pub fn draw(
 /// painted over by it. An overlay is on top of everything by definition, so it
 /// goes on last — chrome, then pane, then this.
 pub fn draw_overlay_layer(buf: &mut Buffer, cols: u16, rows: u16, view: &View, theme: &Theme) {
+    draw_booth_keys(buf, cols, rows, view, theme);
     match &view.overlay {
         Some(Overlay::Dialog(d)) => dialog::draw(buf, cols, rows, d, theme),
         Some(overlay) => draw_overlay(buf, cols, rows, overlay, theme),
@@ -4507,6 +4511,14 @@ fn draw_booth_page(
                 cols.fleet_box.right(),
                 Pen::new(theme.faint, theme.ground),
             );
+        }
+        if let Some((x, _)) = fleet_keys_span(cols.fleet_box) {
+            let pen = if view.booth_keys {
+                Pen { fg: theme.accent, bg: theme.ground, bold: true }
+            } else {
+                Pen::new(theme.faint, theme.ground)
+            };
+            put_str(buf, x, cols.fleet_box.y, FLEET_KEYS_LABEL, cols.fleet_box.right(), pen);
         }
 
         // The fleet list, scrolled to keep the cursor in view. The cursor is an
@@ -8142,6 +8154,10 @@ pub fn booth_handle_at(cols: u16, rows: u16, view: &View, x: u16, y: u16) -> Opt
     if c.fleet_box.width == 0 || y < c.stage_box.y || y >= c.stage_box.y + c.stage_box.height {
         return None;
     }
+    // The key card hangs over the stage's left border.
+    if booth_keys_card(cols, &g, view).is_some_and(|r| r.contains(x, y)) {
+        return None;
+    }
     // FLEET's top border carries the `[+]`, which is at its right end.
     if y == c.fleet_box.y {
         if let Some((start, end)) = fleet_new_span(c.fleet_box) {
@@ -8389,6 +8405,122 @@ pub fn fleet_new_span(fleet_box: LRect) -> Option<(u16, u16)> {
     }
     let end = fleet_box.right().saturating_sub(1);
     Some((end.saturating_sub(w), end))
+}
+
+/// The `[?]` beside [`FLEET_NEW_LABEL`]: BOOTH's keys, on a card that floats
+/// over the stage until it is closed.
+///
+/// A click and not a hover, because butai asks the terminal for motion only
+/// while a button is held (see `term::ENABLE`), so a pointer resting on the
+/// chip is never reported.
+pub const FLEET_KEYS_LABEL: &str = "[?]";
+
+/// Where [`FLEET_KEYS_LABEL`] sits, one column of rule left of the `[+]`.
+/// `None` when the title would have to give way to it.
+pub fn fleet_keys_span(fleet_box: LRect) -> Option<(u16, u16)> {
+    const TITLE_AND_RULE: u16 = 14;
+    let (new, _) = fleet_new_span(fleet_box)?;
+    let w = FLEET_KEYS_LABEL.width() as u16;
+    if new < fleet_box.x + TITLE_AND_RULE + w + 1 {
+        return None;
+    }
+    Some((new - 1 - w, new - 1))
+}
+
+/// What the key card lists: every key the fleet answers, in the order the
+/// rows of `docs/keys.md` give them.
+pub const BOOTH_KEYS: &[(&str, &str)] = &[
+    ("j k", "walk the rows"),
+    ("enter", "go there: the agent, or the project"),
+    ("a", "start an agent · on a machine, a folder"),
+    ("A", "pick which agent"),
+    ("x", "end the row · a project asks first"),
+    ("z", "fold this machine or project"),
+    ("Z", "fold every project"),
+    ("tab", "the preview"),
+    ("m", "the row's menu"),
+    ("n", "open a folder as a workspace"),
+    ("alt-w", "the keyboard back to the fleet"),
+    ("alt-0", "BOOTH, from anywhere"),
+    ("?", "this card · esc closes it"),
+];
+
+/// The card's two legend lines under the keys: the buttons, then the marks.
+fn booth_keys_legend() -> [Vec<(&'static str, Role, bool)>; 2] {
+    [
+        vec![
+            ("↗", Role::Ink, true),
+            (" go  ", Role::Faint, false),
+            ("✕", Role::Danger, true),
+            (" end  ", Role::Faint, false),
+            ("+", Role::Accent, true),
+            (" agent/folder  ", Role::Faint, false),
+            ("━", Role::Danger, true),
+            (" news", Role::Faint, false),
+        ],
+        vec![
+            ("▲", Role::Danger, true),
+            (" asks ", Role::Faint, false),
+            ("●", Role::Info, true),
+            (" new ", Role::Faint, false),
+            ("■", Role::Danger, true),
+            (" crash ", Role::Faint, false),
+            ("○", Role::Faint, false),
+            (" read ", Role::Faint, false),
+            ("–", Role::Faint, false),
+            (" exit ", Role::Faint, false),
+            ("·", Role::Faint, false),
+            (" idle", Role::Faint, false),
+        ],
+    ]
+}
+
+const BOOTH_KEYS_W: u16 = 50;
+
+/// Where the key card is drawn, hanging off FLEET's right border at its top.
+/// `None` when it is closed, off BOOTH, or the stage is too short for it.
+pub fn booth_keys_card(cols: u16, geom: &Geom, view: &View) -> Option<LRect> {
+    if !view.booth_keys || view.page != Page::Booth || view.zen {
+        return None;
+    }
+    let c = booth_columns_of(cols, geom, view);
+    let h = BOOTH_KEYS.len() as u16 + 5;
+    if c.fleet_box.width == 0 || c.stage_box.height < h || cols < BOOTH_KEYS_W {
+        return None;
+    }
+    let x = (c.fleet_box.right() + 1).min(cols - BOOTH_KEYS_W);
+    Some(LRect::new(x, c.stage_box.y + 1, BOOTH_KEYS_W, h))
+}
+
+/// Paint the key card. Drawn with the modals, after the stage's pane has been
+/// blitted, so the pane cannot paint over it.
+pub fn draw_booth_keys(buf: &mut Buffer, cols: u16, rows: u16, view: &View, theme: &Theme) {
+    let Some(r) = booth_keys_card(cols, &page_geom(cols, rows, view), view) else { return };
+    let bg = theme.surface;
+    for y in r.y..r.y + r.height {
+        fill_row(buf, r.x, y, r.right(), bg);
+    }
+    draw_box(buf, r, " BOOTH KEYS ", theme.accent, bg);
+    let bound = r.right() - 1;
+    put_str(buf, bound - 6, r.y, " esc ", bound, Pen::new(theme.faint, bg));
+    let mut y = r.y + 1;
+    for (key, what) in BOOTH_KEYS {
+        put_str(buf, r.x + 2, y, key, bound, Pen { fg: theme.accent, bg, bold: true });
+        put_str(buf, r.x + 9, y, what, bound, Pen::new(theme.ink, bg));
+        y += 1;
+    }
+    for x in r.x + 1..bound {
+        put_str(buf, x, y, "─", bound, Pen::new(theme.rule, bg));
+    }
+    y += 1;
+    for line in booth_keys_legend() {
+        let mut x = r.x + 2;
+        for (s, role, bold) in line {
+            put_str(buf, x, y, s, bound, Pen { fg: theme.role(role), bg, bold });
+            x += s.chars().count() as u16;
+        }
+        y += 1;
+    }
 }
 pub const AGENTS_ADD_LABEL: &str = "[+ agent]";
 
@@ -9783,6 +9915,41 @@ mod tests {
         // The narrowest fleet the layout hands out still fits it.
         assert!(fleet_new_span(LRect::new(0, 1, 22, 10)).is_some());
         assert_eq!(fleet_new_span(LRect::new(0, 1, 12, 10)), None);
+    }
+
+    /// The `[?]` sits left of the `[+]` without touching it or the title, and
+    /// the card it opens names every key in full, beside the fleet rather than
+    /// over it.
+    #[test]
+    fn the_key_card_names_every_key_beside_the_fleet() {
+        for w in [22, 36, 60] {
+            let b = LRect::new(0, 1, w, 10);
+            let (ks, ke) = fleet_keys_span(b).expect("room for the chip");
+            let (ns, _) = fleet_new_span(b).unwrap();
+            assert!(ke < ns && ks >= 14, "w={w}: {ks}..{ke} against [+] at {ns}");
+        }
+        assert_eq!(fleet_keys_span(LRect::new(0, 1, 20, 10)), None);
+
+        let (cols, rows) = (120, 30);
+        let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+        let g = page_geom(cols, rows, &view);
+        assert_eq!(booth_keys_card(cols, &g, &view), None, "closed by default");
+        view.booth_keys = true;
+        let r = booth_keys_card(cols, &g, &view).expect("a 120x30 stage has room");
+        assert!(r.x >= booth_columns_of(cols, &g, &view).fleet_box.right(), "{r:?}");
+        let mut buf = Buffer::empty(Rect::new(0, 0, cols, rows));
+        draw_overlay_layer(&mut buf, cols, rows, &view, &Theme::default());
+        let lines: Vec<String> = (r.y..r.y + r.height)
+            .map(|y| (r.x..r.right()).map(|x| buf.cell((x, y)).unwrap().symbol()).collect())
+            .collect();
+        for (key, what) in BOOTH_KEYS {
+            assert!(
+                lines.iter().any(|l| l.contains(&format!("{key:<7}{what}"))),
+                "{key} {what} is missing or clipped:\n{}",
+                lines.join("\n")
+            );
+        }
+        assert!(lines.iter().any(|l| l.contains("▲ asks") && l.contains("· idle")));
     }
 
     /// The page draws all three columns: the fleet grouped by machine, the

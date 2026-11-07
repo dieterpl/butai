@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.6: BOOTH has a key card.** `[?]` on the FLEET border, or `?`
+  with the cursor on the fleet, shows a card beside the list with every key
+  the fleet answers (`j` `k`, `enter`, `a`, `A`, `x`, `z`, `Z`, `tab`, `m`,
+  `n`, `alt-w`, `alt-0`), what the `↗` `✕` `+` buttons and the map's `━`
+  do, and what each icon means. It is not modal, so those keys keep working
+  while it is up. `esc`, `?` or a click on it closes it. On the fleet, `?`
+  now opens the card; the full reference is still the footer's `[help]`.
 - **1.5.0-dev.5: BOOTH draws each agent once, with an icon, and its scrollbar
   shows where the news is.** The NEEDS YOU tray is gone. It drew every waiting
   agent a second time above the tree. Now each agent has one row, in the same
