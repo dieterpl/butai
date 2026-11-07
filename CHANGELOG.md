@@ -118,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.7: the Mac builds run again.** GitHub retired the `macos-14`
+  runner image, so the release and CI jobs for both Apple targets were refused
+  before they started. That left 1.5.0-dev.6 tagged but never published. Both
+  workflows now build on `macos-15`. This release carries everything 1.5.0-dev.6
+  would have.
+
 - **1.5.0-dev.3: BOOTH lists machines in the same order on every start.** The
   fleet listed machines in the order their connections came up. Remembered
   machines are dialled in parallel, so on a restart where a different one

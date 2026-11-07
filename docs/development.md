@@ -694,8 +694,8 @@ the project README:
 | `armv7-unknown-linux-gnueabihf` | `cross` | ubuntu-latest | |
 | `x86_64-unknown-linux-musl` | `cross` | ubuntu-latest | static: Alpine, distroless, scratch |
 | `aarch64-unknown-linux-musl` | `cross` | ubuntu-latest | static |
-| `aarch64-apple-darwin` | `cargo` | macos-14 | native on purpose |
-| `x86_64-apple-darwin` | `cargo` | macos-13 | native on purpose |
+| `aarch64-apple-darwin` | `cargo` | macos-15 | native on purpose |
+| `x86_64-apple-darwin` | `cargo` | macos-15 | native on purpose |
 
 macOS builds natively because the linker ad-hoc signs the binary as a side
 effect, and **arm64 macOS refuses to exec an unsigned binary** (`Killed: 9`).

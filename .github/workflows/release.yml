@@ -68,13 +68,13 @@ jobs:
           # Linux would need a separate signing step to produce a runnable
           # binary at all.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             cross: false
           # Built on the arm64 runner too: either Mac links both Apple arches,
           # and the macos-13 Intel pool queues for far longer than the build
           # takes. Still natively ad-hoc signed, since the host is macOS.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
             cross: false
 
           # Native Windows terminal client and ConPTY daemon.
