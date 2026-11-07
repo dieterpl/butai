@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.5: BOOTH draws each agent once, with an icon, and its scrollbar
+  shows where the news is.** The NEEDS YOU tray is gone. It drew every waiting
+  agent a second time above the tree. Now each agent has one row, in the same
+  fixed order as before, and one icon that says both what happened and whether
+  you have seen it. The icons are `▲` asking, `●` new, `■` crashed, `○` read,
+  `□` a crash you have read, `–` exited, `·` idle, and a spinner while working.
+  `[open]` and `[x]` are `↗` and `✕` in fixed columns at the right edge. They
+  are faint except on the cursor's row. A project's `[+ claude]` is a `+` in
+  the same column. A role is drawn as a filled chip in its colour (` lead `),
+  then the `#labels`, then the origin, on BOOTH and on the AGENTS rail. When
+  the list is longer than the column, its right border becomes a map of the
+  whole list: red where an agent is asking or crashed, blue where one has
+  unread news, and grey for the part on screen. That includes rows scrolled
+  out of view, and a folded project's agents count on the project's row.
+  Clicking a cell moves the cursor to that row. The bottom border shows the
+  position, e.g. `5–30 of 35`.
+- **A folder on a server opens from its machine's row.** Each machine row in
+  BOOTH has a `+`, and `a` on the row does the same. It opens the folder
+  browser on that machine, titled `OPEN ON gpu-box · /home/me/proj`, without
+  the which-machine question `n` asks first. Every folder in the browser shows
+  `git` if it is a repository and `open · 2 agents` if it is already a
+  workspace on that machine. The daemon's `GET /v1/fs` listing has a new `git`
+  field on each entry, which defaults to false, so an older daemon simply
+  shows no `git` marks.
+- **The tab bar's arrows say what they hide.** `[<] [>]` are now `‹ 2 ▲●` at the
+  left of the tabs and `▲● 5 ›` at the right. Each shows how many tabs are
+  hidden on that side, plus `▲` if one of them has an agent asking and `●` if
+  one has unread news, so an agent asking in tab nine shows from tab two.
+
 - **1.5.0-dev.4: tags can be read and set from the CLI.** `butai agent tag
   <TARGET>` prints an agent's role, labels and who started it, e.g. `pane 7 lead
   #review (cli)`. `--role`, `--no-role`, `--label`, `--unlabel` and `--clear`

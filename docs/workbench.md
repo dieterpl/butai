@@ -87,11 +87,24 @@ twelfth project therefore cannot take away the button that opens a thirteenth.
 
 The strip scrolls to keep the workspace you are in whole, and only that far, so
 switching between neighbours does not shuffle the row. What does not fit is
-reached through `[<]` and `[>]` at the strip's right end: each one selects the
-nearest workspace the strip is not showing, which is also what brings it into
-view. They are the pointer's spelling of `alt-<` / `alt->`, and each is drawn
-only when there is something that way. A chip at the strip's edge is truncated
-where the drawing truncates it and is clickable across the part you can see.
+reached through an arrow at each end of the strip, pointing the way its tabs are
+hidden:
+
+```
+ [ booth!] │ ‹ 2 ▲●    3:notes    4:dotfiles    5:gpu-box:diffusion   ● 4 ›  [views v]  [4 hosts] [+ new]
+```
+
+Each arrow says how many tabs are behind it, then `▲` if an agent in one of them
+is asking and `●` if one has a turn you have not read — only for machines we are
+still hearing from, for the reason a chip's own `!` is. **The count and the marks
+are the point of the arrow.** `[<] [>]`, both at the right end, said there was
+more and nothing about whether any of it needed you, so an agent asking in tab
+nine was invisible from tab two. A press on an arrow selects the nearest
+workspace the strip is not showing on that side, which is also what brings it
+into view; they are the pointer's spelling of `alt-<` / `alt->`, and each is
+drawn only when there is something that way. A chip at the strip's edge is
+truncated where the drawing truncates it and is clickable across the part you
+can see.
 
 Below about 52 columns the reservation is dropped instead and the chips take the
 whole row: on a bar that narrow the tabs are the only thing left worth drawing,
@@ -304,7 +317,19 @@ steps into it) and `..`. With more than one machine connected and no directory t
 start from, a MACHINE picker asks *where* first — asked once, at the start, rather
 than discovered after you have picked a path that does not exist over there. Each
 press asks again rather than remembering, because a workspace silently landing on
-a machine you stopped thinking about is worse than one extra keystroke.
+a machine you stopped thinking about is worse than one extra keystroke. BOOTH's
+machine rows are the exception that proves it: their `+` *is* the answer, so the
+browser opens on that machine without the question, titled
+`OPEN ON gpu-box · /home/me` — the machine first, because `/home/me` on its own
+exists on every machine you have.
+
+Each folder says what it is beside its name: `git` when it is a repository's
+root, `open · 3 agents` when it is already a workspace on that machine. The
+question this list answers is "which of these is my project", and a bare column
+of names made you step into each one to find out. The daemon's `GET /v1/fs`
+listing carries the `git` flag on every entry (absent from an older daemon, which
+reads as `false`); the `open` mark is the client's own, from the tabs it already
+has.
 
 Closing asks with the workspace named — `close butai and kill what is running in
 it` — and opens with **no** selected.
@@ -688,32 +713,54 @@ columns: the left rail would list one workspace's agents beside a column listing
 everyone's.
 
 ```
-┌ FLEET (4) ────────────┐┌ claude · local:butai ────────┐┌ COMPUTE ──────────────┐
-│ ! gemini · gpu-box:di ││                              ││                       │
-│                       ││                              ││                       │
-│                       ││                              ││                       │
-│                       ││                              ││                       │
-├ NEEDS YOU (1) ────────┤│                              ││                       │
-│v local               3││                              ││> local ██   3 RAM  59%│
-│  v butai   [open] [+] ││  ? Run the migration?        ││> gpu-b ██   1 CPU  97%│
-│     ✓  claude   [open]││                              ││                       │
-│     ·  codex    [open]││                              ││                       │
-│  > caliper [open] [+] ││                              ││                       │
-│  v notes   [open] [+] ││                              ││                       │
-│v gpu-box             1││                              ││                       │
-│  v diffusi…[open] [+] ││                              ││                       │
-│     !  gemini   [open]││                              ││                       │
-└───────────────────────┘└──────────────────────────────┘└───────────────────────┘
+┌ FLEET (21) ─────────────[+]┐┌ claude · local:butai ────────┐┌ COMPUTE ────────────────┐
+│v local              7 +    ┃│                              ││                         │
+│├─v butai              + ↗  ┃│                              ││> local    ██  7 RAM  59%│
+││ ├─ ▲  claude  lead  +1 ↗ ✕━│  ? Run the migration?        ││> build-01 ██  5 CPU  71%│
+││ ├─ ⠋  codex    worker  ↗ ✕━│                              ││> gpu-box  ██  4 CPU  97%│
+││ ├─ ●  aider            ↗ ✕┃│                              ││> mini     ██  5 RAM  22%│
+││ └─ ·  gemini           ↗ ✕┃│                              ││                         │
+│├─v caliper            + ↗  ━│                              ││                         │
+││ ├─ ○  claude     loop  ↗ ✕┃│                              ││                         │
+││ └─ ■  codex        cli ↗ ✕┃│                              ││                         │
+│├─v notes    no agents + ↗  ┃│                              ││                         │
+│└─v dotfiles           + ↗  ┃│                              ││                         │
+│  └─ –  claude           ↗ ✕━│                              ││                         │
+│v build-01           5 +    ┃│                              ││                         │
+│  ⋮                         ┃│                              ││                         │
+└─ 1–26 of 35 ───────────────┘└──────────────────────────────┘└─────────────────────────┘
 ```
 
-That is a 100-column terminal, which is where the fallbacks start to bite: the
-meter has shrunk to two cells and project buttons shorten to `[+]`.
-Wider columns spell out the preferred agent, such as `[+ claude]`.
+That is a 120-by-30 terminal with rows 14 to 26 of the list left out (the `⋮`).
+The cursor is on `claude` in `butai`, which is why the stage shows its question.
 
-The `[+]` on the FLEET box's top border is different from those: it opens a
-folder as a **new workspace**, the same list `n` and the tab bar's `[+ new]`
-open. It is left out only when the column is too narrow to carry it beside the
-title.
+**Every button is one cell, in a fixed column at the right edge.** An agent row
+has `↗`, go there, and `✕`, end that chat. A project row has `+`, start the
+project's agent, and `↗`, go to the workspace — plus a `✕` that closes the
+workspace, drawn on the cursor's row only and only while the fleet has the
+keyboard (see below). A machine row has `+`, which opens a folder on *that*
+machine as a new workspace. The columns are the same on every row, so the
+buttons line up down the list and never move as names grow or the cursor
+arrives. They are faint except on the cursor's row: the buttons that answer the
+keys are the ones that look pressable, and the rest stay clickable. Under the
+ASCII glyph set `↗` draws as `>` and `✕` as `x`.
+
+This replaced `[open] [x]` on every agent and `[+ claude]` or `[+]` on every
+project. Six cells for `[open]` on every row meant the right third of the column
+was the same two words stacked down the page, and the titles they crowded were
+the part that differs from row to row. Below the narrowest column that can
+afford the buttons — the icon, a few cells of title and the five cells `+ ↗ ✕`
+take — a row is all title and the keys are the way, which is what it was before
+there were buttons.
+
+The `[+]` on the FLEET box's top border opens a folder as a **new workspace**,
+the same list `n` and the tab bar's `[+ new]` open, which asks which machine
+first when there is more than one. A machine row's `+` skips that question,
+because the row has already answered it: the browser opens on that machine,
+titled `OPEN ON build-01 · <path>`. `a` on a machine row does the same. The two
+`+`s share a column on purpose — a project's starts an agent in it, a machine's
+starts a project on it. The top-border `[+]` is left out only when the column is
+too narrow to carry it beside the title.
 
 **It is a list of projects that happens to contain agents**, and that is a change
 from what it was. The rows used to be built by walking the agent list and
@@ -721,56 +768,78 @@ emitting a header whenever the workspace changed, so a project with nothing
 running in it produced no rows at all — the one page listing every project on
 every machine could not show you the ones you had not started anything in, which
 are exactly the ones you want to start something in. They come from the machine
-and project lists now, so `notes` above has a row and so does `mini`, which is
-connected with nothing open on it.
+and project lists now, so `notes` above has a row and says `no agents`, and a
+machine connected with nothing open on it still has its own row and its `+`.
 
-**The NEEDS YOU tray** gathers agents needing attention above the fleet, even
-when their projects are folded. It ranks questions first, then unread crashes,
-then unread completed turns. Its fixed height keeps the fleet from shifting
-when attention changes; when empty, it says `nothing needs you`.
+**What needs you is drawn where it is.** Each agent appears once, on its own row,
+and the row's icon says what it is doing and whether you have seen it. There used
+to be a NEEDS YOU tray at the top of the column that drew every waiting or unread
+agent a second time; it is gone, and what it said is the row's icon and the
+scrollbar's map now (below). The tray held four rows and a rule of the column to
+answer "what needs me", mostly about rows you could already see; the ones it was
+really for were the rows scrolled out of view, and those are what the map is for.
 
-The tray holds copies, so each agent keeps its place in the fleet. Clicking a
-copy selects its original row and preview; unfold its project or machine first
-if that row is hidden. The previewed agent stays highlighted in both lists even
-when the keyboard is focused on its pane.
-
-Each chat has an `[x]` button in the fleet and in NEEDS YOU. It ends that chat
-on its own machine; the tray button also works when the project is folded.
-The terminal follows the existing `x` key behavior and closes immediately;
-the web client uses its existing confirmation dialog.
+The previewed agent stays highlighted even when the keyboard is focused on its
+pane. Each chat has a `✕` in its row's last cell, which ends that chat on its own
+machine. The terminal follows the `x` key and closes immediately; the web client
+uses its confirmation dialog.
 
 **The fleet list** is grouped by machine and then by project, and its order is a
 pure function of identity — machine, then tab order, then spawn order. Machines
 are `local` first and then by name, not in the order they connected: remembered
 machines are dialled in parallel at start, so that order changed from one
-restart to the next. NEEDS YOU breaks its ties and COMPUTE lists its machines in
-the same order. It reads no agent state at all, so a row is where it was an hour ago and a status change
+restart to the next. COMPUTE lists its machines in the same order. It reads no
+agent state at all, so a row is where it was an hour ago and a status change
 redraws a glyph in place. (Sorting by urgency was measured and rejected: rows
 travelled ~174 positions per ten sampler ticks at 24 agents, and hysteresis only
 brought that to 169.) Projects are grouped by *id* rather than by name: two
 machines routinely have a project of the same name open, and one machine may have
 two, so the name is left to the drawing.
 
-Each agent has a simple status indicator in a fixed three-cell field:
+Each agent has one icon, in a fixed three-cell field:
 
-| indicator | means |
+| icon | means |
 |---|---|
-| `.` → `..` → `...` | working — loading dots advance every 1.2 seconds |
-| `!` | waiting for you |
-| `✓` | a finished turn |
+| `▲` | asking — blocked on you (red) |
+| braille spinner | working |
+| `●` | a result you have not read, or a clean exit you have not seen (blue) |
+| `○` | a result you have read |
+| `■` | crashed, and you have not looked (red) |
+| `□` | a crash you have seen (red, not bold) |
+| `–` | exited cleanly, and read |
 | `·` | idle |
-| `x` | exited; a nonzero exit is shown in danger colour |
 
-The markers keep their meaning throughout a session; age does not change them.
-A faint box-drawn spine connects machines to projects and projects to agents,
-with branches ending at the last visible sibling after folding.
+**Filled means unread, hollow means read**, so the row says both what happened
+and whether you have seen it. The old `✓` was the same mark for a turn you had
+read and one you had not, which is the one question a fleet list is for. A crash
+stays red once read: you having seen a crash does not make it less of one. These
+icons are BOOTH's own; the workspace's AGENTS rail keeps its sprites. The marks
+keep their meaning throughout a session; age does not change them. A faint
+box-drawn spine connects machines to projects and projects to agents, with
+branches ending at the last visible sibling after folding.
 
-The status indicator is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
-whatever it wrote into its terminal title, and it is pinned between the sprite
+The icon is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
+whatever it wrote into its terminal title, and it is pinned between the icon
 and the name here exactly as the AGENTS rail pins it. Only the name marquees.
 
+**The scrollbar is a map of the whole list.** When the fleet is longer than its
+column, the FLEET box's right border becomes a scrollbar with one cell per slice
+of the list: a red `━` where a row in that slice is asking or crashed while you
+were away, a blue `━` where one has news you have not read, and a muted `┃` for
+the part that is on screen. A folded project counts its hidden agents on its own
+row, or folding one would hide a question from the only place that still shows
+it. The bottom border says where the window is, as ` 1–26 of 35 `.
+
+It answers "what needs me" on the border the list already has, at the place in
+the list where each one actually is. A press on any cell moves the cursor to the
+loudest row in that slice — asking or crashed first, then news — or to its first
+row when none has anything to say, and the cursor moving is what scrolls it into
+view. A red cell that landed on the slice's first row rather than the asking one
+would be a button that shows you the wrong agent. While the whole list fits there
+is no map: nothing is out of view, and every row's own icon already says it.
+
 **The middle column is a live pane**, not a picture of one. The keyboard starts on
-the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet or NEEDS YOU tray
+the fleet, so `j`/`k` walk rows. Clicking an agent in the fleet
 selects its preview and immediately hands the keyboard to that pane. Clicking
 a machine or project selects it and keeps the keyboard on the fleet. `tab`,
 a click on the pane, or starting an agent also hands it to the pane, and everything you type from then on is that agent's. `alt-w` or
@@ -786,21 +855,21 @@ screen rather than a cursor that keeps pointing the pane somewhere it has left. 
 project with nothing running previews nothing, and a machine row previews
 nothing: there is no honest answer and the stage says so.
 
-**Clicking an agent row only moves the cursor.** `[open]`, right-aligned on it, is
-the one thing on that row which travels: it goes to that agent's workspace on its
-machine, which moves the tab bar out from under you. `enter` is its keyboard
+**Clicking an agent row only moves the cursor.** `↗`, near the right edge of it,
+is the one thing on that row which travels: it goes to that agent's workspace on
+its machine, which moves the tab bar out from under you. `enter` is its keyboard
 spelling. This split exists because a click that meant "let me look at this" was
-throwing the whole workbench onto somebody else's project. `[open]` is dropped
-when the column is too narrow for it, and then the two-step click is the only way.
+throwing the whole workbench onto somebody else's project. On a column too narrow
+for the buttons there is no `↗`, and `enter` is the way.
 
 That rule is the whole list's, project rows included: **text looks, buttons act.**
 A project's name puts the cursor on the project — which points the middle column
 at the agent in it that most needs you — and travels nowhere. It briefly did
 travel, on the grounds that a project row had nothing to preview; it has one, so
 that was the same accidental route off the page in different clothes. `enter` is
-the keyboard route to a project or agent; both have an explicit `[open]` button.
-Nothing here takes
-you somewhere by accident: every route out is a field you aimed at, or a key.
+the keyboard route to a project or agent; both have an explicit `↗` button.
+Nothing here takes you somewhere by accident: every route out is a field you
+aimed at, or a key.
 
 **`a` starts a session in the project the cursor is in**, and `A` picks the type
 whatever the project says. They are the rails' own two verbs, bound here
@@ -810,13 +879,17 @@ project or even the same machine. **The page does not move**, because a button
 that started something *and* threw the tab bar onto another machine is the bug
 that made agent rows two-step in the first place.
 
+On a *machine* row `a` and the row's `+` open the folder browser on that machine
+instead: what starts on a machine is a project, and the question `n` would have
+asked first — which machine? — is the row you are on.
+
 **What does move is the cursor, and the keyboard with it.** Once the new agent
 has a row in the fleet, the cursor goes to that row — which points the middle
 column at its screen, because the preview follows the cursor — and the focus goes
 to the middle column, so the next thing you type is the first thing that agent
 reads. Nothing else changes: same page, same tab, same machine. A project that was
 folded opens on the way, because a folded project has no agent rows at all and the
-fold would otherwise be the one thing standing between `[+ claude]` and the pane
+fold would otherwise be the one thing standing between the row's `+` and the pane
 it promised you — an extra sprite in a strip is not an answer to "start an agent
 and put me in it".
 
@@ -832,11 +905,12 @@ while the page is still BOOTH and the cursor has not moved: an agent that dies
 before it is ever listed must not leave a cursor move armed to fire at whatever
 you are doing a minute later.
 
-`[+ claude]` on the row is the same button under the pointer, and it names what
-it will start for the reason the AGENTS rail's does: a button that spawns on a
-single click with nothing in between is the only place you can see what that
-click is about to do. It falls back to `[+]` and then to nothing as the column
-narrows, exactly as `[open]` already degrades.
+`+` on the row is the same button under the pointer. It used to spell out what
+it would start, as `[+ claude]`, falling back to `[+]` on a narrow column; one
+cell cannot, and in exchange it sits in the same column on every row and never
+pushes the name aside. What it starts is decided exactly as `a` decides it,
+below, and `A` is the key for anything else. Like the other buttons, it is gone
+on a column too narrow to afford them.
 
 **What a project starts** is its own `[agents] autostart`, then the client's
 `default_agent` pin, then the picker. Two steps and no third: a project that
@@ -874,9 +948,9 @@ the fleet.
 A single click selects and previews. Double-click means two nearby presses on
 the same machine/project within 400ms. Keyboard input, scrolling, dragging and
 other controls cancel the pending pair. The chevron and `z` retain their
-single-press folding behavior. Agent names give focus to the preview; `[open]`
-and `enter` still travel to the agent's workspace. Explicit `[+]`, `[x]` and
-`[open]` buttons keep their own actions.
+single-press folding behavior. Agent names give focus to the preview; `↗`
+and `enter` still travel to the agent's workspace. The explicit `+`, `↗` and
+`✕` buttons keep their own actions, and so does the scrollbar.
 
 **What the headline names: rates first, and fullness only when it is an
 emergency.** CPU, RAM and GPU are *rates* — what the machine is doing this
@@ -911,28 +985,25 @@ a process whose transcript is on disk. On a project row it is the workspace and
 everything running in it, so it asks — in the tab bar's own box and its own
 words, because that is the same act reached from somewhere else.
 
-`[x]` is that press under the pointer, right of `[+]`, and it is drawn **on the
+`✕` is that press under the pointer, right of `↗`, and it is drawn **on the
 cursor's row and nowhere else — and only while the fleet has the keyboard**. That
 is the tab bar's rule for its own `[x]` and it has the same reason: a button that
 ends a workspace has to be one you aimed at, not one sitting under a row you were
-passing, and a cursor belongs to the column being steered. It costs four cells,
-which on this column is a sprite or half a name — worth spending on the row you
-are looking at and not on the ten you are not.
+passing, and a cursor belongs to the column being steered.
 
-Because those four cells are spent at the right end, whether the row is the
-cursor's decides where every control left of it sits. The drawing and the
-hit-test therefore ask *one function* whether a row is the cursor's, rather than
-each spelling the condition out. They did each spell it out, and drifted by
-exactly those four cells: with the cursor on a project row and the keyboard on
-the middle column, `[+ claude]` was drawn flush right with no `[x]` beside it,
-while a press on it resolved four cells to the left — so clicking the button you
-could see opened the close-workspace confirm, or folded the project.
+Its cell is the agents' `✕` column, and it stays empty on every other project
+row, so the cursor arriving moves nothing. That was not always so: the old `[x]`
+cost four cells at the right end, so whether the row was the cursor's decided
+where every control left of it sat, and when the drawing and the hit-test each
+spelled that condition out they drifted by exactly those four cells — clicking
+the `[+ claude]` you could see opened the close-workspace confirm, or folded the
+project. The fixed columns remove the shift, and the two still ask *one
+function* whether a row is the cursor's, so a press can never land on a `✕`
+nothing drew.
 
-Every control on the row keeps its place before any of them is spelled out, so a
-narrow column draws `[+] [x]` rather than `[+ claude]` and no way to close: `[+]`
-starts exactly the agent `[+ claude]` would, and `[x]` has no shorter form. What
-neither of them ever costs is a sprite — a folded project that cannot say what is
-in it is a row you have to unfold to read.
+What the buttons never cost is the icon: a row too narrow for `+ ↗ ✕` drops all
+three and keeps the icon and the name, because a project you cannot read the
+state of is a row you have to unfold to read.
 
 The right button on a chat opens its tag menu, here and on a workspace's AGENTS
 rail alike: a role (`lead`, `worker`, `loop`, `watch`) and labels, the same ones
@@ -941,13 +1012,19 @@ the browser's BOOTH offers, set on the daemon and left open while you pick, then
 pointer, below and right of it, and flips above or to the left where the screen
 has no room; the same menu from `m` has no pointer to follow and is centred.
 
-What the menu sets is drawn on the chat's row, in BOOTH's fleet, in NEEDS YOU
-and on the workspace's AGENTS rail, followed by who started the chat (`cli`,
-`tui`, `web`, or `agent` for a `butai agent spawn` run inside a pane):
+What the menu sets is drawn on the chat's row, in BOOTH's fleet and on the
+workspace's AGENTS rail, followed by who started the chat (`cli`, `tui`, `web`,
+or `agent` for a `butai agent spawn` run inside a pane):
 
 ```
-├─ !  codex    lead #review cli [open] [x]
+├─ ▲  codex   lead  #review cli ↗ ✕
 ```
+
+On both, the role is a filled chip — ` lead ` with a cell of padding each side,
+bold, in the ground colour on the role's own colour — then the labels as `#name` in their
+colours, then the origin in grey. The chip is what makes a role read as a tag
+rather than as the end of the title: `codex lead #review` was three words of one
+sentence, and a filled cell is the one shape no agent's title can draw.
 
 Each role has a colour of its own (`lead` accent, `worker` ok, `loop` info,
 `watch` attention), the four suggested labels have fixed ones (`review` info,
@@ -955,13 +1032,10 @@ Each role has a colour of its own (`lead` accent, `worker` ok, `loop` info,
 picked from its name, so it is the same colour on every row. All of them are
 the theme's own roles. A narrow row gives way in order — every label, then a
 count of them (`lead +2 cli`), then the origin, then the count, then the role —
-and never cuts into the chat's name; NEEDS YOU, the narrowest list, draws tags
-only beside a name that fits whole. `m` opens the same menu, and the `[x]` on a
-chat's row opens just its three close rows. Either acts on the row's own project
-rather than on the tab you are looking at. Neither asks
-first, for the reason the rail's `x` does not: an agent is a process whose
-transcript is on disk. On a
-project row the menu is the tab bar's own, against *its* chip; a machine row has
+and never cuts into the chat's name. `m` opens the same menu, and the `✕` on a
+chat's row ends it at once. Either acts on the row's own project rather than on
+the tab you are looking at. Neither asks first, for the reason the rail's `x`
+does not: an agent is a process whose transcript is on disk. On a project row the menu is the tab bar's own, against *its* chip; a machine row has
 none, because there is nothing generic to offer about a host here that the tab
 bar does not already offer about its tabs.
 
@@ -1655,7 +1729,11 @@ lockfile in the repo. Two consequences worth knowing:
 | the pinned glyph an agent writes into its own title | `crates/butai-client/src/chrome/model.rs` (`split_status_glyph`) |
 | the CHANGES rail: rows, label, verbs, split | `crates/butai-client/src/chrome/mod.rs` (`change_rows`, `changes_label`, `changes_verbs`, `changes_split`) |
 | every verb table, the footer packing, the `?` text | `crates/butai-client/src/verbs.rs` |
-| BOOTH: columns, fleet order, `[open]` | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `fleet_open_span`) |
+| BOOTH: columns, fleet order, the `+ ↗ ✕` buttons | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `fleet_open_span`, `fleet_chat_close_span`, `fleet_machine_add_span`) |
+| BOOTH: a row's icon | `crates/butai-client/src/chrome/model.rs` (`booth_icon`) |
+| BOOTH: the scrollbar map and where a press on it lands | `crates/butai-client/src/chrome/mod.rs` (`fleet_map`, `row_news`, `booth_fleet_map_at`) |
+| the tab bar's arrows and what they count | `crates/butai-client/src/chrome/mod.rs` (`tab_arrow_runs`) |
+| the folder browser's `git` and `open` marks | `crates/butai-client/src/workbench.rs` (`browse_overlay`, `browse_place`) |
 | BOOTH: which projects the fleet lists, and what each starts | `crates/butai-client/src/workbench.rs` (`fleet_spaces`), `crates/butai-client/src/chrome/mod.rs` (`SpaceRow`) |
 | BOOTH: what the cursor is on, and what the pane shows | `crates/butai-client/src/chrome/mod.rs` (`booth_selected`, `booth_preview`), `crates/butai-client/src/workbench.rs` (`booth_cursor`) |
 | BOOTH: folding, and what `Z` folds | `crates/butai-client/src/chrome/mod.rs` (`Folds`, `booth_space_keys`), `crates/butai-client/src/workbench.rs` (`fold_cursors_space`) |

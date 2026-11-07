@@ -280,12 +280,10 @@ pub fn at(
 /// by, and no other caller has a reason to build those. The loop, which holds
 /// both already, asks this first while BOOTH is up and falls back to [`at`].
 ///
-/// **The NEEDS YOU tray answers too**, and answers as the agent it is a copy of.
-/// The tray is the shortest route to the row that is actually asking for you,
-/// and it was the one list on the page the pointer could not reach: a press on
-/// it fell through to nothing while the identical row six lines down worked.
-/// Since a tray row *is* the fleet row, it resolves to the same index and means
-/// the same thing.
+/// **The scrollbar answers too.** It is a map of the whole list, and a press on
+/// one of its red or blue cells puts the cursor on the row that cell is about,
+/// which scrolls it into view: the route to an agent asking for you from the
+/// rows that are not on screen.
 // Eight, and the three lists are the point: this region's contents cross
 // daemons, so resolving it needs the fleet, the projects and the machines that
 // group them. The alternative is a struct built per press by the one caller
@@ -295,7 +293,6 @@ pub fn on_fleet(
     cols: u16,
     rows: u16,
     view: &View,
-    fleet: &[chrome::AllAgentRow<'_>],
     spaces: &[chrome::SpaceRow<'_>],
     machines: &[chrome::MachineRow<'_>],
     x: u16,
@@ -306,24 +303,9 @@ pub fn on_fleet(
     }
     let geom = chrome::page_geom(cols, rows, view);
     let c = chrome::booth_columns_of(cols, &geom, view);
-    // The tray sits above the list and the two rectangles are disjoint, so this
-    // is a first look rather than a precedence: only one of them can contain the
-    // point. It carries no `[open]` — four rows are too few to spend six columns
-    // on a button, and the copy's original is right there in the list with one.
-    //
-    // A tray copy resolves to its original's *row*, which is what the cursor
-    // counts. An original folded away inside its project has no row to move to,
-    // and the press does nothing rather than moving the cursor somewhere else —
-    // the tray is still the shortest route to it, through unfolding.
     let booth = chrome::booth_rows(spaces, machines, &view.folds);
-    if let Some(agent) = chrome::booth_tray_row_at(&c, fleet, x, y) {
-        if chrome::fleet_chat_close_span(c.tray_rows).is_some_and(|(a, b)| x >= a && x < b) {
-            return fleet.get(agent).map(FleetHit::end_agent);
-        }
-        return booth
-            .iter()
-            .position(|r| matches!(r, chrome::BoothRow::Agent { sel, .. } if *sel == agent))
-            .map(FleetHit::Row);
+    if let Some(row) = chrome::booth_fleet_map_at(&c, &booth, view.booth_sel, x, y) {
+        return Some(FleetHit::Row(row));
     }
     let row = chrome::booth_fleet_row_at(&c, &booth, view.booth_sel, x, y)?;
     // Buttons before the row they sit on, or the row would swallow them — the
@@ -376,13 +358,13 @@ pub fn on_fleet(
             // by throwing the tab bar onto another machine is the very bug that
             // made agent rows stop travelling. One rule for the whole list now:
             // text looks, buttons act. `enter` still travels, and so does
-            // `[open]` on an agent row.
+            // `↗` on an agent row.
             //
             // The name is still resolved apart from the rest of the row, since
             // the rest of it folds and the two must not be one press with two
             // outcomes depending on where in a word it lands.
             // Folding is a small, explicit disclosure control. The rest of
-            // the row selects/previews; `[open]` above is what travels.
+            // the row selects/previews; `↗` above is what travels.
             if x == l.mark_x {
                 Some(FleetHit::Fold(row))
             } else {
@@ -390,6 +372,9 @@ pub fn on_fleet(
             }
         }
         chrome::BoothRow::Machine { label, agents, .. } => {
+            if chrome::fleet_machine_add_span(c.fleet_rows).is_some_and(|(a, b)| x >= a && x < b) {
+                return Some(FleetHit::Folder(row));
+            }
             let (start, end) = chrome::fleet_machine_name_span(c.fleet_rows, *agents);
             let drawn = (label.chars().count() as u16).min(end.saturating_sub(start));
             Some(if x >= start && x < start + drawn {
@@ -427,7 +412,7 @@ pub fn on_compute(
 }
 
 /// What a press on BOOTH's fleet list landed on. Navigation carries a *row*
-/// index. Closing a chat carries its identity, including for folded tray copies.
+/// index. Closing a chat carries its identity.
 ///
 /// **A press on an agent row is not the same act as going to it, which is why
 /// BOOTH's list does not take the rails' two-step.** A second click on a rail
@@ -443,7 +428,7 @@ pub fn on_compute(
 /// grounds that a project row had nothing to preview; it has one, the agent in
 /// it that most needs you, so that was a route out of the page nobody aimed at
 /// wearing the same clothes as the bug above. **Text looks, buttons act**, and
-/// the only things here that travel are `[open]` and `enter`.
+/// the only things here that travel are `↗` and `enter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FleetHit {
     /// An individual chat's `[x]`, independent of the selected workspace.
@@ -451,8 +436,11 @@ pub enum FleetHit {
     /// Any row's text — an agent, a project's name: put the cursor on it, and
     /// the preview with it. Never more.
     Row(usize),
-    /// The `[open]` button: go to that agent now, wherever it lives.
+    /// The `↗` button: go to that agent or project now, wherever it lives.
     Open(usize),
+    /// A machine's `+`: pick a folder on that machine and open it as a new
+    /// workspace.
+    Folder(usize),
     /// A project's `[+]`: start its preferred agent, without moving the page.
     New(usize),
     /// A project's `[x]`: close that workspace, once the confirm says so.
@@ -922,7 +910,7 @@ mod tests {
 
         let (name_x, _) = chrome::fleet_machine_name_span(c.fleet_rows, 2);
         assert_eq!(
-            on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, name_x, c.fleet_rows.y),
+            on_fleet(WIDE, ROWS, &view, &spaces, &machines, name_x, c.fleet_rows.y),
             Some(FleetHit::Row(0)),
             "machine names must select first, so a double-click folds only once",
         );
@@ -935,7 +923,7 @@ mod tests {
                 !matches!(t, Target::Rail(..) | Target::System(_)),
                 "row {y} of the fleet resolved to a hidden rail: {t:?}"
             );
-            let hit = on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, c.fleet_rows.x, y);
+            let hit = on_fleet(WIDE, ROWS, &view, &spaces, &machines, c.fleet_rows.x, y);
             if let Some(hit) = hit {
                 seen.push((y, hit));
             }
@@ -955,7 +943,7 @@ mod tests {
             "every row should answer, as the thing it is"
         );
 
-        // `[open]` is a button on the row, not the row: pressing it goes there
+        // `↗` is a button on the row, not the row: pressing it goes there
         // and pressing beside it only moves the cursor. Both name the same row,
         // which is what makes the button a second verb on one row rather than a
         // second row.
@@ -963,7 +951,7 @@ mod tests {
         // Anchored to the rows the sweep above actually found agents on — the
         // list interleaves headers, so "the first two rows" is not the same
         // thing as "the first two agents".
-        let (start, end) = chrome::fleet_open_span(c.fleet_rows).expect("wide enough for [open]");
+        let (start, end) = chrome::fleet_open_span(c.fleet_rows).expect("wide enough for `↗`");
         for (y, hit) in &seen {
             let FleetHit::Row(i) = hit else { continue };
             if !matches!(i, 2 | 4) {
@@ -971,13 +959,13 @@ mod tests {
             }
             for x in start..end {
                 assert_eq!(
-                    on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, *y),
+                    on_fleet(WIDE, ROWS, &view, &spaces, &machines, x, *y),
                     Some(FleetHit::Open(*i)),
                     "column {x} of row {y} should be the jump button"
                 );
             }
             assert_eq!(
-                on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, start - 1, *y),
+                on_fleet(WIDE, ROWS, &view, &spaces, &machines, start - 1, *y),
                 Some(FleetHit::Row(*i)),
                 "the column left of the button is still the row"
             );
@@ -987,13 +975,14 @@ mod tests {
     /// Every field of a project row answers at the cells it is *drawn* on,
     /// whichever column of the page has the keyboard.
     ///
-    /// The bug this exists for: `[x]` is reserved on the cursor's row and only
-    /// while the fleet has the keyboard, and the four cells it costs carry
-    /// `[+ claude]` with them. The drawing knew that and the hit-test did not,
-    /// so as soon as you clicked the preview — or pressed tab — the cursor's
-    /// project row drew `[+ claude]` flush right with no `[x]`, while a press on
-    /// it resolved four cells left of where it looked and came back as `Close`,
-    /// opening the close-workspace confirm. Both now ask
+    /// The bug this exists for, from when the buttons were words: `[x]` was
+    /// reserved on the cursor's row only while the fleet had the keyboard, and
+    /// the four cells it cost carried `[+ claude]` with them. The drawing knew
+    /// that and the hit-test did not, so once you clicked the preview the
+    /// cursor's project row drew `[+ claude]` flush right with no `[x]`, while a
+    /// press on it came back as `Close` and opened the close-workspace confirm.
+    /// The buttons are icons in fixed columns now, so the cursor moves none of
+    /// them, but the two must still agree, and both ask
     /// [`chrome::fleet_cursor_row`], and this asserts against the layout the
     /// painter would draw rather than against columns written out here, so a row
     /// that changes shape moves the test's expectations with it.
@@ -1039,7 +1028,7 @@ mod tests {
         // middle column steering with the cursor left where it was.
         for focus in [Focus::Stage, Focus::AllAgents] {
             let view = View { page: Page::Booth, focus, booth_sel: PROJECT, ..Default::default() };
-            let hit = |x| on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, y);
+            let hit = |x| on_fleet(WIDE, ROWS, &view, &spaces, &machines, x, y);
             let drawn = chrome::space_layout(
                 c.fleet_rows,
                 &spaces[0],
@@ -1047,7 +1036,7 @@ mod tests {
                 chrome::fleet_cursor_row(&view, PROJECT),
             );
             let ((ax, ae), label) = drawn.add.clone().expect("wide enough to name the button");
-            assert_eq!(label, "[+ claude]", "{focus:?}: the wide column spells the button out");
+            assert_eq!(label, chrome::FLEET_ADD_LABEL, "{focus:?}: the project's start button");
             for x in ax..ae {
                 assert_eq!(
                     hit(x),
@@ -1097,7 +1086,7 @@ mod tests {
                 );
             }
 
-            let (px, pe) = drawn.open.expect("the workspace row draws [open]");
+            let (px, pe) = drawn.open.expect("the workspace row draws `↗`");
             for x in px..pe {
                 assert_eq!(
                     hit(x),
@@ -1106,14 +1095,14 @@ mod tests {
                 );
             }
 
-            // And `[open]` on an agent row, which is right-aligned on the
-            // column and so has never depended on the cursor. Asserted here
+            // And `↗` on an agent row, which is in a fixed column at the
+            // right edge and so has never depended on the cursor. Asserted here
             // anyway: it is the same class of mismatch, one row down.
-            let (ox, oe) = chrome::fleet_open_span(c.fleet_rows).expect("wide enough for [open]");
+            let (ox, oe) = chrome::fleet_open_span(c.fleet_rows).expect("wide enough for `↗`");
             let ay = c.fleet_rows.y + AGENT as u16;
             for x in ox..oe {
                 assert_eq!(
-                    on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, ay),
+                    on_fleet(WIDE, ROWS, &view, &spaces, &machines, x, ay),
                     Some(FleetHit::Open(AGENT)),
                     "{focus:?}: column {x} of the agent row is the jump button"
                 );
@@ -1148,20 +1137,19 @@ mod tests {
         (machines, spaces)
     }
 
-    /// A press in the NEEDS YOU tray names the agent the row is a copy of, and
-    /// the tray's empty rows name nothing.
+    /// A press on the fleet's scrollbar lands on the row its mark is about, a
+    /// machine's `+` opens a folder there, and an agent's `✕` names its chat.
     ///
-    /// The tray is a fixed four rows whether or not anything is in it, so
-    /// "resolve the row at this y" has to answer `None` below the last copy —
-    /// clamping to the nearest would make three quarters of a quiet page a
-    /// button that selects whatever is at the top of the tray.
+    /// The map is the route to a question scrolled out of view, so a red cell
+    /// that resolved to the slice's first row rather than the asking one would
+    /// be a button that shows you the wrong agent.
     #[test]
-    fn a_press_in_the_needs_you_tray_names_the_agent_it_is_a_copy_of() {
+    fn the_scrollbar_the_machine_plus_and_the_close_button_name_their_rows() {
         use butai_protocol::api::{AgentDto, AgentState};
 
-        let agent = |title: &str, pane: u64, state: AgentState| AgentDto {
+        let agent = |pane: u64, state: AgentState| AgentDto {
             pane: butai_protocol::PaneId(pane),
-            title: title.into(),
+            title: format!("agent-{pane}"),
             state,
             exited: None,
             question: false,
@@ -1172,76 +1160,63 @@ mod tests {
             labels: Vec::new(),
             origin: None,
         };
-        let calm = agent("claude", 1, AgentState::Idle);
-        let asking = agent("codex", 2, AgentState::Waiting);
-        let busy = agent("gemini", 3, AgentState::Working);
-        let row = |ws, a| chrome::AllAgentRow {
-            workspace: ws,
-            workspace_id: butai_protocol::SessionId(1),
-            agent: a,
-            host: None,
-            daemon: 0,
-        };
-        let fleet = vec![row("one", &calm), row("one", &asking), row("one", &busy)];
+        // Sixty agents in one project, the 51st asking: far below the window.
+        let agents: Vec<AgentDto> = (0..60)
+            .map(|i| agent(i, if i == 50 { AgentState::Waiting } else { AgentState::Idle }))
+            .collect();
+        let fleet: Vec<chrome::AllAgentRow<'_>> = agents
+            .iter()
+            .map(|a| chrome::AllAgentRow {
+                workspace: "one",
+                workspace_id: butai_protocol::SessionId(1),
+                agent: a,
+                host: None,
+                daemon: 0,
+            })
+            .collect();
         let sys = butai_protocol::api::SysDto::default();
-        let (machines, spaces) = booth_scaffold(&sys, &fleet, &[("one", 1, 3)]);
+        let names = [("one", 1, 60)];
+        let (machines, spaces) = booth_scaffold(&sys, &fleet, &names);
         let view = View { page: Page::Booth, ..Default::default() };
         let tabs: [Tab<'_>; 0] = [];
         let geom = chrome::page_geom(WIDE, ROWS, &view);
         let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
-        assert!(c.tray_rows.height > 1, "this terminal is tall enough for a tray");
+        let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+        let map = chrome::fleet_map(&c, &rows, 0).expect("62 rows do not fit");
+        let mx = chrome::fleet_map_x(&c);
 
-        let x = c.tray_rows.x;
-        // Row 3 of the list, not agent 1: a tray copy resolves to its
-        // original's *row*, which is the currency the cursor is counted in —
-        // machine, project, then the three agents.
+        let red = map.iter().position(|m| m.news == chrome::FleetNews::Ask).expect("a red cell");
         assert_eq!(
-            on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, c.tray_rows.y),
-            Some(FleetHit::Row(3)),
-            "the only waiting agent is the only copy in the tray, and it is on row 3"
+            on_fleet(WIDE, ROWS, &view, &spaces, &machines, mx, c.fleet_rows.y + red as u16),
+            Some(FleetHit::Row(52)),
+            "machine, project, then agent 50: the asking agent is row 52"
         );
+        // Every cell answers, with a row inside the list.
+        for y in c.fleet_rows.y..c.fleet_rows.y + c.fleet_rows.height {
+            let hit = on_fleet(WIDE, ROWS, &view, &spaces, &machines, mx, y);
+            assert!(matches!(hit, Some(FleetHit::Row(r)) if r < rows.len()), "{y}: {hit:?}");
+        }
+        // The border above and below the track is not part of it, and does not
+        // fall through to a rail BOOTH does not draw.
+        let t = at(WIDE, ROWS, &view, &tabs, 1, None, mx, c.fleet_box.y + c.fleet_box.height - 1);
+        assert!(matches!(t, Target::Nothing), "the bottom border resolved to {t:?}");
 
-        // Fold its project and the copy still answers — but there is no row to
-        // move a cursor to, so it names nothing rather than naming a row that
-        // belongs to something else.
-        let mut folded = View { page: Page::Booth, ..Default::default() };
-        folded.folds.toggle_space("local", butai_protocol::SessionId(1));
+        let (ax, _) = chrome::fleet_machine_add_span(c.fleet_rows).expect("room for `+`");
         assert_eq!(
-            on_fleet(WIDE, ROWS, &folded, &fleet, &spaces, &machines, x, c.tray_rows.y),
-            None,
-            "a copy of a folded-away agent must not select some other row"
+            on_fleet(WIDE, ROWS, &view, &spaces, &machines, ax, c.fleet_rows.y),
+            Some(FleetHit::Folder(0)),
+            "the machine row's `+` opens a folder on that machine"
         );
-        let (cx, ce) = chrome::fleet_chat_close_span(c.tray_rows).expect("chat close fits");
-        let close = FleetHit::EndAgent {
-            daemon: 0,
-            workspace: butai_protocol::SessionId(1),
-            pane: asking.pane,
-        };
-        for x in cx..ce {
-            for v in [&view, &folded] {
-                assert_eq!(
-                    on_fleet(WIDE, ROWS, v, &fleet, &spaces, &machines, x, c.tray_rows.y),
-                    Some(close),
-                    "the tray close button must name its chat even when folded"
-                );
-            }
-            assert_eq!(
-                on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, c.fleet_rows.y + 3),
-                Some(close),
-                "the original chat's close button must name the same chat"
-            );
-        }
-        for y in c.tray_rows.y + 1..c.tray_rows.y + c.tray_rows.height {
-            assert_eq!(
-                on_fleet(WIDE, ROWS, &view, &fleet, &spaces, &machines, x, y),
-                None,
-                "row {y} of the tray is empty and must name nothing"
-            );
-            // And it must not fall through to a rail BOOTH does not draw, which
-            // is the trap the fleet list below has its own assertion for.
-            let t = at(WIDE, ROWS, &view, &tabs, 1, None, x, y);
-            assert!(matches!(t, Target::Nothing), "row {y} of the tray resolved to {t:?}");
-        }
+        let (cx, _) = chrome::fleet_chat_close_span(c.fleet_rows).expect("room for `✕`");
+        assert_eq!(
+            on_fleet(WIDE, ROWS, &view, &spaces, &machines, cx, c.fleet_rows.y + 2),
+            Some(FleetHit::EndAgent {
+                daemon: 0,
+                workspace: butai_protocol::SessionId(1),
+                pane: agents[0].pane,
+            }),
+            "an agent's `✕` names its own chat"
+        );
     }
 
     /// Every chip is clickable across its whole width, and the gaps between the

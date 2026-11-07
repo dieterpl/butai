@@ -1836,7 +1836,7 @@ pub async fn run(
                                             Ok(pane) => {
                                                 // Still set, though BOOTH's own
                                                 // stage does not read it: the
-                                                // moment `[open]` or `enter`
+                                                // moment `↗` or `enter`
                                                 // takes you into that
                                                 // workspace, this is the pane
                                                 // that should be up.
@@ -1857,10 +1857,18 @@ pub async fn run(
                                     },
                                 }
                             }
+                            // A machine row's `+`, and `a` on it: what starts
+                            // on a machine is a project, so this is the folder
+                            // browser, already pointed at that machine — the
+                            // question `n` would have asked first is the row.
+                            BoothCursor::Machine { daemon, .. } => {
+                                view.browse_daemon = Some(daemon);
+                                browse_into(&daemons, &hosts, &mut view, "").await;
+                            }
                             // An agent row is *in* a project, so `a` there is
                             // not ambiguous — it means the project the agent is
                             // in, which is the row above it.
-                            BoothCursor::Agent { .. } | BoothCursor::Machine { .. } => {
+                            BoothCursor::Agent { .. } => {
                                 view.flash =
                                     Some("put the cursor on a project to start an agent".into());
                             }
@@ -1870,7 +1878,7 @@ pub async fn run(
                     }
                     Flow::FoldFleetRow => {
                         match booth_cursor(&daemons, &hosts, &view) {
-                            BoothCursor::Machine { label } => view.folds.toggle_machine(&label),
+                            BoothCursor::Machine { label, .. } => view.folds.toggle_machine(&label),
                             BoothCursor::Space { machine, id, .. } => {
                                 view.folds.toggle_space(&machine, id)
                             }
@@ -2416,7 +2424,10 @@ pub async fn run(
                             // cursor: naming a folder and opening a workspace in
                             // it is one gesture, and this is the second half of
                             // it already selected.
-                            Ok(dto) => view.overlay = Some(browse_overlay(dto)),
+                            Ok(dto) => {
+                                let place = browse_place(&daemons, &hosts, &view);
+                                view.overlay = Some(browse_overlay(dto, &place));
+                            }
                             Err(e) => {
                                 view.flash = Some(format!("new folder: {e:#}"));
                                 // Back into the picker rather than out of it. A
@@ -3972,7 +3983,28 @@ async fn open_browser(
         format!("/v1/fs?path={}", urlencode(dir))
     };
     let dto: BrowseDto = daemons[d].api.get_as(&route).await?;
-    Ok(browse_overlay(dto))
+    Ok(browse_overlay(dto, &browse_place(daemons, hosts, view)))
+}
+
+/// What the folder browser knows about the machine it is pointed at: its name,
+/// when there is more than one to tell apart, and the folders on it that are
+/// already workspaces, with how many agents each has.
+#[derive(Debug, Default)]
+struct BrowsePlace {
+    machine: Option<String>,
+    open: Vec<(String, usize)>,
+}
+
+fn browse_place(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> BrowsePlace {
+    let d = browse_daemon(daemons, hosts, view);
+    BrowsePlace {
+        machine: (daemons.len() > 1)
+            .then(|| hosts.get(d).and_then(|h| h.clone()).unwrap_or_else(|| "local".into())),
+        open: daemons
+            .get(d)
+            .map(|daemon| daemon.state.tabs.iter().map(|t| (t.cwd.clone(), t.agents)).collect())
+            .unwrap_or_default(),
+    }
 }
 
 /// The picker for a listing that has already arrived.
@@ -3982,7 +4014,14 @@ async fn open_browser(
 /// function, and asking for a listing the daemon has already sent would be a
 /// second round trip for an answer we are holding. The web client's picker
 /// splits itself the same way, for the same reason.
-fn browse_overlay(dto: butai_protocol::api::BrowseDto) -> Overlay {
+///
+/// Each folder says what it is beside its name — `git` for a repository's
+/// root, `open · 4 agents` for one that is a workspace already — because the
+/// question this list answers is "which of these is my project", and a bare
+/// column of names makes you descend into each to find out. The marks ride on
+/// the label only; [`ListOverlay::values`] keeps the bare `name/` that
+/// [`browse_step`] reads.
+fn browse_overlay(dto: butai_protocol::api::BrowseDto, place: &BrowsePlace) -> Overlay {
     // The two verbs about *here* lead, then the way out, then what is in it.
     // `[new folder]` sits beside `[open this folder]` because the two are one
     // gesture — make a project and open it — and putting it after the
@@ -3992,11 +4031,42 @@ fn browse_overlay(dto: butai_protocol::api::BrowseDto) -> Overlay {
     if dto.parent.is_some() {
         items.push(chrome::BROWSE_UP.to_string());
     }
-    items.extend(dto.entries.iter().filter(|e| e.is_dir).map(|e| format!("{}/", e.name)));
+    let mut values = items.clone();
+    let dirs: Vec<_> = dto.entries.iter().filter(|e| e.is_dir).collect();
+    // Names padded to one column so the marks line up, but never so far that
+    // one long name pushes every mark off a narrow box.
+    let pad = dirs.iter().map(|e| e.name.chars().count() + 1).max().unwrap_or(0).min(24);
+    for e in dirs {
+        let name = format!("{}/", e.name);
+        let open = place.open.iter().find(|(cwd, _)| *cwd == e.path).map(|(_, n)| *n);
+        let marks: Vec<String> = [
+            e.git.then(|| "git".to_string()),
+            open.map(|n| match n {
+                0 => "open".to_string(),
+                1 => "open · 1 agent".to_string(),
+                n => format!("open · {n} agents"),
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        items.push(if marks.is_empty() {
+            name.clone()
+        } else {
+            format!("{name:<pad$}  {}", marks.join("  "))
+        });
+        values.push(name);
+    }
+    // The machine leads, because it is the half of "where" that a path on its
+    // own does not say: `/home/me/proj` exists on every machine you have.
+    let title = match &place.machine {
+        Some(m) => format!("OPEN ON {m} · {}", dto.path),
+        None => format!("OPEN IN {}", dto.path),
+    };
     Overlay::List(ListOverlay {
-        title: format!("OPEN IN {}", dto.path),
+        title,
         items,
-        values: None,
+        values: Some(values),
         sel: 0,
         kind: ListKind::Browse { dir: dto.path },
         meters: None,
@@ -6628,7 +6698,7 @@ fn handle_rail_key(k: event::KeyEvent, focus: Focus, rows: usize, pinned: bool) 
 /// That was true of the rails' *other* verbs and never of this one: every row
 /// here is an agent, ending one is the same act on the same kind of thing, and
 /// the page you go to when you want to know what your agents are doing was the
-/// one page where you could not act on the answer. Reaching one meant `[open]`
+/// one page where you could not act on the answer. Reaching one meant `↗`
 /// to its project on its machine, `x` on the rail, then back.
 ///
 /// It does not ask, for the same reason the rails' `x` does not: an agent is a
@@ -7923,7 +7993,7 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
 /// The one list in the workbench where clicking an agent row cannot also open
 /// it: see [`hit::FleetHit`] for why. Such a row moves the cursor and nothing
 /// else — which re-points BOOTH's middle column at that agent's screen, because
-/// the preview follows the cursor — and only `[open]` travels.
+/// the preview follows the cursor — and only `↗` travels.
 ///
 /// Navigation moves the cursor first. The flows that follow carry no row
 /// index and resolve `view.booth_sel` when they run, so a click and the act it
@@ -7939,7 +8009,9 @@ fn fleet_click(hit: hit::FleetHit, agent_row: bool, view: &mut View) -> Flow {
         }
         hit::FleetHit::Row(row) => (row, Flow::Continue),
         hit::FleetHit::Open(row) => (row, Flow::OpenFleetRow),
-        hit::FleetHit::New(row) => (row, Flow::NewFleetAgent { pick: false }),
+        hit::FleetHit::New(row) | hit::FleetHit::Folder(row) => {
+            (row, Flow::NewFleetAgent { pick: false })
+        }
         hit::FleetHit::Close(row) => (row, Flow::AskCloseFleetSpace),
         hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
     };
@@ -8606,7 +8678,7 @@ fn set_selection(view: &mut View, focus: Focus, row: usize) {
 ///
 /// Not on BOOTH: there the verb travels between machines, so it is the one row a
 /// click may not carry out. Enter still does, because a keystroke aimed at the
-/// cursor cannot be a slip of the pointer, and `[open]` is beside it either way.
+/// cursor cannot be a slip of the pointer, and `↗` is beside it either way.
 fn stage_selected(focus: Focus, page: Page) -> Flow {
     match focus {
         // On BOOTH the cursor is in a cross-daemon list, so Enter is a
@@ -9123,7 +9195,6 @@ fn handle_input(
                         *cols,
                         *rows,
                         view,
-                        &fleet,
                         &fleet_spaces,
                         &fleet_machines,
                         m.column,
@@ -9138,6 +9209,7 @@ fn handle_input(
                         let (hit::FleetHit::Row(row)
                         | hit::FleetHit::Open(row)
                         | hit::FleetHit::New(row)
+                        | hit::FleetHit::Folder(row)
                         | hit::FleetHit::Close(row)
                         | hit::FleetHit::Fold(row)) = fleet_hit
                         else {
@@ -9191,7 +9263,6 @@ fn handle_input(
                         *cols,
                         *rows,
                         view,
-                        &fleet,
                         &fleet_spaces,
                         &fleet_machines,
                         m.column,
@@ -10070,6 +10141,7 @@ fn fleet_spaces<'a>(
 enum BoothCursor {
     Machine {
         label: String,
+        daemon: usize,
     },
     Space {
         name: String,
@@ -10098,8 +10170,8 @@ fn booth_cursor(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Bo
     let spaces = fleet_spaces(daemons, &all, view.pinned_agent.as_deref());
     let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
     match rows.get(view.booth_sel) {
-        Some(chrome::BoothRow::Machine { label, .. }) => {
-            BoothCursor::Machine { label: (*label).to_string() }
+        Some(chrome::BoothRow::Machine { label, daemon, .. }) => {
+            BoothCursor::Machine { label: (*label).to_string(), daemon: *daemon }
         }
         Some(chrome::BoothRow::Space { space, machine, .. }) => BoothCursor::Space {
             name: space.name.to_string(),
@@ -10206,8 +10278,7 @@ fn stage_new_pane(view: &mut View, pane: PaneId) {
 /// just started" is a *cursor* move and nothing else. Setting `view.staged`
 /// there did nothing at all — the cursor was still on the project row, and on a
 /// project row the preview picks the agent that most needs you, which for a
-/// brand-new one (working, nothing unread, so no [`chrome::booth_tray`] rank at
-/// all) is never it. You watched the first agent in the project while the one
+/// brand-new one (working, nothing unread, so no rank at all) is never it. You watched the first agent in the project while the one
 /// you asked for ran off screen.
 ///
 /// **Why it waits.** [`spawn_agent_in`] polls the *daemon's* agent list until
@@ -13592,13 +13663,16 @@ name = \"terminal\"
             name: name.into(),
             path: format!("/home/me/code/{name}"),
             is_dir,
+            git: false,
         };
         let dto = butai_protocol::api::BrowseDto {
             path: "/home/me/code".into(),
             parent: Some("/home/me".into()),
             entries: vec![entry("proj", true), entry("notes.md", false)],
         };
-        let Overlay::List(list) = browse_overlay(dto) else { panic!("a picker is a list") };
+        let Overlay::List(list) = browse_overlay(dto, &BrowsePlace::default()) else {
+            panic!("a picker is a list")
+        };
         assert_eq!(
             list.items,
             vec![chrome::BROWSE_OPEN, chrome::BROWSE_NEW, chrome::BROWSE_UP, "proj/"],
@@ -13613,7 +13687,9 @@ name = \"terminal\"
         // start a project: only `..` goes away with the parent.
         let root =
             butai_protocol::api::BrowseDto { path: "/".into(), parent: None, entries: Vec::new() };
-        let Overlay::List(list) = browse_overlay(root) else { panic!("a picker is a list") };
+        let Overlay::List(list) = browse_overlay(root, &BrowsePlace::default()) else {
+            panic!("a picker is a list")
+        };
         assert_eq!(list.items, vec![chrome::BROWSE_OPEN, chrome::BROWSE_NEW]);
     }
 
@@ -13947,7 +14023,7 @@ name = \"terminal\"
     /// threw the whole workbench onto that agent's workspace — on another
     /// machine, when it lived there. The rails' two-step is right for them
     /// because a second click there costs you a pane; here it costs the project
-    /// you were in, and `[open]` sits on the row for exactly this reason.
+    /// you were in, and `↗` sits on the row for exactly this reason.
     #[test]
     fn clicking_a_fleet_row_twice_does_not_leave_the_booth() {
         let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };

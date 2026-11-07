@@ -620,6 +620,43 @@ pub fn agent_sprite(
     (text.into(), role, moving)
 }
 
+/// BOOTH's one icon per agent row, in the [`SPRITE_W`] cells the sprite takes:
+/// the mark, its colour role, whether it is bold, and whether it animates.
+///
+/// **Filled means unread, hollow means read**, so the row says both what
+/// happened and whether you have seen it: `▲` asking, `●` new, `■` crashed,
+/// `○` read, `□` crash you have seen, `–` exited, `·` idle, and the spinner
+/// while it works. [`agent_sprite`]'s `✓` was the same mark for a turn you had
+/// read and one you had not, which is the one question a fleet list is for.
+/// A crash stays red once read, for the reason [`agent_status`] keeps it so.
+pub fn booth_icon(
+    state: AgentState,
+    exited: Option<u32>,
+    unread: bool,
+    loading_tick: u64,
+) -> (String, Role, bool, bool) {
+    let (mark, role, bold, moving) = match (state, exited) {
+        (_, Some(code)) if code != 0 => {
+            (if unread { "■" } else { "□" }, Role::Danger, unread, false)
+        }
+        (AgentState::Exited, _) | (_, Some(_)) => {
+            if unread {
+                ("●", Role::Info, true, false)
+            } else {
+                ("–", Role::Faint, false, false)
+            }
+        }
+        (AgentState::Waiting, _) => ("▲", Role::Danger, true, false),
+        (AgentState::Working, _) => {
+            (SPINNER[(loading_tick as usize) % SPINNER.len()], Role::Attention, false, true)
+        }
+        (AgentState::Finished, _) if unread => ("●", Role::Info, true, false),
+        (AgentState::Finished, _) => ("○", Role::Faint, false, false),
+        (AgentState::Idle, _) => ("·", Role::Faint, false, false),
+    };
+    (format!(" {mark} "), role, bold, moving)
+}
+
 /// Compact `m:ss` (or `Ns` under a minute) for the working timer.
 pub fn fmt_elapsed_secs(s: u64) -> String {
     if s < 60 {

@@ -105,20 +105,30 @@ scrollback. The wheel over a rail acts on that rail instead. In Help,
 `j`/`k` scroll, Tab changes topic, and Esc returns to your previous page.
 A running program that handles the mouse may handle the wheel itself.
 
-## What is NEEDS YOU in BOOTH?
+## How does BOOTH show what needs me?
 
-It gathers chats needing attention across connected machines, even when
-their projects are folded in FLEET. Click one to read and reply in the
-preview. Waiting means the agent needs input; finished means it produced
-a result. Use `[open]` to go to the chat's project. Clicking a project name
-selects its preview; the chevron folds or unfolds its chats.
+Each chat is drawn once in FLEET, in its own place, and its icon says what
+it is doing: `▲` asking, a spinner while it works, `●` a result you have
+not read, `○` one you have, `■` a crash you have not seen, `□` one you
+have, `–` exited, `·` idle. Filled means unread; hollow means read. Click
+a chat to read and reply in the preview, or use `↗` to go to its project.
+
+When FLEET is longer than its column, the right border becomes a map of
+the whole list: red where a chat is asking or crashed, blue where one has
+news. Click a mark to move the cursor to that chat. A folded project's
+chats count on the project's row. The arrows at the ends of the tab bar do
+the same for hidden tabs: `‹ 2 ▲●` means two tabs off the left, one with a
+chat asking and one with news.
+
+Clicking a project name selects its preview; the chevron folds or unfolds
+its chats.
 
 ## Can I leave without ending my chats?
 
 Yes. `alt-d` or `{prefix} d` detaches this client; the daemon keeps the
 panes running. Run `butai` again to reconnect.
 
-The `[x]` beside a chat, or `x` on its fleet row, ends that chat immediately.
+The `✕` beside a chat, or `x` on its fleet row, ends that chat immediately.
 Closing a workspace with `alt-x` ends everything in it and asks first.
 
 ## How do I start another agent or change views?
@@ -174,7 +184,10 @@ across every machine you are connected to.
 
 A project that does not exist yet starts in the same picker: `[new folder]`
 asks for a name, makes the folder on that machine and steps into it, leaving
-`[open this folder]` under the cursor. Nothing here needs a shell.
+`[open this folder]` under the cursor. Nothing here needs a shell. Each folder
+in the picker says `git` if it is a repository's root and `open · N agents` if
+it is already a workspace on that machine, so you can tell your project apart
+without stepping into every folder.
 
 BOOTH is not a view of a workspace, it is the surface that spans them: every
 project on every machine, with the selected one's screen. That is why it sits
@@ -185,19 +198,24 @@ stage at once and can key into any single one of them.
 The middle column is that agent's live pane, not a picture of one. The keyboard
 starts on the FLEET list, so `j`/`k` walk rows; `tab` or a click hands it to
 the pane and everything you type from then on is the agent's. `alt-w` takes it
-back. `[open]` is the other move — it goes to that agent's project, which
+back. `↗` is the other move — it goes to that agent's project, which
 changes the tab you are on; typing at the preview does not. Clicking a project's
 name selects its preview, while its chevron folds or unfolds its chats.
 
-NEEDS YOU gathers chats needing attention above FLEET, including chats in
-folded projects. Click a chat there or in FLEET to focus its live preview.
-The `[x]` on a chat ends that session immediately.
+Each chat appears once, in its place in FLEET, and its icon says whether it is
+asking, working or has news you have not read. The order never changes with
+those states, so a row stays where you last saw it. When the list is longer
+than the column, the scrollbar marks where the asking and unread chats are,
+including the ones scrolled out of view; click a mark to go to that row. The
+`✕` on a chat ends that session immediately.
 
-The fleet lists the projects with nothing running in them too, so `a` can start
-one: it spawns that project's own agent — `[agents] autostart` in its
-`.butai.toml`, then your `default_agent` — and `A` picks the type. `z` folds the
-machine or project the cursor is on and `Z` folds every project, which leaves an
-index of the whole fleet.
+The fleet lists the projects with nothing running in them too, so `a` or the
+row's `+` can start one: it spawns that project's own agent —
+`[agents] autostart` in its `.butai.toml`, then your `default_agent` — and `A`
+picks the type. On a machine row, `a` or its `+` opens the folder browser on that
+machine, without asking which one first. `z` folds the machine or project the
+cursor is on and `Z` folds every project, which leaves an index of the whole
+fleet.
 
 ## Other machines
 
@@ -684,7 +702,8 @@ folds; nothing here is a key this workbench did not already have.
 
 `x` ends what the row *is*. On an agent that is the session and it does not ask;
 on a project it is the workspace and everything running in it, and it does. The
-`[x]` on a chat is the same press. Chat close buttons also appear in NEEDS YOU.
+`✕` on a chat is the same press, and so is the `✕` on the project row the
+cursor is on — drawn only there, so a stray click cannot close a workspace.
 
 ## Everything has one
 

@@ -5219,7 +5219,13 @@ fn build_browse(path: Option<&str>) -> Result<BrowseDto, ApiReply> {
             continue;
         }
         let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        entries.push(BrowseEntry { name, path: ent.path().to_string_lossy().into_owned(), is_dir });
+        let git = is_dir && ent.path().join(".git").exists();
+        entries.push(BrowseEntry {
+            name,
+            path: ent.path().to_string_lossy().into_owned(),
+            is_dir,
+            git,
+        });
     }
     entries.sort_by(|a, b| {
         b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))

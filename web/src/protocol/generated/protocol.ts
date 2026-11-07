@@ -216,7 +216,12 @@ export type BrowseEntry = { name: string,
 /**
  * Absolute path of the entry.
  */
-path: string, is_dir: boolean, };
+path: string, is_dir: boolean, 
+/**
+ * A directory with a `.git` inside it: the root of a repository, which is
+ * what a folder picker opening a project is usually looking for.
+ */
+git: boolean, };
 
 /**
  * One screen cell: a grapheme plus its style.

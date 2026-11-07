@@ -1392,6 +1392,10 @@ pub struct BrowseEntry {
     /// Absolute path of the entry.
     pub path: String,
     pub is_dir: bool,
+    /// A directory with a `.git` inside it: the root of a repository, which is
+    /// what a folder picker opening a project is usually looking for.
+    #[serde(default)]
+    pub git: bool,
 }
 
 /// A host directory listing (`GET /v1/fs?path=`).

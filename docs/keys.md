@@ -180,8 +180,9 @@ and the diff keys above work there. The rail is unchanged and still owns the
 commit box and the sync buttons, which is what `C` goes to.
 
 **BOOTH** — `j` `k` walk the rows · `enter` go there: an agent's workspace on its
-machine, or the project the cursor names · `a` start that project's agent · `A`
-pick which · `x` end what the row is: the session on an agent, the workspace and
+machine, or the project the cursor names · `a` start that project's agent, or on
+a machine row open a folder there · `A` pick which · `x` end what the row is: the
+session on an agent, the workspace and
 everything in it on a project (which asks) · `z` fold this machine or project ·
 `Z` fold every project · `tab` the preview · `m` the row's menu.
 
@@ -191,12 +192,18 @@ folded) and all. It used to be six, and the reason given was that the rest of th
 rails' table is about a project and this page is not in one — which stopped being
 true when its rows became projects.
 
-Clicking an agent in FLEET or NEEDS YOU selects its preview and gives the stage
-keyboard focus. Clicking a machine/project keeps focus on the fleet; double-click
-its name within 400ms to fold/unfold it. The chevron and `z` also fold/unfold.
-The NEEDS YOU tray moves the cursor to the row the copy stands for. An agent folded away inside its project
-has no row to move to, so its copy names nothing rather than selecting whatever
-sits at that index; the tray is still the shortest way to it, through unfolding.
+Clicking an agent in FLEET selects its preview and gives the stage keyboard
+focus. Clicking a machine/project keeps focus on the fleet; double-click its name
+within 400ms to fold/unfold it. The chevron and `z` also fold/unfold. The
+buttons at the right edge of a row are the keys under the pointer: `↗` is
+`enter`, `✕` is `x`, a project's `+` is `a`, and a machine's `+` is `a` on that
+row, the folder browser already pointed at that machine.
+
+When the list is longer than the column, clicking the FLEET box's right border
+moves the cursor to the row that part of the scrollbar stands for: the loudest
+row in that slice — asking or crashed first, then unread news — or its first row
+when none has anything to say. The cursor moving is what scrolls the row into
+view, so the map needs no keys of its own: `j`/`k` reach the same rows.
 
 **FILES / DOCS** — `j` `k` move · `←` `h` up a level · `→` `l` into · `space`
 peek · `enter` open · `backspace` up · `/` find · `e` edit · `C-s` save · `esc`
