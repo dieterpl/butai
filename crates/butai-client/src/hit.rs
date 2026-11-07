@@ -315,10 +315,10 @@ pub fn on_fleet(
     let geom = chrome::page_geom(cols, rows, view);
     let c = chrome::booth_columns_of(cols, &geom, view);
     let booth = chrome::booth_rows(spaces, machines, &view.folds);
-    if let Some(row) = chrome::booth_fleet_map_at(&c, &booth, view.booth_sel, x, y) {
+    if let Some(row) = chrome::booth_fleet_map_at(&c, &booth, view, x, y) {
         return Some(FleetHit::Row(row));
     }
-    let row = chrome::booth_fleet_row_at(&c, &booth, view.booth_sel, x, y)?;
+    let row = chrome::booth_fleet_row_at(&c, &booth, view, x, y)?;
     // Buttons before the row they sit on, or the row would swallow them — the
     // same order the tab bar resolves its `[x]` in.
     match booth.get(row)? {

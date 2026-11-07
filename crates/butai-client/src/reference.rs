@@ -695,10 +695,11 @@ eating it.
     j k         move
     enter       stage the row, or open what it names
 
-BOOTH's fleet takes `j`, `k`, `enter`, `tab`, `x`, `m`, `a`, `A`, `z` and `Z` —
-and each of them acts on the row's own machine and project, not on the tab you
-are looking at. `a`/`A` are the AGENTS rail's verbs and `z`/`Z` are the diff's
-folds; nothing here is a key this workbench did not already have.
+BOOTH's fleet takes `j`, `k`, `pgdn`, `pgup`, `home`, `end`, `enter`, `tab`,
+`x`, `m`, `a`, `A`, `z` and `Z` — and each of them acts on the row's own
+machine and project, not on the tab you are looking at. `a`/`A` are the AGENTS
+rail's verbs, `z`/`Z` are the diff's folds and the page keys are the pages';
+nothing here is a key this workbench did not already have.
 
 `?` on the fleet, or the `[?]` on its border, puts those keys on a card beside
 the list, with what the buttons and icons mean. The keys still work while it

@@ -358,10 +358,11 @@ background colour.
 
 The title is the pane's own terminal title, and an agent rewrites it as it goes:
 Claude Code prefixes it with an animated `◐` while it works and a `✳` while it
-waits. A leading glyph like that is **pinned** between the marker and the name —
-it stays in its column while the name scrolls past, the same way the CHANGES
-rail pins a file's `M`. The rule is a shape and not a list of glyphs: one leading
-character that is neither a letter nor a digit, then a space, then the name.
+waits. A leading glyph like that is **dropped** from the name — the row's own
+status already says what it would — in the rail, on BOOTH, on the stage's title
+and in the footer's "is waiting" line. The rule is a shape and not a list of
+glyphs: one leading character that is neither a letter nor a digit, then a
+space, then the name.
 
 | status | means |
 |---|---|
@@ -827,8 +828,15 @@ box-drawn spine connects machines to projects and projects to agents, with
 branches ending at the last visible sibling after folding.
 
 The icon is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` — is
-whatever it wrote into its terminal title, and it is pinned between the icon
-and the name here exactly as the AGENTS rail pins it. Only the name marquees.
+whatever it wrote into its terminal title, and it is dropped here exactly as the
+AGENTS rail drops it, so a row reads `▲ Write the` and not `▲  ✳ Write the`.
+Only the name marquees, one space after the icon.
+
+**The list moves only when the cursor nears an edge.** It keeps two rows past
+the cursor in view, so walking back up moves the cursor and not the list.
+`pgdn` `pgup` move a page and `home` `end` go to the ends. The wheel scrolls the
+list three rows a notch without moving the cursor, so the stage keeps the agent
+it had; the next key that moves the cursor brings the list back to it.
 
 **The scrollbar is a map of the whole list.** When the fleet is longer than its
 column, the FLEET box's right border becomes a scrollbar with one cell per slice
@@ -1734,7 +1742,8 @@ lockfile in the repo. Two consequences worth knowing:
 | the NET gauge: rates, dead band, the two traces | `crates/butai-client/src/chrome/mod.rs` (`draw_net_gauge`, `NET_IDLE_BPS`, `NET_FLOOR_BPS`, `fmt_rate`) |
 | a gauge's head row and its identity slot | `crates/butai-client/src/chrome/mod.rs` (`Head`, `gauge_head`, `fit_words`, `cpu_ident`) |
 | row text: sprites, status tokens, marquee, traces | `crates/butai-client/src/chrome/model.rs` (`agent_sprite`, `agent_status`, `marquee`, `braille_trace`, `braille_traffic`) |
-| the pinned glyph an agent writes into its own title | `crates/butai-client/src/chrome/model.rs` (`split_status_glyph`) |
+| the glyph an agent writes into its own title, and dropping it | `crates/butai-client/src/chrome/model.rs` (`split_status_glyph`, `agent_name`) |
+| BOOTH: where the fleet list starts | `crates/butai-client/src/chrome/mod.rs` (`fleet_first`, `fleet_top`, `FLEET_MARGIN`), `crates/butai-client/src/workbench.rs` (`sync_fleet_first`, `page_wheel`) |
 | the CHANGES rail: rows, label, verbs, split | `crates/butai-client/src/chrome/mod.rs` (`change_rows`, `changes_label`, `changes_verbs`, `changes_split`) |
 | every verb table, the footer packing, the `?` text | `crates/butai-client/src/verbs.rs` |
 | BOOTH: columns, fleet order, the `+ ↗ ✕` buttons | `crates/butai-client/src/chrome/mod.rs` (`booth_columns`, `booth_rows`, `fleet_open_span`, `fleet_chat_close_span`, `fleet_machine_add_span`) |

@@ -179,7 +179,8 @@ over the DIFF space, so you keep the refs and the history you opened it from,
 and the diff keys above work there. The rail is unchanged and still owns the
 commit box and the sync buttons, which is what `C` goes to.
 
-**BOOTH** — `j` `k` walk the rows · `enter` go there: an agent's workspace on its
+**BOOTH** — `j` `k` walk the rows · `pgdn` `pgup` a page at a time · `home`
+`end` the top and the bottom · `enter` go there: an agent's workspace on its
 machine, or the project the cursor names · `a` start that project's agent, or on
 a machine row open a folder there · `A` pick which · `x` end what the row is: the
 session on an agent, the workspace and
@@ -208,6 +209,12 @@ moves the cursor to the row that part of the scrollbar stands for: the loudest
 row in that slice — asking or crashed first, then unread news — or its first row
 when none has anything to say. The cursor moving is what scrolls the row into
 view, so the map needs no keys of its own: `j`/`k` reach the same rows.
+
+The list keeps two rows past the cursor in view while you walk it, so the rest
+of a project and the next machine show before you reach them. The wheel over the
+list scrolls it three rows a notch and leaves the cursor, and the agent on the
+stage, where they were; the next key that moves the cursor brings the list back
+to it. A click never scrolls the list.
 
 **FILES / DOCS** — `j` `k` move · `←` `h` up a level · `→` `l` into · `space`
 peek · `enter` open · `backspace` up · `/` find · `e` edit · `C-s` save · `esc`

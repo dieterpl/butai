@@ -2734,6 +2734,17 @@ pub struct View {
     /// eventually do not. [`booth_selected`] and [`booth_preview`] are the only
     /// two readings of it.
     pub booth_sel: usize,
+    /// The fleet row at the top of BOOTH's list. Kept, not derived from the
+    /// cursor: derived, it pinned the cursor to the bottom line and slid the
+    /// whole list under it in both directions. Kept, the list moves only when
+    /// the cursor comes within [`FLEET_MARGIN`] of an edge, and the wheel can
+    /// move it without moving the cursor at all. [`fleet_first`] follows the
+    /// cursor and [`fleet_top`] is what the drawing and the pointer read.
+    pub booth_first: usize,
+    /// The cursor `booth_first` last followed. The list follows the cursor
+    /// only once it has moved, so a wheel that scrolled the cursor out of view
+    /// is not undone by the next frame.
+    pub booth_followed: usize,
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
     pub(crate) fleet_clicks: crate::hit::FleetClicks,
@@ -2869,6 +2880,8 @@ impl Default for View {
             overlay: None,
             page: Page::default(),
             booth_compute_scroll: 0,
+            booth_first: 0,
+            booth_followed: 0,
             pending_menu_action: None,
             confirmed_menu_action: None,
             layout: None,
@@ -4390,13 +4403,12 @@ pub struct MapCell {
 ///
 /// `None` while the whole list fits, when there is nothing to scroll to and
 /// every row's own icon already says it.
-pub fn fleet_map(cols: &BoothColumns, rows: &[BoothRow<'_>], sel: usize) -> Option<Vec<MapCell>> {
+pub fn fleet_map(cols: &BoothColumns, rows: &[BoothRow<'_>], first: usize) -> Option<Vec<MapCell>> {
     let v = cols.fleet_rows.height as usize;
     let len = rows.len();
     if v == 0 || len <= v {
         return None;
     }
-    let first = scroll_for(sel, v, len);
     Some(
         (0..v)
             .map(|j| {
@@ -4423,7 +4435,7 @@ pub fn fleet_map_x(cols: &BoothColumns) -> u16 {
 pub fn booth_fleet_map_at(
     cols: &BoothColumns,
     rows: &[BoothRow<'_>],
-    sel: usize,
+    view: &View,
     x: u16,
     y: u16,
 ) -> Option<usize> {
@@ -4431,7 +4443,8 @@ pub fn booth_fleet_map_at(
     if cols.fleet_box.width == 0 || x != fleet_map_x(cols) || y < area.y {
         return None;
     }
-    fleet_map(cols, rows, sel)?.get((y - area.y) as usize).map(|c| c.target)
+    let first = fleet_top(view.booth_first, area.height as usize, rows.len());
+    fleet_map(cols, rows, first)?.get((y - area.y) as usize).map(|c| c.target)
 }
 
 /// Which fleet row is at `y`, as an index into `rows`.
@@ -4448,7 +4461,7 @@ pub fn booth_fleet_map_at(
 pub fn booth_fleet_row_at(
     cols: &BoothColumns,
     rows: &[BoothRow<'_>],
-    sel: usize,
+    view: &View,
     x: u16,
     y: u16,
 ) -> Option<usize> {
@@ -4456,20 +4469,44 @@ pub fn booth_fleet_row_at(
     if area.height == 0 || !area.contains(x, y) {
         return None;
     }
-    let first = scroll_for(sel, area.height as usize, rows.len());
+    let first = fleet_top(view.booth_first, area.height as usize, rows.len());
     let i = first + (y - area.y) as usize;
     (i < rows.len()).then_some(i)
 }
 
-/// Scroll offset that keeps `sel` inside a window of `height` rows.
-///
-/// Shared by both BOOTH columns so a wheel and a cursor cannot disagree about
-/// where the list starts.
-fn scroll_for(sel: usize, height: usize, len: usize) -> usize {
+/// Rows the fleet keeps in view past the cursor, above and below it, while
+/// the cursor walks: a tree is read by what comes next — the rest of this
+/// project, the next machine — and a cursor on the last line shows none of it.
+pub const FLEET_MARGIN: usize = 2;
+
+/// The fleet row at the top of a window of `height` rows, moved from `first`
+/// only as far as it takes to keep `sel` and [`FLEET_MARGIN`] rows around it
+/// in view. The client stores it in [`View::booth_first`] when the cursor moves.
+pub fn fleet_first(first: usize, sel: usize, height: usize, len: usize) -> usize {
     if height == 0 || len <= height {
         return 0;
     }
-    sel.saturating_sub(height.saturating_sub(1)).min(len - height)
+    // A short window cannot keep a margin on both sides and still move.
+    let margin = FLEET_MARGIN.min(height.saturating_sub(1) / 2);
+    let first = fleet_top(first, height, len);
+    if sel < first + margin {
+        sel.saturating_sub(margin)
+    } else if sel + margin >= first + height {
+        (sel + margin + 1 - height).min(len - height)
+    } else {
+        first
+    }
+}
+
+/// [`View::booth_first`] as the screen shows it: clamped so the list never
+/// scrolls past its own last row. The drawing, the scrollbar and the pointer
+/// all read it through this, so a wheel and a cursor cannot disagree about
+/// where the list starts.
+pub fn fleet_top(first: usize, height: usize, len: usize) -> usize {
+    if height == 0 || len <= height {
+        return 0;
+    }
+    first.min(len - height)
 }
 
 /// The BOOTH page: the fleet on the left, the selected agent's screen in the
@@ -4526,7 +4563,7 @@ fn draw_booth_page(
         let area = cols.fleet_rows;
         if area.height > 0 {
             let visible = area.height as usize;
-            let first = scroll_for(view.booth_sel, visible, rows.len());
+            let first = fleet_top(view.booth_first, visible, rows.len());
             let bound = area.x + area.width;
             for (i, row) in rows.iter().skip(first).take(visible).enumerate() {
                 let y = area.y + i as u16;
@@ -4651,12 +4688,8 @@ fn draw_booth_page(
                             Some((start, _)) => start.saturating_sub(1),
                             None => bound,
                         };
-                        let (glyph, title) = split_status_glyph(&a.title);
-                        let mut tx = x + SPRITE_W as u16 + 1;
-                        if !glyph.is_empty() {
-                            put_str(buf, tx, y, glyph, title_end, Pen::new(color, bg));
-                            tx += glyph.chars().count() as u16 + 1;
-                        }
+                        let title = agent_name(&a.title);
+                        let tx = x + SPRITE_W as u16;
                         // The tags take what the title leaves, never the
                         // title's first few cells: the name is what you
                         // scan for, and the tags are what tell two apart.
@@ -4696,7 +4729,7 @@ fn draw_booth_page(
 
             // The scrollbar, on the border, as a map of the whole list; and
             // where in it the window is, on the bottom border.
-            if let Some(map) = fleet_map(&cols, &rows, view.booth_sel) {
+            if let Some(map) = fleet_map(&cols, &rows, first) {
                 let mx = fleet_map_x(&cols);
                 for (j, cell) in map.iter().enumerate() {
                     let y = area.y + j as u16;
@@ -4741,7 +4774,7 @@ fn draw_booth_page(
     let title = match selected {
         Some(r) => {
             let machine = scene.machines.get(r.daemon).map(|m| m.label).unwrap_or("local");
-            format!(" {} · {machine}:{} ", r.agent.title, r.workspace)
+            format!(" {} · {machine}:{} ", agent_name(&r.agent.title), r.workspace)
         }
         None => " STAGE ".to_string(),
     };
@@ -6030,13 +6063,11 @@ fn draw_left_rail(
         // clock has to be asked for: an agent that says `◐ 1:07` would have sat
         // at `◐ 1:07` until the next keystroke.
         scrolling |= animating;
-        // The agent's own spinner is pinned, not scrolled: it is the same kind
-        // of token as a file's `M`, and a `◐` towed through the row by the
-        // marquee is a moving target where a fixed one said the same thing.
-        let (glyph, title) = split_status_glyph(&a.title);
-        let pin_w = if glyph.is_empty() { 0 } else { glyph.width() + 1 };
+        // The agent's own spinner is dropped: `status` already says what it
+        // would, and the row has no room to say it twice. See `agent_name`.
+        let title = agent_name(&a.title);
         let room = (rows.width as usize)
-            .saturating_sub(2 + pin_w + status.width() + 1)
+            .saturating_sub(2 + status.width() + 1)
             .saturating_sub(title.chars().count().min(FLEET_TITLE_KEEP) + 1);
         let tags = fleet_tags(a, room);
         let tags_w: usize = tags.iter().map(|(t, _)| t.chars().count()).sum();
@@ -6051,7 +6082,7 @@ fn draw_left_rail(
             y,
             cursor,
             stage == Some(a.pane),
-            glyph,
+            "",
             title,
             theme.role(name_role),
             &right,
@@ -7972,7 +8003,7 @@ fn stage_title(ws: Option<&WorkspaceDetail>, view: &View) -> String {
         w.agents
             .iter()
             .find(|a| a.pane == p)
-            .map(|a| a.title.clone())
+            .map(|a| agent_name(&a.title).to_string())
             .or_else(|| w.processes.iter().find(|x| x.pane == p).map(|x| x.name.clone()))
     };
     match named(stage) {
@@ -8431,6 +8462,8 @@ pub fn fleet_keys_span(fleet_box: LRect) -> Option<(u16, u16)> {
 /// rows of `docs/keys.md` give them.
 pub const BOOTH_KEYS: &[(&str, &str)] = &[
     ("j k", "walk the rows"),
+    ("pgdn", "a page down · pgup, a page up"),
+    ("home", "the top · end, the bottom"),
     ("enter", "go there: the agent, or the project"),
     ("a", "start an agent · on a machine, a folder"),
     ("A", "pick which agent"),
@@ -8911,9 +8944,9 @@ fn attention_notice(ws: Option<&WorkspaceDetail>, page: Page) -> Option<String> 
     // is the other strip that survives every page. So it says more here, and
     // says how to get to it without losing the page you are on.
     if page.owns_full_width() && page != Page::Booth {
-        Some(format!("● {} is waiting · alt-w", a.title))
+        Some(format!("● {} is waiting · alt-w", agent_name(&a.title)))
     } else {
-        Some(format!("● {} is waiting", a.title))
+        Some(format!("● {} is waiting", agent_name(&a.title)))
     }
 }
 
@@ -9188,6 +9221,32 @@ mod tests {
                 BoothRow::Agent { row, sel } => format!("agent:{}:{sel}", row.agent.title),
             })
             .collect()
+    }
+
+    /// The fleet list moves only when the cursor comes within the margin of an
+    /// edge. Walking back up from the bottom moves the cursor, not the list —
+    /// derived from the cursor alone, the list slid under a cursor stuck on its
+    /// last line.
+    #[test]
+    fn the_fleet_list_moves_only_when_the_cursor_nears_an_edge() {
+        let (h, len) = (8, 20);
+        // Down to two rows short of the bottom: the list has not moved yet.
+        assert_eq!(fleet_first(0, 5, h, len), 0);
+        // One more: the list moves by exactly one, keeping two rows below.
+        assert_eq!(fleet_first(0, 6, h, len), 1);
+        // Back up inside the window: the list stays where it is.
+        assert_eq!(fleet_first(1, 4, h, len), 1);
+        assert_eq!(fleet_first(1, 3, h, len), 1);
+        // Within two of the top: it follows the cursor up.
+        assert_eq!(fleet_first(1, 2, h, len), 0);
+        // The ends of the list need no margin past them.
+        assert_eq!(fleet_first(0, 0, h, len), 0);
+        assert_eq!(fleet_first(12, 19, h, len), 12);
+        // A list folded shorter than where it was scrolled to comes back.
+        assert_eq!(fleet_top(15, h, 10), 2);
+        // A list that fits does not scroll.
+        assert_eq!(fleet_first(3, 2, h, 4), 0);
+        assert_eq!(fleet_top(3, h, 4), 0);
     }
 
     /// The scrollbar is a map of the whole list: a cell is red where a row in
@@ -10664,13 +10723,11 @@ mod tests {
         assert!(seen.contains("mod.rs"), "the path's tail never scrolled into view");
     }
 
-    /// BOOTH pins the agent's own spinner too, in the fleet list.
-    ///
-    /// The sprite says the same thing more loudly, so the glyph is kept rather
-    /// than dropped only because it is the agent's word for its own state and
-    /// the sprite is ours; what it must not do is march through the row.
+    /// BOOTH drops the agent's own `✳` from the name, in the fleet list and in
+    /// the stage's title: the icon beside it already says what it would, and
+    /// the two side by side read `▲  ✳ Wire the`.
     #[test]
-    fn booth_pins_an_agents_own_spinner_in_both_columns() {
+    fn booth_drops_an_agents_own_star_from_its_name() {
         let sys = SysDto::default();
         let agents = [
             agent(1, "✳ Wire the export watcher up to the daemon", AgentState::Waiting),
@@ -10683,30 +10740,42 @@ mod tests {
         let spaces = booth_spaces(&all);
         let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
 
-        // Only the fleet column: the stage box is titled with the same agent,
-        // and a box title is ellipsized rather than scrolled, so its copy of
-        // the glyph is not what this is about.
-        let view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
-        let fleet_w =
-            booth_columns(booth_area(160, &page_geom(160, 40, &view))).fleet_box.width as usize;
+        // The cursor on the agent, so the stage is titled with it too.
+        let rows = booth_rows(&spaces, &ms, &Folds::default());
+        let sel = rows
+            .iter()
+            .position(|r| matches!(r, BoothRow::Agent { sel: 0, .. }))
+            .expect("the agent has a row");
+        let view = View {
+            page: Page::Booth,
+            focus: Focus::AllAgents,
+            booth_sel: sel,
+            ..Default::default()
+        };
 
-        // Every column the glyph lands on, over enough ticks for the name to
-        // have scrolled and wrapped: the fleet row must hold still.
-        let mut columns: BTreeSet<Vec<usize>> = BTreeSet::new();
+        // Over enough ticks for the name to have scrolled and wrapped, the star
+        // is never anywhere on screen, and the name starts where the row's
+        // other names do.
         let mut moved = false;
         for tick in 0..80 {
             let view = View { tick, ..view.clone() };
             let mut b = buf(160, 40);
             draw(&mut b, 160, 40, &scene, &view, &Theme::default());
-            let rows: Vec<String> =
-                (0..40).map(|y| text_of(&b, y).chars().take(fleet_w).collect::<String>()).collect();
-            let at: Vec<usize> =
-                rows.iter().filter_map(|r| r.chars().position(|c| c == '✳')).collect();
-            assert_eq!(at.len(), 1, "the fleet row, tick {tick}:\n{}", rows.join("\n"));
-            moved |= !rows.iter().any(|r| r.contains("Wire the export"));
-            columns.insert(at);
+            let screen = (0..40).map(|y| text_of(&b, y)).collect::<Vec<_>>().join("\n");
+            assert!(!screen.contains('✳'), "tick {tick}:\n{screen}");
+            if tick == 0 {
+                // The fleet's rows only: the stage's title carries the name too.
+                let col = |name: &str| {
+                    screen
+                        .lines()
+                        .filter(|l| l.contains("├─ ") || l.contains("└─ "))
+                        .find_map(|l| l.find(name).map(|i| l[..i].chars().count()))
+                };
+                assert_eq!(col("Wire the export"), col("codex"), "{screen}");
+                assert!(screen.contains(" Wire the export"), "the stage's title:\n{screen}");
+            }
+            moved |= !screen.lines().any(|l| l.contains("│ ├─") && l.contains("Wire the export"));
         }
-        assert_eq!(columns.len(), 1, "the glyph changed column: {columns:?}");
         assert!(moved, "the name never scrolled, so this proves nothing about the glyph");
     }
 
@@ -11068,15 +11137,17 @@ mod tests {
         assert!(codex.contains("codex "), "a name was cut for its tags: {codex:?}");
     }
 
-    /// An agent's own spinner holds one column while the name scrolls past it.
+    /// An agent's own spinner is not drawn on the rail, and its name scrolls
+    /// without it.
     ///
     /// Claude Code rewrites its OSC title every frame — `◐ Fix the parser`,
     /// `◑ Fix the parser` — and that title *is* the agent's name here. Fed to
     /// the marquee whole, the glyph set off across the row with the text and
-    /// came round again a second later, which is what this was reported as: a
-    /// list scrolling "with the star at the beginning".
+    /// came round again a second later, which is what this was first reported
+    /// as: a list scrolling "with the star at the beginning". Pinning it held
+    /// it still; the row's status already says the same, so now it is gone.
     #[test]
-    fn an_agents_own_spinner_does_not_travel_with_its_name() {
+    fn an_agents_own_spinner_is_not_part_of_its_name() {
         let title = "◐ Fix scrolling behaviour in agents and files";
         let ws = detail(vec![agent(1, title, AgentState::Working)], None);
         let rows = page_geom(120, 40, &View::default()).agents_rows;
@@ -11096,15 +11167,14 @@ mod tests {
             (row.chars().position(|c| c == '◐').map(|c| c as u16), row)
         };
 
-        let (home, first) = at(0);
-        assert!(home.is_some(), "the glyph should be on the row at all:\n{first}");
+        let (_, first) = at(0);
         assert!(first.contains("Fix scrolling"), "the name should start at the start:\n{first}");
 
         // Long enough for the marquee to have left the hold and wrapped twice.
         let mut moved = false;
-        for tick in 1..80 {
+        for tick in 0..80 {
             let (col, row) = at(tick);
-            assert_eq!(col, home, "the glyph moved at tick {tick}:\n{row}");
+            assert_eq!(col, None, "the glyph is on the row at tick {tick}:\n{row}");
             moved |= !row.contains("Fix scrolling");
         }
         assert!(moved, "the name never scrolled, so this proves nothing about the glyph");

@@ -764,6 +764,18 @@ pub fn split_status_glyph(title: &str) -> (&str, &str) {
     }
 }
 
+/// An agent's name as butai shows it: its title without the agent's own
+/// status glyph.
+///
+/// The glyph used to be kept, pinned beside the row's icon, and that row read
+/// `▲  ✳ Fix the parser` — two marks for one state, the agent's own being the
+/// less informative (Claude Code's `✳` means "not working", which `▲`, `●`
+/// and `○` already say apart). butai draws the state itself everywhere a name
+/// appears, so the agent's copy of it is dropped rather than drawn twice.
+pub fn agent_name(title: &str) -> &str {
+    split_status_glyph(title).1
+}
+
 /// Clamp `s` to `width` characters, marking the cut with an ellipsis. Unlike
 /// [`marquee`] this is for text that never animates (box titles).
 pub fn ellipsize(s: &str, width: usize) -> String {

@@ -53,6 +53,10 @@ const MIN_PAINT: Duration = Duration::from_millis(16);
 /// Occasional refresh for time-dependent labels, separate from animation.
 const HEARTBEAT: Duration = Duration::from_secs(5);
 
+/// Rows one wheel notch scrolls BOOTH's fleet list. A row a notch was a long
+/// tree crossed one line at a time.
+const FLEET_WHEEL_ROWS: isize = 3;
+
 /// Which of the three clocks that repaint for the screen's own sake woke the
 /// loop. The stage's is not one of them — it repaints to make a reconnect
 /// happen, and answers to [`repaint_for_lost_stage`] instead.
@@ -918,6 +922,7 @@ pub async fn run(
             // this same list between frames, is testing the rail that is
             // actually on screen.
             sync_gauges(&mut view, &daemons, &hosts);
+            sync_fleet_first(&mut view, &daemons, &hosts, cols, rows);
             (screen_links, last_frame) = paint(
                 &mut painted,
                 cols,
@@ -8016,6 +8021,10 @@ fn fleet_click(hit: hit::FleetHit, agent_row: bool, view: &mut View) -> Flow {
         hit::FleetHit::Fold(row) => (row, Flow::FoldFleetRow),
     };
     view.booth_sel = row;
+    // A row you can click is a row on screen, so the list stays put. Followed
+    // with its margin, a click near an edge slid the row out from under the
+    // pointer, and a second click landed on its neighbour.
+    view.booth_followed = row;
     view.focus = if agent_row && matches!(hit, hit::FleetHit::Row(_)) {
         Focus::Stage
     } else {
@@ -8469,11 +8478,16 @@ fn page_wheel(
         let geom = chrome::page_geom(cols, rows, view);
         let c = chrome::booth_columns_of(cols, &geom, view);
         if c.fleet_box.width > 0 && c.fleet_box.contains(x, y) {
-            let was = view.focus;
-            // Looking, not choosing — same as the rails.
-            view.focus = chrome::Focus::AllAgents;
-            move_sel(view, rail_counts(daemons, hosts, view), delta);
-            view.focus = was;
+            // The list, not the cursor. Walking the cursor put a different
+            // agent on the stage at every notch, which on a long tree is a
+            // dozen screens flashing past on the way to the one you wanted.
+            // The cursor stays where it is, on screen or not, until a key
+            // moves it — and then the list goes back to it.
+            let len = booth_row_count(daemons, hosts, view);
+            let height = c.fleet_rows.height as usize;
+            let first = chrome::fleet_top(view.booth_first, height, len) as isize;
+            let top = (first + delta * FLEET_WHEEL_ROWS).max(0) as usize;
+            view.booth_first = chrome::fleet_top(top, height, len);
             return Some(Flow::Continue);
         }
         if c.compute_box.width > 0 && c.compute_box.contains(x, y) {
@@ -9895,6 +9909,23 @@ fn handle_input(
                 (event::KeyCode::Down | event::KeyCode::Char('j'), false) => {
                     move_sel(view, counts, 1)
                 }
+                // A long fleet a page at a time, and to either end of it.
+                (
+                    event::KeyCode::PageDown
+                    | event::KeyCode::PageUp
+                    | event::KeyCode::Home
+                    | event::KeyCode::End,
+                    false,
+                ) if view.page == Page::Booth && view.focus == Focus::AllAgents => {
+                    let page = fleet_height(view, *cols, *rows).saturating_sub(1).max(1) as isize;
+                    let delta = match k.code {
+                        event::KeyCode::PageDown => page,
+                        event::KeyCode::PageUp => -page,
+                        event::KeyCode::Home => isize::MIN / 2,
+                        _ => isize::MAX / 2,
+                    };
+                    move_sel(view, counts, delta)
+                }
                 (event::KeyCode::Up | event::KeyCode::Char('k'), false) => {
                     move_sel(view, counts, -1)
                 }
@@ -10225,6 +10256,35 @@ fn booth_selected_agent(
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
     chrome::booth_selected(&chrome::booth_rows(&spaces, &machines, &view.folds), view.booth_sel)
+}
+
+/// Moves BOOTH's kept top row just far enough to show the cursor once it has
+/// moved, before the frame that draws it — so the drawing and the pointer, which resolve against
+/// [`View::booth_first`] between frames, both see where the list now starts.
+fn sync_fleet_first(
+    view: &mut View,
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    cols: u16,
+    rows: u16,
+) {
+    if view.page != Page::Booth {
+        return;
+    }
+    let height = fleet_height(view, cols, rows);
+    let len = booth_row_count(daemons, hosts, view);
+    if view.booth_sel != view.booth_followed {
+        view.booth_first = chrome::fleet_first(view.booth_first, view.booth_sel, height, len);
+        view.booth_followed = view.booth_sel;
+    } else {
+        view.booth_first = chrome::fleet_top(view.booth_first, height, len);
+    }
+}
+
+/// Rows BOOTH's fleet list has on screen.
+fn fleet_height(view: &View, cols: u16, rows: u16) -> usize {
+    let geom = chrome::page_geom(cols, rows, view);
+    chrome::booth_columns_of(cols, &geom, view).fleet_rows.height as usize
 }
 
 /// How many rows BOOTH's fleet is drawing, so the cursor cannot walk off it.
@@ -12742,6 +12802,46 @@ mod tests {
     /// preview it moved the fleet cursor, which on BOOTH swaps the very pane you
     /// were trying to read, and over the real fleet list it scrolled the pane
     /// instead of the list.
+    /// The wheel over the fleet scrolls the list and leaves the cursor — and so
+    /// the stage — where it was. Walking the cursor put a different agent on
+    /// the stage at every notch.
+    #[test]
+    fn the_wheel_over_the_fleet_leaves_the_cursor_alone() {
+        let (mut cols, mut rows) = (180u16, 40u16);
+        let geom = chrome::page_geom(cols, rows, &View { page: Page::Booth, ..Default::default() });
+        let c = chrome::booth_columns(chrome::booth_area(cols, &geom));
+        let mut view =
+            View { page: Page::Booth, focus: Focus::AllAgents, booth_sel: 3, ..Default::default() };
+        handle_input(
+            event::Event::Mouse(event::MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                column: c.fleet_rows.x + 2,
+                row: c.fleet_rows.y + 1,
+                modifiers: event::KeyModifiers::NONE,
+            }),
+            &mut view,
+            &[],
+            &[],
+            None,
+            &mut Files::default(),
+            &mut Files::default(),
+            &mut DiffView::default(),
+            &mut Docker::default(),
+            &mut chrome::Git::default(),
+            &mut chrome::Settings::default(),
+            &mut chrome::Help::default(),
+            &mut chrome::usage::Usage::default(),
+            &Keymap::default(),
+            &mut Drag::default(),
+            false,
+            false,
+            &mut cols,
+            &mut rows,
+        );
+        assert_eq!(view.booth_sel, 3, "the wheel walked the cursor");
+        assert_eq!(view.focus, Focus::AllAgents);
+    }
+
     #[test]
     fn booths_wheel_goes_to_the_column_under_the_pointer() {
         // Wide enough that all three columns are drawn; the bug needs the rails
@@ -14045,6 +14145,7 @@ name = \"terminal\"
         let mut view = View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
         assert!(matches!(fleet_click(hit::FleetHit::Row(2), true, &mut view), Flow::Continue));
         assert_eq!(view.booth_sel, 2, "the click must still move the cursor and the preview");
+        assert_eq!(view.booth_followed, 2, "a clicked row is on screen; the list must not move");
         assert_eq!(view.focus, Focus::Stage, "clicking a chat hands its pane the keyboard");
         // The second one on the same row is still a look, not a jump — which is
         // also what a double-click is, since a terminal has no such event.

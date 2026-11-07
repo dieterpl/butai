@@ -105,6 +105,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **1.5.0-dev.8: BOOTH's names lose the agent's star, and a long fleet
+  scrolls better.** A chat's name no longer carries Claude Code's own `✳` or
+  spinner after butai's icon, so a row reads `▲ Write the` and not
+  `▲  ✳ Write the`. The same goes for the stage's title, the AGENTS rail and
+  the footer's "is waiting" line. Names still slide sideways when they are too
+  long. The fleet list now moves only when the cursor comes within two rows of
+  an edge. Before, past the bottom the cursor stuck to the last line and the
+  list slid under it, both ways. `pgdn` `pgup` move a page and `home` `end` go
+  to the ends. The wheel over the list scrolls it three rows a notch and no
+  longer walks the cursor, so the stage stops changing agent at every notch.
+  A click never scrolls the list.
 - **1.4.1-dev.1: nothing in 1.4.0-dev.2 – dev.5 was broken in the tree, but
   none of it runs on an older daemon.** Checked end to end on a fresh build —
   a daemon, the bridge and the browser, not fixtures: `GET /v1/agents` in usage
