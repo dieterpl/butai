@@ -12403,6 +12403,7 @@ mod tests {
             role: None,
             labels: Vec::new(),
             origin: None,
+            parent: None,
         }
     }
 
@@ -14528,14 +14529,14 @@ name = \"terminal\"
                 machine: "local",
                 folded: false,
             },
-            chrome::BoothRow::Agent { row: fleet[0], sel: 0 },
+            chrome::BoothRow::Agent { row: fleet[0], sel: 0, depth: 0, trail: 0, last: true },
             chrome::BoothRow::Machine { label: "gpu-box", agents: 1, daemon: 1, folded: false },
             chrome::BoothRow::Space {
                 space: space("infra", 1, 1, 1),
                 machine: "gpu-box",
                 folded: false,
             },
-            chrome::BoothRow::Agent { row: fleet[1], sel: 1 },
+            chrome::BoothRow::Agent { row: fleet[1], sel: 1, depth: 0, trail: 0, last: true },
         ]
     }
 

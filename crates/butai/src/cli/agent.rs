@@ -436,10 +436,15 @@ async fn spawn(
     let head = if wait { Some(notification_head(&ctx.api).await?) } else { None };
     // Run from inside a butai pane, the asker is the program in that pane.
     let origin = if std::env::var_os("BUTAI_PANE").is_some() { "agent" } else { "cli" };
+    // ...and that pane is the new agent's parent, so BOOTH can nest it. A helper
+    // spawning its own helper makes a chain, which is how the tree gets deep.
+    let parent = std::env::var("BUTAI_PANE").ok().and_then(|p| p.parse::<u64>().ok());
     ctx.api
         .post(
             &path,
-            &serde_json::json!({ "type": kind, "background": background, "origin": origin }),
+            &serde_json::json!({
+                "type": kind, "background": background, "origin": origin, "parent": parent,
+            }),
         )
         .await?;
 

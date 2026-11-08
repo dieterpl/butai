@@ -215,7 +215,13 @@ pub enum BoothRow<'a> {
     /// `sel` is the row's index in the *fleet list* — what
     /// [`fleet_route`](crate::workbench) resolves.
     /// The cursor counts rows of this list, not agents; see [`View::booth_sel`].
-    Agent { row: AllAgentRow<'a>, sel: usize },
+    ///
+    /// `depth` is how many agents it is under: a subagent sits one step in from
+    /// the agent that spawned it, and its own helpers one more. `trail` has bit
+    /// `n` set when the ancestor at level `n` was the last of its siblings (so
+    /// no `│` is drawn through that column) and `last` says the same of the row
+    /// itself — together everything [`agent_branch`] needs.
+    Agent { row: AllAgentRow<'a>, sel: usize, depth: u16, trail: u32, last: bool },
 }
 
 /// Everything one paint reads.
@@ -4293,12 +4299,73 @@ pub fn booth_rows<'a>(
             // order: it is an identity, and only the row it is drawn on moves.
             let mut idx: Vec<usize> = (0..space.agents.len()).collect();
             arrange.sort_agents(m.label, space, &mut idx);
-            for i in idx {
-                out.push(BoothRow::Agent { row: space.agents[i], sel: space.first + i });
+            for (i, depth, trail, last) in nest_agents(space, &idx) {
+                out.push(BoothRow::Agent {
+                    row: space.agents[i],
+                    sel: space.first + i,
+                    depth,
+                    trail,
+                    last,
+                });
             }
         }
     }
     out
+}
+
+/// A project's agents with each subagent right under the agent that spawned it,
+/// to any depth: `(index, depth, trail, last)` per row, in drawing order.
+///
+/// `idx` is the order the person chose, and it still decides every sibling
+/// group — only a child's *place* is taken from its parent. An agent whose
+/// parent is not in this project (it was closed, or lives elsewhere) is a root,
+/// so nothing is ever left out of the list.
+fn nest_agents(space: &SpaceRow<'_>, idx: &[usize]) -> Vec<(usize, u16, u32, bool)> {
+    let here = |p: PaneId| idx.iter().any(|&i| space.agents[i].agent.pane == p);
+    let parent_of = |i: usize| space.agents[i].agent.parent.filter(|p| here(*p));
+    let mut out = Vec::with_capacity(idx.len());
+    // Depth is capped by the 32 bits of `trail`; a chain deeper than that is
+    // drawn flat from there on rather than refused.
+    fn walk(
+        space: &SpaceRow<'_>,
+        idx: &[usize],
+        parent: Option<PaneId>,
+        parent_of: &dyn Fn(usize) -> Option<PaneId>,
+        depth: u16,
+        trail: u32,
+        out: &mut Vec<(usize, u16, u32, bool)>,
+    ) {
+        let kids: Vec<usize> = idx
+            .iter()
+            .copied()
+            .filter(|&i| parent_of(i) == parent && !out.iter().any(|r| r.0 == i))
+            .collect();
+        for (n, &i) in kids.iter().enumerate() {
+            let last = n + 1 == kids.len();
+            out.push((i, depth, trail, last));
+            if depth < 31 {
+                let t = if last { trail | (1 << depth) } else { trail };
+                walk(space, idx, Some(space.agents[i].agent.pane), parent_of, depth + 1, t, out);
+            }
+        }
+    }
+    walk(space, idx, None, &parent_of, 0, 0, &mut out);
+    out
+}
+
+/// The branch glyphs in front of a subagent's icon: `│ ` for each ancestor that
+/// has more siblings below, blanks where it does not, then `├ ` or `└ `.
+/// Empty for a top-level agent.
+fn agent_branch(depth: u16, trail: u32, last: bool) -> String {
+    if depth == 0 {
+        return String::new();
+    }
+    let mut s = String::new();
+    for level in 1..depth {
+        s.push_str(if trail & (1 << level) != 0 { "  " } else { "│ " });
+    }
+    s.push_str(if last { "└ " } else { "├ " });
+    s
 }
 
 /// The tab bar's chips in the fleet's order: each project's tab, in the order
@@ -5043,7 +5110,7 @@ fn draw_booth_page(
                             put_str(buf, cx, y, FLEET_CLOSE_LABEL, ce, pen);
                         }
                     }
-                    BoothRow::Agent { row, sel } => {
+                    BoothRow::Agent { row, sel, depth, trail, last } => {
                         let a = row.agent;
                         let (icon, role, bold, animating) =
                             booth_icon(a.state, a.exited, a.unread, view.fast_tick);
@@ -5055,7 +5122,12 @@ fn draw_booth_page(
                         let bg = theme.row_bg(cursor || Some(*sel) == preview);
                         fill_row(buf, area.x, y, bound, bg);
                         put_str(buf, area.x, y, spines[first + i], bound, Pen::new(theme.rule, bg));
-                        let x = area.x + FLEET_INDENT * 2;
+                        let branch = agent_branch(*depth, *trail, *last);
+                        let bx = area.x + FLEET_INDENT * 2;
+                        // A subagent hangs off its parent's icon: the first
+                        // level of the tree is the parent's own column.
+                        let x = bx + branch.chars().count() as u16;
+                        put_str(buf, bx, y, &branch, bound, Pen::new(theme.rule, bg));
                         put_str(buf, x, y, &icon, bound, Pen { fg: color, bg, bold });
                         // The buttons are in fixed columns and the title stops
                         // short of them, so a long title cannot run under the
@@ -9522,6 +9594,70 @@ mod tests {
             .collect()
     }
 
+    /// A subagent is listed right under the agent that spawned it, its own helpers
+    /// under it in turn, and an agent whose parent is not in the project stays at
+    /// the top level rather than vanishing.
+    #[test]
+    fn subagents_nest_under_their_parent_to_any_depth() {
+        let sys = SysDto::default();
+        let mut agents = [
+            agent(1, "lead", AgentState::Idle),
+            agent(2, "alone", AgentState::Idle),
+            agent(3, "worker", AgentState::Idle),
+            agent(4, "helper", AgentState::Idle),
+            agent(5, "orphan", AgentState::Idle),
+        ];
+        agents[2].parent = Some(PaneId(1));
+        agents[3].parent = Some(PaneId(3));
+        agents[4].parent = Some(PaneId(99));
+        let all: Vec<AllAgentRow<'_>> = agents
+            .iter()
+            .map(|a| AllAgentRow {
+                workspace: "butai",
+                workspace_id: SessionId(1),
+                agent: a,
+                host: None,
+                daemon: 0,
+            })
+            .collect();
+        let ms = machines(&sys, &all);
+        let spaces = [SpaceRow {
+            name: "butai",
+            id: SessionId(1),
+            daemon: 0,
+            agents: &all,
+            first: 0,
+            preferred: None,
+            tab: 0,
+        }];
+        let rows = booth_rows(&spaces, &ms, &Folds::default(), &Arrange::default());
+        let tree: Vec<(String, u16, bool)> = rows
+            .iter()
+            .filter_map(|r| match r {
+                BoothRow::Agent { row, depth, last, .. } => {
+                    Some((row.agent.title.clone(), *depth, *last))
+                }
+                _ => None,
+            })
+            .filter(|(t, ..)| ["lead", "worker", "helper", "alone", "orphan"].contains(&t.as_str()))
+            .collect();
+        let want = |t: &str, d, l| (t.to_string(), d, l);
+        assert_eq!(
+            tree,
+            [
+                want("lead", 0, false),
+                want("worker", 1, true),
+                want("helper", 2, true),
+                want("alone", 0, false),
+                want("orphan", 0, true),
+            ]
+        );
+        assert_eq!(agent_branch(0, 0, true), "");
+        assert_eq!(agent_branch(1, 0, false), "├ ");
+        assert_eq!(agent_branch(2, 0b10, true), "  └ ");
+        assert_eq!(agent_branch(2, 0, true), "│ └ ");
+    }
+
     /// Every order but the tree reorders projects within their machine and
     /// chats within their project — never across them, and never the machines.
     #[test]
@@ -9805,7 +9941,7 @@ mod tests {
             .map(|r| match r {
                 BoothRow::Machine { label, .. } => format!("machine:{label}"),
                 BoothRow::Space { space, .. } => format!("space:{}", space.name),
-                BoothRow::Agent { row, sel } => format!("agent:{}:{sel}", row.agent.title),
+                BoothRow::Agent { row, sel, .. } => format!("agent:{}:{sel}", row.agent.title),
             })
             .collect()
     }
@@ -11490,6 +11626,7 @@ mod tests {
             role: None,
             labels: Vec::new(),
             origin: None,
+            parent: None,
         }
     }
 
@@ -11577,6 +11714,7 @@ mod tests {
             role: Some("lead".into()),
             labels: vec!["review".into(), "bug".into()],
             origin: Some("cli".into()),
+            parent: None,
             ..agent(pane, title, state)
         }
     }

@@ -903,6 +903,7 @@ mod tests {
             role: None,
             labels: Vec::new(),
             origin: None,
+            parent: None,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let fleet = vec![
@@ -1022,6 +1023,7 @@ mod tests {
             role: None,
             labels: Vec::new(),
             origin: None,
+            parent: None,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let row = |ws, id, a| chrome::AllAgentRow {
@@ -1179,6 +1181,7 @@ mod tests {
             role: None,
             labels: Vec::new(),
             origin: None,
+            parent: None,
         };
         // Sixty agents in one project, the 51st asking: far below the window.
         let agents: Vec<AgentDto> = (0..60)
@@ -1662,6 +1665,7 @@ mod tests {
                     role: None,
                     labels: Vec::new(),
                     origin: None,
+                    parent: None,
                 })
                 .collect(),
             processes: (0..procs)

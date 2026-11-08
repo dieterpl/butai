@@ -125,6 +125,13 @@ pub struct AgentDto {
     /// existed, or by a client too old to say, and skipped on the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The agent that started this one — the pane a `butai agent spawn` ran
+    /// in — so a client can draw it under its parent, to any depth. Set once by
+    /// the daemon from the spawn request. Absent for chats started by a person,
+    /// by a daemon that predates it, or whose parent has since gone, and
+    /// skipped on the wire then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<PaneId>,
 }
 
 /// Where a chat can have been started from, as [`AgentDto::origin`] names it.
@@ -1728,6 +1735,7 @@ pub enum ApiRequest {
         name: String,
         background: bool,
         origin: Option<String>,
+        parent: Option<PaneId>,
     },
     NewProcess {
         ws: SessionId,

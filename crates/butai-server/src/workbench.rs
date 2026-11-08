@@ -80,6 +80,10 @@ pub struct AgentMeta {
     pub labels: Vec<String>,
     /// Who started it — see [`AgentDto::origin`](butai_protocol::api::AgentDto::origin).
     pub origin: Option<String>,
+    /// The agent that spawned this one — see
+    /// [`AgentDto::parent`](butai_protocol::api::AgentDto::parent). A pane id,
+    /// so it is re-pointed when the parent is respawned and saved by dump name.
+    pub parent: Option<PaneId>,
 }
 
 pub struct Workspace {

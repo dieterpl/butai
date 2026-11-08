@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.10: subagents hang under the agent that started them.** A
+  `butai agent spawn` run inside a butai pane now records that pane as the new
+  agent's parent. BOOTH's fleet lists it right under its parent, one step in
+  with `├` `└` `│` branches, and its own helpers under it in turn, to any depth.
+  Whatever order the fleet is in still decides the order among siblings. An
+  agent you start yourself stays at the top level, and so does one whose parent
+  has been closed. The parent survives a daemon restart and a resume that has to
+  start a fresh conversation. `GET /v1/workspaces/{id}/agents` rows have a new
+  optional `parent` (a pane id), and `POST .../agents` takes one.
 - **1.5.0-dev.9: BOOTH's fleet can be ordered, and the tab bar follows it.**
   `o` on the fleet, or the `[tree v]` chip on FLEET's bottom border, picks one
   of six orders. `tree` is as opened and started, the default. `needs you` puts

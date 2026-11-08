@@ -95,6 +95,8 @@ A role and labels are what a person sees on the agent's row in the terminal and
 the browser, so an orchestrating agent can mark its helpers the same way a
 person would from the right-click menu. An agent spawned from inside a pane is
 recorded as started by `agent`; the same command typed in a shell says `cli`.
+It is also recorded as that pane's child: BOOTH's fleet draws it under its
+parent, and a helper's own helpers under it in turn, to any depth.
 See [`agent tag`](cli.md#agent-tag).
 
 ## Waiting

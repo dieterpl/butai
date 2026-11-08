@@ -309,6 +309,7 @@ async fn route(
                         name: b.kind,
                         background: b.background,
                         origin: b.origin,
+                        parent: b.parent,
                     };
                     call(&events, req).await
                 }
@@ -1137,6 +1138,9 @@ struct SpawnAgentBody {
     /// body still parses; an unknown value is dropped rather than refused.
     #[serde(default)]
     origin: Option<String>,
+    /// The pane of the agent asking, when one is — see `AgentDto::parent`.
+    #[serde(default)]
+    parent: Option<PaneId>,
 }
 
 #[derive(Deserialize)]

@@ -538,6 +538,10 @@ struct PersistedAgent {
     labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    /// The `dump` of the agent that spawned this one: pane ids do not survive a
+    /// restart, dump names do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -1549,6 +1553,7 @@ impl ServerCore {
                 Err(e) => warn!("restore process {:?}: {e:#}", p.name),
             }
         }
+        let mut restored: HashMap<&str, PaneId> = HashMap::new();
         for a in &saved.agents {
             let raw = read_dump(&dumps.join(&a.dump));
             let replay = raw.as_deref().and_then(decode_dump);
@@ -1563,11 +1568,21 @@ impl ServerCore {
                 Ok(pane) => {
                     self.set_agent_tags(pane, a.role.clone(), a.labels.clone());
                     self.set_agent_origin(pane, a.origin.clone());
+                    restored.insert(a.dump.as_str(), pane);
                     if saved.stage.as_deref() == Some(a.dump.as_str()) {
                         staged = Some(pane);
                     }
                 }
                 Err(e) => warn!("restore agent {:?}: {e:#}", a.agent),
+            }
+        }
+        // Parents are saved by dump name; now that every agent has its new pane
+        // id, point each child at its parent's.
+        for a in &saved.agents {
+            let child = restored.get(a.dump.as_str()).copied();
+            let parent = a.parent.as_deref().and_then(|d| restored.get(d)).copied();
+            if let (Some(child), Some(parent)) = (child, parent) {
+                self.set_agent_parent(child, Some(parent));
             }
         }
         let Some(ws) = self.workspaces.get_mut(&sid) else { return };
@@ -1731,11 +1746,10 @@ impl ServerCore {
         else {
             return false;
         };
-        let Some((name, role, labels, origin)) = self
-            .workspaces
-            .get(&sid)
-            .and_then(|w| w.agent_meta.get(&pane))
-            .map(|m| (m.name.clone(), m.role.clone(), m.labels.clone(), m.origin.clone()))
+        let Some((name, role, labels, origin, parent)) =
+            self.workspaces.get(&sid).and_then(|w| w.agent_meta.get(&pane)).map(|m| {
+                (m.name.clone(), m.role.clone(), m.labels.clone(), m.origin.clone(), m.parent)
+            })
         else {
             return false;
         };
@@ -1785,6 +1799,14 @@ impl ServerCore {
         // The restarted pane is the same chat to the person who tagged it.
         self.set_agent_tags(fresh, role, labels);
         self.set_agent_origin(fresh, origin);
+        // Same place in the tree: under the same parent, and still the parent of
+        // its own children, which pointed at the pane that just went away.
+        self.set_agent_parent(fresh, parent);
+        if let Some(ws) = self.workspaces.get_mut(&sid) {
+            for m in ws.agent_meta.values_mut().filter(|m| m.parent == Some(pane)) {
+                m.parent = Some(fresh);
+            }
+        }
         // Put it back where it was: the rails are ordered, and the pane dumps
         // are keyed by position, so appending would silently renumber both.
         if let Some(ws) = self.workspaces.get_mut(&sid) {
@@ -1974,6 +1996,10 @@ impl ServerCore {
                                 role: meta.role.clone(),
                                 labels: meta.labels.clone(),
                                 origin: meta.origin.clone(),
+                                parent: meta
+                                    .parent
+                                    .and_then(|p| w.agents.iter().position(|a| *a == p))
+                                    .map(agent_dump),
                             })
                         })
                         .collect();
@@ -2975,7 +3001,7 @@ impl ServerCore {
                     ApiReply::NotFound(format!("no workspace {sid}"))
                 }
             }
-            ApiRequest::SpawnAgent { ws, name, background, origin } => {
+            ApiRequest::SpawnAgent { ws, name, background, origin, parent } => {
                 if !self.workspaces.contains_key(&ws) {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
                 }
@@ -2985,6 +3011,11 @@ impl ServerCore {
                             butai_protocol::api::AGENT_ORIGINS.contains(&o.as_str())
                         });
                         self.set_agent_origin(pane, origin);
+                        // Only an agent of this workspace can be a parent.
+                        let parent = parent.filter(|p| {
+                            self.workspaces.get(&ws).is_some_and(|w| w.agent_meta.contains_key(p))
+                        });
+                        self.set_agent_parent(pane, parent);
                         // `background` is how a helper an agent starts for
                         // itself says so; that is not a pick.
                         if !background {
@@ -3463,6 +3494,9 @@ impl ServerCore {
             role: meta.and_then(|m| m.role.clone()),
             labels: meta.map(|m| m.labels.clone()).unwrap_or_default(),
             origin: meta.and_then(|m| m.origin.clone()),
+            // Only a parent that is still an agent: a client drawing a tree
+            // wants a root, not a row pointing at nothing.
+            parent: meta.and_then(|m| m.parent).filter(|p| self.agent_dto_exists(*p)),
         })
     }
 
@@ -3483,6 +3517,17 @@ impl ServerCore {
     fn set_agent_origin(&mut self, pane: PaneId, origin: Option<String>) {
         if let Some(meta) = self.workspaces.values_mut().find_map(|w| w.agent_meta.get_mut(&pane)) {
             meta.origin = origin;
+        }
+    }
+
+    fn agent_dto_exists(&self, pane: PaneId) -> bool {
+        self.workspaces.values().any(|w| w.agent_meta.contains_key(&pane))
+    }
+
+    /// Record which agent started another. Once, at spawn.
+    fn set_agent_parent(&mut self, pane: PaneId, parent: Option<PaneId>) {
+        if let Some(meta) = self.workspaces.values_mut().find_map(|w| w.agent_meta.get_mut(&pane)) {
+            meta.parent = parent;
         }
     }
 
@@ -4604,6 +4649,7 @@ impl ServerCore {
                     role: None,
                     labels: Vec::new(),
                     origin: None,
+                    parent: None,
                 },
             );
             if !background {
@@ -5324,6 +5370,7 @@ mod tests {
             role: Some("lead".into()),
             labels: vec!["review".into(), "bug".into()],
             origin: Some("tui".into()),
+            parent: Some("agent-0.bin".into()),
         };
         let back: PersistedAgent =
             serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
@@ -5331,12 +5378,14 @@ mod tests {
         assert_eq!(back.labels, ["review", "bug"]);
         // Who started it comes back with it, so a restart does not forget.
         assert_eq!(back.origin.as_deref(), Some("tui"));
+        assert_eq!(back.parent.as_deref(), Some("agent-0.bin"));
 
         let old: PersistedAgent =
             serde_json::from_str(r#"{"agent":"claude","dump":"agent-0.bin"}"#).unwrap();
         assert_eq!(old.role, None);
         assert!(old.labels.is_empty());
         assert_eq!(old.origin, None);
+        assert_eq!(old.parent, None);
     }
 
     /// A buffer whose rows are the given lines, left-aligned and space-padded.
