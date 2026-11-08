@@ -370,6 +370,7 @@ keystroke.
 |---|---|
 | `ls` (alias `list`) | `butai agent ls [TARGET]` |
 | `spawn` | `butai agent spawn <KIND> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]...` |
+| `fork` | `butai agent fork <TARGET> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]...` |
 | `tag` | `butai agent tag <TARGET> [--role ROLE \| --no-role] [--label LABEL]... [--unlabel LABEL]... [--clear]` |
 | `send` | `butai agent send <TARGET> [TEXT...] [--wait] [--until SET] [--timeout MS]` |
 | `read` | `butai agent read <TARGET> [-l N] [--source S] [--format F]` |
@@ -428,6 +429,33 @@ The spawn records who asked for it as the agent's `origin`: `cli`, or `agent`
 when the command runs inside a butai pane (`$BUTAI_PANE` is set). `--role` and
 `--label` are checked before the agent starts, so a bad label is exit 64 and no
 agent, and set with the same write [`agent tag`](#agent-tag) makes once it is up.
+
+### `agent fork`
+
+Copies a running agent onto a new pane in the same workspace. The new pane
+starts on the same conversation and goes its own way from there. It is recorded
+as `<TARGET>`'s child, so BOOTH's fleet draws it under that pane.
+
+The flags are `spawn`'s and mean the same: `--background`, `--prompt`, `--wait`,
+`--timeout`, `--role`, `--label`. So is the output. **stdout is the bare pane
+id**, so `F=$(butai agent fork 7)` works, and under `--json` it is `{"pane":43}`.
+The fork route answers the new id itself, so there is no listing before and
+after. `origin` is recorded the way a spawn records it: `cli`, or `agent` from
+inside a pane. Unlike `send` and `wait`, `fork` is allowed on your own pane.
+
+The daemon starts the copy with the agent's
+[`fork_args`](configuration.md#agents), which out of the box only `claude` has:
+`--resume <parent's id> --fork-session --session-id <a new id>`. Naming the copy
+is what lets it reopen its *own* conversation after a restart. A fork that
+cannot happen is **exit 64**, with the reason on stderr, and nothing starts:
+
+```
+cannot fork pane 9: codex has no fork_args, so butai does not know how to fork it (see [[agents]] in docs/configuration.md)
+cannot fork pane 7: nothing to fork yet: this claude has not been spoken to
+pane 4 is not an agent; only an agent can be forked
+```
+
+A target that names no pane is exit 2.
 
 ### `agent tag`
 

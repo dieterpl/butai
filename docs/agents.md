@@ -195,6 +195,28 @@ buffered startup input, and the turn never begins. So `--prompt` waits for the
 agent to draw its footer first. Still only stdout is the pane id — the wait
 reports itself on stderr — so `P=$(…)` keeps working.
 
+## Forking
+
+```sh
+F=$(butai agent fork $BUTAI_PANE --background --prompt "try the other approach" --wait)
+butai pane read $F --lines 40
+```
+
+`fork` starts a new pane on a **copy** of an agent's conversation so far, and
+the two go their own ways from there. Use it to try a second approach without
+losing the first, or to hand a helper everything you already know without
+retelling it. It takes the same flags as `spawn` and prints the new pane id the
+same way. The copy is recorded as the forked pane's child, so BOOTH draws it
+under that pane, and it reopens its own conversation after a daemon restart.
+Unlike `send` and `wait`, `fork` works on your own pane.
+
+Only an agent whose launcher has `fork_args` can be forked. Out of the box that
+is `claude` (`--resume <parent> --fork-session --session-id <copy>`). codex and
+opencode can fork, but they pick their own conversation ids, so butai does not
+know which conversation to copy. For any agent without `fork_args`, and for one
+nobody has typed into yet, `fork` fails with exit 64 and says why. It never
+starts an empty chat in place of a copy. See [`agent fork`](cli.md#agent-fork).
+
 ## There is no split
 
 The daemon refuses layout commands by design — the frame is fixed, with rails and

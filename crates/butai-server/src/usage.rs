@@ -958,6 +958,7 @@ mod tests {
             command: command.into(),
             args: Vec::new(),
             resume_args: Vec::new(),
+            fork_args: Vec::new(),
             env: HashMap::new(),
             waiting_pattern: None,
             busy_pattern: None,

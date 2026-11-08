@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.13: agents can be forked.** A fork is a new pane that starts on
+  a copy of an agent's conversation so far, and the two go their own ways from
+  there. BOOTH's fleet lists the copy under the agent it came from, and after
+  a daemon restart the copy reopens its own conversation. There are three ways
+  to fork: `butai agent fork <TARGET>`, which takes the same `--background`,
+  `--prompt`, `--wait`, `--role` and `--label` as `spawn` and prints the new
+  pane id; `F` on the AGENTS rail or BOOTH's fleet; and **fork agent** at the
+  top of an agent's menu. The daemon route is `POST
+  /v1/workspaces/{id}/panes/{pane}/fork`, which answers `201 {"pane"}`.
+  `[[agents]]` blocks take a new `fork_args`, with `{parent_session_id}` for the
+  conversation being copied and `{session_id}` for the copy. The built-in
+  `claude` uses `--resume {parent_session_id} --fork-session --session-id
+  {session_id}`. No other built-in can fork: codex and opencode choose their
+  own conversation ids, and gemini and aider have no fork. A fork that cannot
+  happen fails with the reason (exit 64 from the CLI) and starts nothing. So
+  does a fork of an agent nobody has typed into yet.
 - **1.5.0-dev.12: one installer per track.** The mirror now also serves
   `install-dev.sh` and `install-stable.sh`:
   `curl -fsSL https://dieterpl.github.io/butai/install-dev.sh | sh` installs the

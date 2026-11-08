@@ -605,6 +605,63 @@ fn assigns_session(agent: &crate::config::AgentDef) -> bool {
     agent.args.iter().chain(agent.resume_args.iter()).any(|a| a.contains(SESSION_PLACEHOLDER))
 }
 
+/// What a [`fork_args`](crate::config::AgentDef::fork_args) launcher writes
+/// where the conversation it copies belongs.
+const PARENT_SESSION_PLACEHOLDER: &str = "{parent_session_id}";
+
+/// Conversation id and argv for a fork of a pane holding `parent`, or why there
+/// cannot be one — in words fit to show the person who asked.
+///
+/// `spoke` is the parent's [`AgentMeta::spoke`]: a conversation nobody has
+/// typed into has no transcript yet, and asking the CLI to copy it is a launch
+/// that exits.
+///
+/// The copy gets a fresh id when the argv asks for one, as a fresh launch does.
+/// A `fork_args` that copies the parent without naming the copy is allowed —
+/// the fork runs — but leaves butai nothing to reopen it by after a restart.
+fn fork_launch(
+    agent: &crate::config::AgentDef,
+    parent: Option<&str>,
+    spoke: bool,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let name = &agent.name;
+    if agent.fork_args.is_empty() {
+        return Err(format!(
+            "{name} has no fork_args, so butai does not know how to fork it \
+             (see [[agents]] in docs/configuration.md)"
+        ));
+    }
+    let Some(parent) = parent else {
+        return Err(format!(
+            "butai does not know which conversation this {name} holds, \
+             because its launcher does not take a {SESSION_PLACEHOLDER}"
+        ));
+    };
+    if !spoke {
+        return Err(format!("nothing to fork yet: this {name} has not been spoken to"));
+    }
+    if !agent.fork_args.iter().any(|a| a.contains(PARENT_SESSION_PLACEHOLDER)) {
+        return Err(format!(
+            "{name}'s fork_args never name the conversation to copy \
+             ({PARENT_SESSION_PLACEHOLDER})"
+        ));
+    }
+    let named = agent.fork_args.iter().any(|a| a.contains(SESSION_PLACEHOLDER));
+    let id = named.then(crate::ids::uuid_v4);
+    let args = agent
+        .fork_args
+        .iter()
+        .map(|a| {
+            let a = a.replace(PARENT_SESSION_PLACEHOLDER, parent);
+            match &id {
+                Some(id) => a.replace(SESSION_PLACEHOLDER, id),
+                None => a,
+            }
+        })
+        .collect();
+    Ok((id, args))
+}
+
 /// Conversation id and argv for a launch that is not resuming anything.
 ///
 /// A launcher that names its conversations gets a fresh id minted here, *before*
@@ -1101,12 +1158,14 @@ impl ServerCore {
                     ApiRequest::KillPane { .. }
                         | ApiRequest::KillWorkspace(_)
                         | ApiRequest::SpawnAgent { .. }
+                        | ApiRequest::ForkAgent { .. }
                         | ApiRequest::NewProcess { .. }
                         | ApiRequest::RestartProcess { .. }
                 );
                 let resp = self.handle_api(req);
                 // Only on success — a 404'd kill changed nothing worth pushing.
-                let succeeded = matches!(resp, ApiReply::Ok | ApiReply::Created(_));
+                let succeeded =
+                    matches!(resp, ApiReply::Ok | ApiReply::Created(_) | ApiReply::Forked(_));
                 let _ = reply.send(resp);
                 if structural && succeeded {
                     let ws = self.build_ws_summaries();
@@ -3026,6 +3085,14 @@ impl ServerCore {
                     Err(e) => ApiReply::BadRequest(format!("{e:#}")),
                 }
             }
+            ApiRequest::ForkAgent { ws, pane, background, origin } => {
+                let origin =
+                    origin.filter(|o| butai_protocol::api::AGENT_ORIGINS.contains(&o.as_str()));
+                match self.fork_agent(ws, pane, background, origin) {
+                    Ok(fork) => ApiReply::Forked(fork),
+                    Err(reply) => *reply,
+                }
+            }
             ApiRequest::NewProcess { ws, name, command } => {
                 if !self.workspaces.contains_key(&ws) {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
@@ -4581,19 +4648,9 @@ impl ServerCore {
             .agent(name)
             .ok_or_else(|| anyhow::anyhow!("no agent named {name:?} in config"))?
             .clone();
-        let cwd = self
-            .workspaces
-            .get(&ws_id)
-            .map(|w| w.cwd.clone())
-            .ok_or_else(|| anyhow::anyhow!("workspace gone"))?;
-        let (rows, cols) = self.stage_size(ws_id);
-        let env: Vec<(String, String)> =
-            agent.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let detect = Detect::compile(
-            &agent.name,
-            agent.waiting_pattern.as_deref(),
-            agent.busy_pattern.as_deref(),
-        );
+        if !self.workspaces.contains_key(&ws_id) {
+            anyhow::bail!("workspace gone");
+        }
         // Conversation and argv are decided together, because each constrains
         // the other: only a pane with an id worth naming can be resumed, and
         // only a launcher that takes one can be told about it.
@@ -4625,6 +4682,104 @@ impl ServerCore {
                 (id, args, false)
             }
         };
+        // A resumed pane is by definition one that had already been spoken to,
+        // so it stays resumable across a second restart without waiting for the
+        // user to type into it again.
+        let pane =
+            self.start_agent_pane(ws_id, &agent, args, session_id, resumed, replay, background)?;
+        // Arm the one-shot fallback: a CLI asked to reopen a conversation that
+        // is no longer there exits immediately rather than starting without it
+        // (verified: `claude --resume <unknown>` exits 1, gemini exits on a
+        // fatal input error), and a pane that dies on every restart is worse
+        // than one that comes back empty. See `retry_failed_resume`.
+        if resumed {
+            self.resume_retry.insert(pane);
+        }
+        Ok(pane)
+    }
+
+    /// Start a **fork** of agent `source`: a new pane in the same workspace that
+    /// opens on a copy of `source`'s conversation and goes its own way from
+    /// there. The launch is the launcher's [`fork_args`], and the new pane is
+    /// recorded as `source`'s child, so BOOTH nests it under the agent it was
+    /// copied from.
+    ///
+    /// Every reason a fork cannot happen is a refusal with that reason rather
+    /// than a fresh agent: an agent that starts on an empty conversation is not
+    /// a fork of anything, and a caller who asked for one would be left to
+    /// discover that from its first answer.
+    ///
+    /// The copy is marked spoken from the start — the CLI writes its transcript
+    /// as it copies — so a restart reopens the fork's own conversation, under
+    /// the id minted here, like any other pane's.
+    ///
+    /// No resume fallback is armed: a fork whose parent's transcript has gone
+    /// exits with the CLI's own error on screen, which is truer than quietly
+    /// becoming a new conversation.
+    ///
+    /// [`fork_args`]: crate::config::AgentDef::fork_args
+    fn fork_agent(
+        &mut self,
+        ws_id: SessionId,
+        source: PaneId,
+        background: bool,
+        origin: Option<String>,
+    ) -> Result<PaneId, Box<ApiReply>> {
+        let bad = |m: String| Box::new(ApiReply::BadRequest(m));
+        let Some(ws) = self.workspaces.get(&ws_id) else {
+            return Err(Box::new(ApiReply::NotFound(format!("no workspace {ws_id}"))));
+        };
+        let Some(meta) = ws.agent_meta.get(&source) else {
+            return Err(match ws.all_panes().contains(&source) {
+                true => bad(format!("pane {source} is not an agent; only an agent can be forked")),
+                false => {
+                    Box::new(ApiReply::NotFound(format!("no pane {source} in workspace {ws_id}")))
+                }
+            });
+        };
+        let (name, parent_session, spoke) =
+            (meta.name.clone(), meta.session_id.clone(), meta.spoke);
+        let Some(agent) = self.config.agent(&name).cloned() else {
+            return Err(bad(format!("no agent named {name:?} in config")));
+        };
+        let (session_id, args) = fork_launch(&agent, parent_session.as_deref(), spoke)
+            .map_err(|why| bad(format!("cannot fork pane {source}: {why}")))?;
+        let pane = self
+            .start_agent_pane(ws_id, &agent, args, session_id, true, None, background)
+            .map_err(|e| bad(format!("{e:#}")))?;
+        self.set_agent_parent(pane, Some(source));
+        self.set_agent_origin(pane, origin);
+        // Both were recorded after `start_agent_pane` saved the roster.
+        self.persist_session();
+        Ok(pane)
+    }
+
+    /// Open an agent pane on an argv already decided, and record it — the half
+    /// of a launch that a fresh start, a restore and a fork share.
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_pane(
+        &mut self,
+        ws_id: SessionId,
+        agent: &crate::config::AgentDef,
+        args: Vec<String>,
+        session_id: Option<String>,
+        spoke: bool,
+        replay: Option<PaneDump<'_>>,
+        background: bool,
+    ) -> anyhow::Result<PaneId> {
+        let cwd = self
+            .workspaces
+            .get(&ws_id)
+            .map(|w| w.cwd.clone())
+            .ok_or_else(|| anyhow::anyhow!("workspace gone"))?;
+        let (rows, cols) = self.stage_size(ws_id);
+        let env: Vec<(String, String)> =
+            agent.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let detect = Detect::compile(
+            &agent.name,
+            agent.waiting_pattern.as_deref(),
+            agent.busy_pattern.as_deref(),
+        );
         let pane = self.spawn_terminal_replaying(
             ws_id,
             &cwd,
@@ -4637,15 +4792,12 @@ impl ServerCore {
         )?;
         if let Some(ws) = self.workspaces.get_mut(&ws_id) {
             ws.agents.push(pane);
-            // A resumed pane is by definition one that had already been spoken
-            // to, so it stays resumable across a second restart without waiting
-            // for the user to type into it again.
             ws.agent_meta.insert(
                 pane,
                 AgentMeta {
                     name: agent.name.clone(),
                     session_id,
-                    spoke: resumed,
+                    spoke,
                     role: None,
                     labels: Vec::new(),
                     origin: None,
@@ -4655,14 +4807,6 @@ impl ServerCore {
             if !background {
                 ws.stage = Some(pane);
             }
-        }
-        // Arm the one-shot fallback: a CLI asked to reopen a conversation that
-        // is no longer there exits immediately rather than starting without it
-        // (verified: `claude --resume <unknown>` exits 1, gemini exits on a
-        // fatal input error), and a pane that dies on every restart is worse
-        // than one that comes back empty. See `retry_failed_resume`.
-        if resumed {
-            self.resume_retry.insert(pane);
         }
         // Seed the status track up front so a client querying between the spawn
         // and the first sampler tick still reads a real debounced state.
@@ -5554,6 +5698,7 @@ mod tests {
             command: "/bin/sh".into(),
             args: vec![],
             resume_args: vec![],
+            fork_args: Vec::new(),
             env: Default::default(),
             waiting_pattern: None,
             busy_pattern: None,
@@ -5571,10 +5716,59 @@ mod tests {
             command: "claude".into(),
             args: argv(&["--skip", "--session-id", "{session_id}"]),
             resume_args: argv(&["--skip", "--resume", "{session_id}"]),
+            fork_args: Vec::new(),
             env: Default::default(),
             waiting_pattern: None,
             busy_pattern: None,
         }
+    }
+
+    fn forkable_agent() -> AgentDef {
+        AgentDef {
+            fork_args: argv(&[
+                "--skip",
+                "--resume",
+                "{parent_session_id}",
+                "--fork-session",
+                "--session-id",
+                "{session_id}",
+            ]),
+            ..resumable_agent()
+        }
+    }
+
+    /// A fork copies the parent's conversation under a new id that butai
+    /// mints, and the two ids are never the same one.
+    #[test]
+    fn a_fork_names_the_parent_and_a_fresh_copy() {
+        let (id, args) = fork_launch(&forkable_agent(), Some("parent-1"), true).unwrap();
+        let id = id.expect("the copy is named");
+        assert_ne!(id, "parent-1");
+        assert_eq!(
+            args,
+            argv(&["--skip", "--resume", "parent-1", "--fork-session", "--session-id", &id])
+        );
+        let (again, _) = fork_launch(&forkable_agent(), Some("parent-1"), true).unwrap();
+        assert_ne!(again.unwrap(), id, "two forks of one agent are two conversations");
+    }
+
+    /// Every reason a fork cannot happen is a refusal that says which, never a
+    /// fresh agent standing in for one.
+    #[test]
+    fn a_fork_that_cannot_happen_says_why() {
+        let why = |agent: &AgentDef, parent: Option<&str>, spoke: bool| {
+            fork_launch(agent, parent, spoke).expect_err("refused")
+        };
+        assert!(why(&resumable_agent(), Some("p"), true).contains("no fork_args"));
+        assert!(why(&forkable_agent(), None, true).contains("does not know which conversation"));
+        assert!(why(&forkable_agent(), Some("p"), false).contains("not been spoken to"));
+        let blind = AgentDef { fork_args: argv(&["--fork"]), ..resumable_agent() };
+        assert!(why(&blind, Some("p"), true).contains("never name the conversation"));
+
+        // Copying without naming the copy runs, but leaves nothing to resume.
+        let unnamed =
+            AgentDef { fork_args: argv(&["-r", "{parent_session_id}"]), ..resumable_agent() };
+        assert_eq!(fork_launch(&unnamed, Some("p"), true), Ok((None, argv(&["-r", "p"]))));
     }
 
     /// The placeholder is the whole mechanism: it is both how a launcher says

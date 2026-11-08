@@ -65,6 +65,7 @@ async fn start_daemon_with_agent_args(
         command: "/bin/sh".into(),
         args: args.iter().map(|s| s.to_string()).collect(),
         resume_args: resume_args.iter().map(|s| s.to_string()).collect(),
+        fork_args: Vec::new(),
         env: Default::default(),
         waiting_pattern: None,
         busy_pattern: None,

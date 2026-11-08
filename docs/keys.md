@@ -88,6 +88,7 @@ and the space is the one with the history and the diff beside it.
 | a new shell | `alt-t` | `C-b t` | `t` (PROCESSES) |
 | restart | | | `r` (PROCESSES) |
 | kill the row | | | `x` |
+| fork the agent row | | | `F` (AGENTS, BOOTH) |
 | kill what is staged | | `C-b x` | |
 | **the row's menu** | | | **`m`** |
 | the system monitor | | `C-b S` | click a gauge |
@@ -101,7 +102,7 @@ interface. It also carries **disconnect host** on a remote tab, which is the one
 row of it that has a second way in: `alt-h` lists the machines you are connected
 to, and choosing one drops it.
 
-`x`, `m`, `a` and `A` also answer on **BOOTH's fleet**, and there they act on the
+`x`, `F`, `m`, `a` and `A` also answer on **BOOTH's fleet**, and there they act on the
 row's own machine and project rather than on the tab you are looking at — the one
 list in the workbench where those are routinely not the same thing.
 
@@ -187,15 +188,16 @@ commit box and the sync buttons, which is what `C` goes to.
 machine, or the project the cursor names · `a` start that project's agent, or on
 a machine row open a folder there · `A` pick which · `x` end what the row is: the
 session on an agent, the workspace and
-everything in it on a project (which asks) · `z` fold this machine or project ·
+everything in it on a project (which asks) · `F` fork the agent: a new pane on
+a copy of its conversation, listed under it · `z` fold this machine or project ·
 `Z` fold every project · `tab` the preview · `m` the row's menu · `?` the key
 card: all of these beside the list, with what the buttons and icons mean.
 `esc`, `?` or a click on the card closes it, and the keys work while it is up.
 On the fleet `?` is the card rather than the whole reference, which is still
 the footer's `[help]`.
 
-Ten keys, and every one of them is a key this workbench already had: `a` and `A`
-are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`
+Ten keys, and every one of them is a key this workbench already had: `a`, `A` and
+`F` are the AGENTS rail's, and `z`/`Z` are the DIFF page's, marks (`v` open, `>`
 folded) and all. It used to be six, and the reason given was that the rest of the
 rails' table is about a project and this page is not in one — which stopped being
 true when its rows became projects.

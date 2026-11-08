@@ -212,6 +212,7 @@ missing either fails the whole file's parse on the daemon side (see
 | `command` | string | *required* | The executable. Resolved against `PATH` first, then `~/.local/bin`, `~/.bun/bin`, `~/bin` and the newest nvm `bin` — so an npm-installed CLI is found even though the daemon's `PATH` is not a login shell's. The USAGE page decides *installed* by this same resolution, so what it reports and what a pane can launch cannot disagree. |
 | `args` | list of strings | `[]` | Argv for a fresh launch. |
 | `resume_args` | list of strings | `[]` | Argv used *instead of* `args` when restart restore reopens this agent's conversation. Empty means "no resume support": the pane comes back repainted, on a fresh conversation. |
+| `fork_args` | list of strings | `[]` | Argv used *instead of* `args` to **fork** this agent: start a new pane on a copy of a running pane's conversation (`butai agent fork`, `F` on the AGENTS rail). `{parent_session_id}` is the conversation being copied, and `{session_id}` is a new id for the copy. Empty means "cannot be forked", and a fork is refused with that reason. |
 | `env` | table of strings | `{}` | Extra environment for the child, applied after butai's own variables. |
 | `waiting_pattern` | string (regex) | unset | Replaces the built-in "blocked on you" markers for this agent. Matched case-insensitively against the footer band, one line at a time. |
 | `busy_pattern` | string (regex) | unset | Replaces the built-in "still working" markers for this agent. |
@@ -225,6 +226,13 @@ directory*", so two agents in one workspace would reopen the same transcript
 and interleave into it. Note that the id is *set* with one flag and *reopened*
 with another, because both CLIs refuse to re-declare an id that already exists.
 
+**`{parent_session_id}`** is for `fork_args` only. It is the conversation of the
+pane being forked, and `{session_id}` there is the fresh id butai mints for the
+copy. Name both. A `fork_args` that copies without naming the copy still runs,
+but leaves butai nothing to reopen the fork by after a restart. A fork needs
+`{parent_session_id}`, so a launcher that does not let butai name its
+conversations cannot be forked.
+
 Both patterns *replace* the built-in tables rather than adding to them, which is
 the only shape that can take back a false positive as well as add a missing
 match. Anchor `busy_pattern` to something a status line offers (`esc to
@@ -235,22 +243,25 @@ ever fires.
 
 **The built-ins**, always present unless `builtin_agents = false`, and each replaced by the block of its name:
 
-| `name` / `command` | `args` | `resume_args` |
-|---|---|---|
-| `claude` | `--dangerously-skip-permissions --session-id {session_id}` | `--dangerously-skip-permissions --resume {session_id}` |
-| `codex` | `--dangerously-bypass-approvals-and-sandbox` | — |
-| `gemini` | `--yolo --session-id {session_id}` | `--yolo --resume {session_id}` |
-| `opencode` | —; `OPENCODE_PERMISSION={"*":"allow"}` in its environment | — |
-| `aider` | `--yes-always` | — |
-| `agy` | `--dangerously-skip-permissions` | — |
+| `name` / `command` | `args` | `resume_args` | `fork_args` |
+|---|---|---|---|
+| `claude` | `--dangerously-skip-permissions --session-id {session_id}` | `--dangerously-skip-permissions --resume {session_id}` | `--dangerously-skip-permissions --resume {parent_session_id} --fork-session --session-id {session_id}` |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | — | — |
+| `gemini` | `--yolo --session-id {session_id}` | `--yolo --resume {session_id}` | — |
+| `opencode` | —; `OPENCODE_PERMISSION={"*":"allow"}` in its environment | — | — |
+| `aider` | `--yes-always` | — | — |
+| `agy` | `--dangerously-skip-permissions` | — | — |
 
 Each launches unattended because agents run in rail panes. OpenCode expresses
 that as an inline permission configuration; the other CLIs use auto-approve
 flags. The empty `resume_args` are deliberate, not gaps: `codex`, `opencode`
 and `agy` assign their own conversation ids and have no way to be told one at
 launch, and `aider`'s history is per directory, so there is nothing per-pane to
-name. A wrong flag here makes the CLI exit on launch, so fill them in yourself
-only after checking against the CLI you actually run.
+name. The empty `fork_args` are deliberate too. `codex fork <id>` and `opencode
+--session <id> --fork` exist, but butai knows neither CLI's conversation ids,
+and `gemini` and `aider` have no fork. A wrong flag here makes the CLI exit on
+launch, so fill them in yourself only after checking against the CLI you
+actually run.
 
 ### `[keys]`
 

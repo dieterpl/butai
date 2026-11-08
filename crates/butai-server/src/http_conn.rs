@@ -370,6 +370,24 @@ async fn route(
                 _ => ApiReply::BadRequest("bad workspace or pane id".into()),
             }
         }
+        // Copy an agent onto a new pane: same conversation so far, its own from
+        // here. Answers the new pane's id, so a caller need not diff the roster.
+        (&Method::POST, ["v1", "workspaces", id, "panes", pane, "fork"]) => {
+            match (sid(id), pid(pane), parse_or_default::<ForkBody>(&body)) {
+                (Some(ws), Some(pane), Ok(b)) => {
+                    let req = ApiRequest::ForkAgent {
+                        ws,
+                        pane,
+                        background: b.background,
+                        origin: b.origin,
+                    };
+                    call(&events, req).await
+                }
+                (None, _, _) => ApiReply::BadRequest(format!("bad workspace id {id:?}")),
+                (_, None, _) => ApiReply::BadRequest(format!("bad pane id {pane:?}")),
+                (_, _, Err(e)) => ApiReply::BadRequest(e),
+            }
+        }
         // Set what a chat is for. Replaces the role and the labels together —
         // see `ApiRequest::TagAgent` for why it is a whole-list write.
         (&Method::PUT, ["v1", "workspaces", id, "panes", pane, "tags"]) => {
@@ -915,6 +933,7 @@ fn reply_to_response(reply: ApiReply) -> Response<ResBody> {
         }
         ApiReply::Ok => json(StatusCode::OK, &serde_json::json!({ "ok": true })),
         ApiReply::Created(id) => json(StatusCode::CREATED, &serde_json::json!({ "id": id })),
+        ApiReply::Forked(pane) => json(StatusCode::CREATED, &serde_json::json!({ "pane": pane })),
         ApiReply::NotFound(m) => json(StatusCode::NOT_FOUND, &err_obj(&m)),
         ApiReply::BadRequest(m) => json(StatusCode::BAD_REQUEST, &err_obj(&m)),
         ApiReply::Busy(m) => json(StatusCode::CONFLICT, &err_obj(&m)),
@@ -1159,6 +1178,17 @@ struct MkDirBody {
     #[serde(default)]
     path: Option<String>,
     name: String,
+}
+
+/// Everything optional, so an empty body is an ordinary fork.
+#[derive(Deserialize, Default)]
+struct ForkBody {
+    /// As on a spawn: do not take the stage.
+    #[serde(default)]
+    background: bool,
+    /// As on a spawn — see `AgentDto::origin`.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 #[derive(Deserialize)]

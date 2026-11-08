@@ -68,6 +68,10 @@ pub enum VerbId {
     /// Stop the pane the cursor is on. One id for both sections: the rails
     /// differ in what they hold, not in what killing a row means.
     Kill,
+    /// Copy the agent the cursor is on into a new pane, on the same
+    /// conversation — `butai agent fork` from the rail. `F`, since `f` is links. AGENTS only: a process
+    /// has no conversation to copy.
+    Fork,
     /// Open the row's context menu — the one the right button opens.
     ///
     /// Answered by the loop rather than by [`crate::workbench`]'s rail
@@ -618,6 +622,7 @@ pub fn agents_verbs(pinned: bool) -> &'static [Verb] {
         verb('a', "new", VerbId::NewAgent),
         verb('A', "new...", VerbId::PickAgent),
         danger('x', "kill", VerbId::Kill),
+        quiet('F', "fork", VerbId::Fork),
         quiet('m', "menu", VerbId::Menu),
     ];
     // Unpinned, `a` opens the very chooser `A` would, so only one of them is
@@ -627,6 +632,7 @@ pub fn agents_verbs(pinned: bool) -> &'static [Verb] {
         verb('a', "new...", VerbId::NewAgent),
         quiet('A', "new...", VerbId::PickAgent),
         danger('x', "kill", VerbId::Kill),
+        quiet('F', "fork", VerbId::Fork),
         quiet('m', "menu", VerbId::Menu),
     ];
     if pinned {
@@ -939,6 +945,20 @@ mod tests {
             assert_eq!(menu.key, 'm');
             assert!(!menu.footer, "the menu should not take a column from `x kill`");
         }
+    }
+
+    /// `F` forks the agent row on both AGENTS tables, and like `m` it is not
+    /// drawn: the row is full, and the menu's "fork agent" is the visible way.
+    /// Capital because bare `f` is the links picker on every rail.
+    #[test]
+    fn the_agents_rail_forks_on_capital_f_without_drawing_it() {
+        for pinned in [true, false] {
+            let fork = agents_verbs(pinned).iter().find(|v| v.id == VerbId::Fork);
+            let fork = fork.expect("a fork verb");
+            assert_eq!(fork.key, 'F');
+            assert!(!fork.footer, "fork should not take a column from `x kill`");
+        }
+        assert!(procs_verbs().iter().all(|v| v.id != VerbId::Fork), "a process cannot fork");
     }
 
     /// Killing is drawn in the danger colour and spawning is not — the surface

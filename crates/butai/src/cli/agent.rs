@@ -70,6 +70,33 @@ pub enum AgentCmd {
         #[arg(long = "label", value_name = "LABEL", value_delimiter = ',')]
         labels: Vec<String>,
     },
+    /// Copy a running agent into a new pane, printing its pane id
+    ///
+    /// The copy starts on the same conversation and goes its own way from
+    /// there; it is listed under the agent it was copied from. Only an agent
+    /// whose launcher has `fork_args` can be forked (the built-in `claude`).
+    Fork {
+        /// Pane id, agent name, or `stage`
+        target: String,
+        /// Do not take the stage — leave the human's view where it is
+        #[arg(long)]
+        background: bool,
+        /// Send this prompt once the copy is up
+        #[arg(long, value_name = "TEXT")]
+        prompt: Option<String>,
+        /// With --prompt, block until the copy finishes it
+        #[arg(long)]
+        wait: bool,
+        /// Give up after this many milliseconds when waiting
+        #[arg(long, value_name = "MS", default_value_t = 300_000)]
+        timeout: u64,
+        /// Give the copy a role: lead, worker, loop or watch
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Give the copy a label (repeatable, or comma-separated)
+        #[arg(long = "label", value_name = "LABEL", value_delimiter = ',')]
+        labels: Vec<String>,
+    },
     /// Show or change an agent's role and labels
     ///
     /// With no flags it prints them, and who started the agent. The flags apply
@@ -150,6 +177,10 @@ pub async fn run(cmd: AgentCmd, ctx: &Ctx) -> Result<u8> {
         AgentCmd::Spawn { kind, background, prompt, wait, timeout, role, labels } => {
             let tags = TagEdit { role, add: labels, ..TagEdit::default() };
             spawn(ctx, &kind, background, prompt, wait, timeout, tags).await
+        }
+        AgentCmd::Fork { target, background, prompt, wait, timeout, role, labels } => {
+            let tags = TagEdit { role, add: labels, ..TagEdit::default() };
+            fork(ctx, &target, background, prompt, wait, timeout, tags).await
         }
         AgentCmd::Tag { target, role, no_role, add, remove, clear } => {
             tag(ctx, &target, TagEdit { role, no_role, add, remove, clear }).await
@@ -452,7 +483,53 @@ async fn spawn(
     let Some(fresh) = after.iter().map(|a| a.pane).filter(|p| !known.contains(p)).max() else {
         anyhow::bail!("the daemon accepted the spawn but no new agent appeared");
     };
-    let at = Resolved { ws, pane: fresh };
+    started(ctx, Resolved { ws, pane: fresh }, tags, prompt, wait, timeout, head).await
+}
+
+/// Copy a running agent onto a new pane — `butai agent fork`.
+///
+/// The daemon does the copying and answers the new pane's id, so unlike
+/// [`spawn`] there is no roster to diff. Everything after is spawn's: the same
+/// tags, the same bare id on stdout, the same `--prompt` and `--wait`.
+///
+/// Forking your own pane is allowed, unlike sending to it: an agent that wants
+/// a second line of thought from where it stands is the obvious caller, and
+/// the copy is a different pane from the first keystroke.
+async fn fork(
+    ctx: &Ctx,
+    target: &str,
+    background: bool,
+    prompt: Option<String>,
+    wait: bool,
+    timeout: u64,
+    tags: TagEdit,
+) -> Result<u8> {
+    let tags = if tags.is_empty() { None } else { Some(tags.apply(None, Vec::new())?) };
+    let at = pane::resolve(&ctx.api, target, ctx.ws.as_deref()).await?;
+    let head = if wait { Some(notification_head(&ctx.api).await?) } else { None };
+    let origin = if std::env::var_os("BUTAI_PANE").is_some() { "agent" } else { "cli" };
+    let body = serde_json::json!({ "background": background, "origin": origin });
+    let reply = ctx.api.post(&format!("{}/fork", at.route()), &body).await?;
+    let reply: serde_json::Value = serde_json::from_slice(&reply)?;
+    let Some(fresh) = reply.get("pane").and_then(|p| p.as_u64()) else {
+        anyhow::bail!("the daemon accepted the fork but named no pane: {reply}");
+    };
+    started(ctx, Resolved { ws: at.ws, pane: PaneId(fresh) }, tags, prompt, wait, timeout, head)
+        .await
+}
+
+/// What `spawn` and `fork` do once their agent exists: tag it, print its id,
+/// and hand it `--prompt`, waiting on it with `--wait`.
+async fn started(
+    ctx: &Ctx,
+    at: Resolved,
+    tags: Option<(Option<String>, Vec<String>)>,
+    prompt: Option<String>,
+    wait: bool,
+    timeout: u64,
+    head: Option<u64>,
+) -> Result<u8> {
+    let fresh = at.pane;
     if let Some((role, labels)) = tags {
         put_tags(&ctx.api, at, role, labels).await?;
     }

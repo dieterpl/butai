@@ -2130,6 +2130,15 @@ pub async fn run(
                         }
                         dirty = true;
                     }
+                    Flow::ForkSelected => {
+                        match selected_route(&daemons, &hosts, &view) {
+                            Some(at) => {
+                                fork_and_show(&daemons, &mut view, &mut following, at).await
+                            }
+                            None => view.flash = Some("nothing selected".into()),
+                        }
+                        dirty = true;
+                    }
                     Flow::Control(cmd) => {
                         let d = active_daemon(&daemons, &hosts, &view);
                         match crate::conn::control_request(&sockets[d], cmd).await {
@@ -2660,6 +2669,7 @@ pub async fn run(
                                             &mut view,
                                             &mut forwards,
                                             &mut sockets,
+                                            &mut following,
                                             menu.target(),
                                             *row,
                                         )
@@ -2717,6 +2727,7 @@ pub async fn run(
                                         &mut view,
                                         &mut forwards,
                                         &mut sockets,
+                                        &mut following,
                                         target,
                                         row,
                                     )
@@ -5860,6 +5871,37 @@ struct Route {
 }
 
 /// Stop a pane, wherever it lives.
+/// Fork the agent at `at` and show the copy the way a new agent is shown on
+/// this page — on the stage, or on BOOTH by following it into the fleet. A
+/// refusal is the daemon's own sentence ("claude has no fork_args…") in the
+/// flash line, since it is the one place that says why.
+async fn fork_and_show(
+    daemons: &[Daemon],
+    view: &mut View,
+    following: &mut Option<NewAgentFollow>,
+    at: Route,
+) {
+    match fork_pane(daemons, at).await {
+        Ok(pane) if view.page == Page::Booth => {
+            view.staged = Some(pane);
+            *following = Some(NewAgentFollow::new(view, at.daemon, pane));
+            view.flash = Some(format!("forked pane {}", at.pane));
+        }
+        Ok(pane) => stage_new_pane(view, pane),
+        Err(e) => view.flash = Some(format!("fork: {e:#}")),
+    }
+}
+
+/// `POST .../panes/{pane}/fork`, answering the copy's pane id.
+async fn fork_pane(daemons: &[Daemon], at: Route) -> Result<PaneId> {
+    let d = daemons.get(at.daemon).context("that machine has gone")?;
+    let route = format!("/v1/workspaces/{}/panes/{}/fork", at.workspace, at.pane);
+    let reply = d.api.post(&route, &serde_json::json!({ "origin": "tui" })).await?;
+    let reply: serde_json::Value = serde_json::from_slice(&reply)?;
+    let pane = reply.get("pane").and_then(|p| p.as_u64()).context("the fork named no pane")?;
+    Ok(PaneId(pane))
+}
+
 async fn kill_pane(daemons: &[Daemon], at: Route) -> Result<()> {
     let d = daemons.get(at.daemon).context("that machine has gone")?;
     d.api.delete(&format!("/v1/workspaces/{}/processes/{}", at.workspace, at.pane)).await?;
@@ -6366,6 +6408,9 @@ enum Flow {
     /// Kill the row the focused left rail's cursor is on — the `x` both
     /// sections advertise, and the first row of the right-click menu.
     KillSelected,
+    /// Fork the agent the cursor is on — `F` on AGENTS and on BOOTH's fleet,
+    /// and the agent menu's "fork agent".
+    ForkSelected,
     /// Close the exact chat named by a BOOTH button, even inside a folded project.
     EndAgent(Route),
     /// One framed command on a fresh control connection.
@@ -6748,6 +6793,7 @@ fn handle_rail_key(k: event::KeyEvent, focus: Focus, rows: usize, pinned: bool) 
         // about a pane that was never named.
         crate::verbs::VerbId::Restart if rows > 0 => Flow::RestartProcess,
         crate::verbs::VerbId::Kill if rows > 0 => Flow::KillSelected,
+        crate::verbs::VerbId::Fork if rows > 0 => Flow::ForkSelected,
         // `m` is in the table so that it is bound, documented and out of the
         // other verbs' way — but the menu names the pane the cursor is on, and
         // that needs the workspace, which this function does not take. The loop
@@ -6785,6 +6831,9 @@ fn handle_fleet_key(k: event::KeyEvent, view: &View, rows: usize) -> Option<Flow
         // daemon about a pane that was never named, which is how the rails
         // spell the same guard.
         event::KeyCode::Char('x') if rows > 0 => Some(Flow::KillSelected),
+        // The rails' `F`, on the row's own agent wherever it lives. Capital,
+        // because bare `f` is the links picker everywhere off the stage.
+        event::KeyCode::Char('F') if rows > 0 => Some(Flow::ForkSelected),
         // The rails' own two, unchanged in meaning. `a` starts the project's
         // agent with nothing in between where one is named and opens the
         // chooser where none is; `A` is the chooser either way. What moves is
@@ -8324,12 +8373,14 @@ fn run_click(
 /// Every one of these is something a key already does; the menu is a second way
 /// to reach them, not a second implementation, so each goes through the same
 /// route the keyboard would use.
+#[allow(clippy::too_many_arguments)]
 async fn run_menu_row(
     daemons: &mut Vec<Daemon>,
     hosts: &mut Vec<Option<String>>,
     view: &mut View,
     forwards: &mut Vec<crate::ssh::Forward>,
     sockets: &mut Vec<PathBuf>,
+    following: &mut Option<NewAgentFollow>,
     target: chrome::MenuTarget,
     row: usize,
 ) -> Result<()> {
@@ -8344,10 +8395,13 @@ async fn run_menu_row(
         // fleet they are routinely not, and "close all agents" reading the
         // active tab would empty a project nobody had asked about.
         (MenuTarget::Agent { daemon, workspace, pane }, 0) => {
+            fork_and_show(daemons, view, following, Route { daemon, workspace, pane }).await;
+        }
+        (MenuTarget::Agent { daemon, workspace, pane }, 1) => {
             kill_pane(daemons, Route { daemon, workspace, pane }).await?;
         }
         (MenuTarget::Agent { daemon, workspace, pane }, row) => {
-            let keep = (row == 1).then_some(pane);
+            let keep = (row == 2).then_some(pane);
             let panes: Vec<PaneId> = daemons
                 .get(daemon)
                 .and_then(|d| d.state.workspace(workspace))
@@ -15830,15 +15884,21 @@ name = \"terminal\"
         // what "close others" acts on, and what a fleet row can differ on.
         assert_eq!(tags.target(), MenuTarget::Agent { daemon: 0, workspace: ws.id, pane: second });
         assert_eq!(list.items[0], "○ role  lead");
-        // Then the close rows, which the rail has no `[x]` to reach otherwise.
+        // Then fork and the close rows, which the rail has no `[x]` to reach
+        // otherwise.
         assert_eq!(
-            list.items[list.items.len() - 3..],
-            ["  close agent", "  close others", "  close all agents"]
+            list.items[list.items.len() - 4..],
+            ["  fork agent", "  close agent", "  close others", "  close all agents"]
         );
         let rows = tags.rows();
         assert_eq!(
-            rows[rows.len() - 3..],
-            [chrome::TagRow::Close(0), chrome::TagRow::Close(1), chrome::TagRow::Close(2)]
+            rows[rows.len() - 4..],
+            [
+                chrome::TagRow::Close(0),
+                chrome::TagRow::Close(1),
+                chrome::TagRow::Close(2),
+                chrome::TagRow::Close(3)
+            ]
         );
         assert!(tags.pick(rows.len() - 1).is_none(), "a close row is not a tag change");
 
@@ -16065,6 +16125,18 @@ name = \"terminal\"
                     for pinned in [true, false] {
                         assert!(crate::verbs::agents_verbs(pinned).iter().any(|v| v.key == 'a'));
                     }
+                    // The agent menu's "fork agent" is a click too, and `F` on
+                    // the row reaches the same fork — on the rail and on the
+                    // fleet alike — without taking bare `f` from the links.
+                    let fork =
+                        event::KeyEvent::new(event::KeyCode::Char('F'), event::KeyModifiers::NONE);
+                    assert!(matches!(
+                        handle_rail_key(fork, Focus::Agents, 1, false),
+                        Some(Flow::ForkSelected)
+                    ));
+                    let fleet = View { focus: Focus::AllAgents, ..Default::default() };
+                    assert!(matches!(handle_fleet_key(fork, &fleet, 1), Some(Flow::ForkSelected)));
+                    assert!(matches!(bare('f'), Flow::PickLinks), "`f` is still the links");
                 }
                 hit::Target::ProcsVerb(_) => {
                     assert!(crate::verbs::procs_verbs().iter().any(|v| v.key == 't'));

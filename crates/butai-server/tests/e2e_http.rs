@@ -35,6 +35,7 @@ async fn start_daemon_with_shell_agent(tmp: &tempfile::TempDir) -> PathBuf {
         command: "/bin/sh".into(),
         args: Vec::new(),
         resume_args: Vec::new(),
+        fork_args: Vec::new(),
         env: Default::default(),
         waiting_pattern: None,
         busy_pattern: None,
@@ -1355,6 +1356,7 @@ async fn a_machine_announcing_itself_is_reported_to_clients() {
         command: "/bin/sh".into(),
         args: Vec::new(),
         resume_args: Vec::new(),
+        fork_args: Vec::new(),
         env: Default::default(),
         waiting_pattern: None,
         busy_pattern: None,
@@ -2205,6 +2207,7 @@ async fn agents_are_listed_by_how_often_a_person_started_them() {
             command: "/bin/sh".into(),
             args: Vec::new(),
             resume_args: Vec::new(),
+            fork_args: Vec::new(),
             env: Default::default(),
             waiting_pattern: None,
             busy_pattern: None,
@@ -2233,4 +2236,140 @@ async fn agents_are_listed_by_how_often_a_person_started_them() {
     assert_eq!(rows[0]["count"], 2);
     assert_eq!(rows[1]["name"], "one");
     assert_eq!(rows[1]["count"], 0, "a background start is a helper, not a pick");
+}
+
+/// `POST .../panes/{pane}/fork` launches the agent's `fork_args` with the
+/// parent's conversation id and a fresh one for the copy, answers the new pane,
+/// and records it as the parent's child — and refuses, with the reason, every
+/// fork it cannot honour.
+///
+/// The agent is a shell that prints the ids it was handed, so the test reads
+/// back exactly the argv a real CLI would have been given.
+#[tokio::test]
+async fn forking_an_agent_copies_its_conversation_into_a_child_pane() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("butai.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut config = Config::with_defaults();
+    config.general.default_shell = Some("/bin/sh".into());
+    config.agents.clear();
+    let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    config.agents.push(butai_server::config::AgentDef {
+        name: "fk".into(),
+        command: "/bin/sh".into(),
+        args: argv(&["-c", "echo SID=$0; exec /bin/sh", "{session_id}"]),
+        resume_args: argv(&["-c", "exec /bin/sh", "{session_id}"]),
+        fork_args: argv(&[
+            "-c",
+            "echo FORK_OF=$0; echo AS=$1; exec /bin/sh",
+            "{parent_session_id}",
+            "{session_id}",
+        ]),
+        env: Default::default(),
+        waiting_pattern: None,
+        busy_pattern: None,
+    });
+    config.agents.push(butai_server::config::AgentDef {
+        name: "plain".into(),
+        command: "/bin/sh".into(),
+        args: Vec::new(),
+        resume_args: Vec::new(),
+        fork_args: Vec::new(),
+        env: Default::default(),
+        waiting_pattern: None,
+        busy_pattern: None,
+    });
+    tokio::spawn(butai_server::daemon::serve(listener, config, None));
+
+    let (status, body) = http(&socket, "POST", "/v1/workspaces", Some(r#"{"name":"f"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+    let (status, body) =
+        http(&socket, "POST", "/v1/workspaces/1/agents", Some(r#"{"type":"fk"}"#)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let parent = first_agent_pane(&socket).await;
+    let fork_route = format!("/v1/workspaces/1/panes/{parent}/fork");
+
+    // Nobody has typed into it, so there is no conversation to copy yet.
+    let (status, body) = http(&socket, "POST", &fork_route, None).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("not been spoken to"), "body: {body}");
+
+    let input = format!("/v1/workspaces/1/panes/{parent}/input");
+    let (status, body) = http(&socket, "POST", &input, Some(r#"{"paste":"true\n"}"#)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let out = format!("/v1/workspaces/1/panes/{parent}/output?lines=20");
+    let text = poll_until(&socket, &out, "the parent's id", |b| b.contains("SID=")).await;
+    let sid: String = text
+        .split("SID=")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect();
+    assert_eq!(sid.len(), 36, "not a uuid: {sid:?} in {text}");
+
+    let (status, body) = http(&socket, "POST", &fork_route, Some(r#"{"origin":"cli"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let fork = reply["pane"].as_u64().expect("the reply names the new pane");
+    assert_ne!(fork, parent);
+
+    let out = format!("/v1/workspaces/1/panes/{fork}/output?lines=20");
+    let text = poll_until(&socket, &out, "the fork's ids", |b| b.contains("FORK_OF=")).await;
+    assert!(text.contains(&format!("FORK_OF={sid}\"")), "copied the wrong one: {text}");
+    let copy: String = text
+        .split("AS=")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect();
+    assert_eq!(copy.len(), 36, "the copy is not named: {text}");
+    assert_ne!(copy, sid, "the copy must be its own conversation");
+
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let row = rows.iter().find(|r| r["pane"] == fork).expect("the fork is an agent row");
+    assert_eq!(row["parent"], parent, "{row}");
+    assert_eq!(row["origin"], "cli", "{row}");
+
+    // A launcher with no fork_args says so rather than starting an empty chat.
+    let (status, body) =
+        http(&socket, "POST", "/v1/workspaces/1/agents", Some(r#"{"type":"plain"}"#)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let plain = rows
+        .iter()
+        .filter_map(|r| r["pane"].as_u64())
+        .filter(|p| *p != parent && *p != fork)
+        .max()
+        .expect("plain row");
+    let route = format!("/v1/workspaces/1/panes/{plain}/fork");
+    let (status, body) = http(&socket, "POST", &route, None).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("no fork_args"), "body: {body}");
+    let before = rows.len();
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.len(), before, "a refused fork started something");
+
+    // A pane that is not there is a 404; one that is a process is a 400.
+    let (status, body) = http(&socket, "POST", "/v1/workspaces/1/panes/9999/fork", None).await;
+    assert_eq!(status, 404, "body: {body}");
+    let (status, body) = http(
+        &socket,
+        "POST",
+        "/v1/workspaces/1/processes",
+        Some(r#"{"name":"p","command":"sleep 30"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/processes", None).await;
+    let procs: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let proc_pane = procs.iter().find(|p| p["name"] == "p").expect("process row")["pane"].clone();
+    let route = format!("/v1/workspaces/1/panes/{proc_pane}/fork");
+    let (status, body) = http(&socket, "POST", &route, None).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("not an agent"), "body: {body}");
 }

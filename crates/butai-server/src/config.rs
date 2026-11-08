@@ -183,6 +183,18 @@ pub struct AgentDef {
     /// in both lists, which is why the built-ins below spell them out.
     #[serde(default)]
     pub resume_args: Vec<String>,
+    /// Args used *instead of* [`Self::args`] to start a **fork** of a running
+    /// agent: a new pane that opens on a copy of another pane's conversation
+    /// and then goes its own way (`butai agent fork`). Empty means "cannot be
+    /// forked", and a fork asked of it is refused with that reason rather than
+    /// started on an empty conversation, which would not be a fork at all.
+    ///
+    /// Takes two placeholders: `{parent_session_id}` is the conversation being
+    /// copied, `{session_id}` the new id butai mints for the copy. Naming the
+    /// copy matters as much as naming the original — it is what lets the fork
+    /// be reopened by [`Self::resume_args`] after a restart like any other pane.
+    #[serde(default)]
+    pub fork_args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Regex that means "blocked on you" when it matches this agent's footer.
@@ -297,34 +309,53 @@ fn builtin_agents() -> Vec<AgentDef> {
     // exits outright — so `--session-id` must appear only in `args` and
     // `--resume` only in `resume_args`.
     //
+    // Fourth column is `fork_args` (see [`AgentDef::fork_args`]): resume the
+    // parent's conversation under a *new* id rather than its own. claude
+    // takes `--session-id` alongside `--resume … --fork-session` and writes
+    // the copy under that id, which is what lets butai name the fork before it
+    // starts (verified against claude 2.1.319 on 2026-11-08). codex (`codex
+    // fork <id>`) and opencode (`--session <id> --fork`) can fork too, but
+    // assign their own ids, so butai has neither the parent's id to pass nor
+    // the copy's to resume; gemini has no fork at all.
+    //
     // Filled in only where verified against the installed CLI:
     // `claude` v2.1 and `gemini` v0.53.1, both 2026-08-03, and
     // `opencode` v1.1.25 on 2026-09-24. The rest are left empty
     // deliberately — a wrong flag makes the CLI exit on launch. Fill
     // them in via `[[agents]]` once checked against the CLI you
     // actually run.
-    type Builtin<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
+    type Builtin<'a> =
+        (&'a str, &'a [&'a str], &'a [&'a str], &'a [&'a str], &'a [(&'a str, &'a str)]);
     let builtins: [Builtin<'_>; 6] = [
         (
             "claude",
             &["--dangerously-skip-permissions", "--session-id", "{session_id}"],
             &["--dangerously-skip-permissions", "--resume", "{session_id}"],
+            &[
+                "--dangerously-skip-permissions",
+                "--resume",
+                "{parent_session_id}",
+                "--fork-session",
+                "--session-id",
+                "{session_id}",
+            ],
             &[],
         ),
         // Codex has no way to be told an id at launch; it assigns its
         // own, and `codex resume` takes it afterwards. Reopening the
         // right one therefore means learning the id from codex first,
         // which butai does not do yet.
-        ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[], &[]),
+        ("codex", &["--dangerously-bypass-approvals-and-sandbox"], &[], &[], &[]),
         (
             "gemini",
             &["--yolo", "--session-id", "{session_id}"],
             &["--yolo", "--resume", "{session_id}"],
             &[],
+            &[],
         ),
         // aider has no session concept at all: its history is per
         // directory, so there is nothing per-pane to name.
-        ("aider", &["--yes-always"], &[], &[]),
+        ("aider", &["--yes-always"], &[], &[], &[]),
         // OpenCode assigns its own opaque id on first launch. It can
         // reopen that id with `--session`, but cannot be told the id
         // butai minted before the session exists, so resume stays off.
@@ -332,7 +363,7 @@ fn builtin_agents() -> Vec<AgentDef> {
         // flag; the inline override is the documented unattended
         // equivalent and preserves every explicit `deny` only when a
         // user replaces this built-in with their own definition.
-        ("opencode", &[], &[], &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]),
+        ("opencode", &[], &[], &[], &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]),
         // Antigravity, Google's agent CLI and the announced successor
         // to `gemini`. Its binary is `agy`, so that is the agent's name
         // here, the same way the others are named after theirs.
@@ -345,15 +376,16 @@ fn builtin_agents() -> Vec<AgentDef> {
         // ambiguity `{session_id}` exists to remove.
         //
         // Flag verified against agy 1.1.12 on 2026-08-11.
-        ("agy", &["--dangerously-skip-permissions"], &[], &[]),
+        ("agy", &["--dangerously-skip-permissions"], &[], &[], &[]),
     ];
     builtins
         .iter()
-        .map(|(name, args, resume_args, env)| AgentDef {
+        .map(|(name, args, resume_args, fork_args, env)| AgentDef {
             name: (*name).into(),
             command: (*name).into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             resume_args: resume_args.iter().map(|s| s.to_string()).collect(),
+            fork_args: fork_args.iter().map(|s| s.to_string()).collect(),
             env: env.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
             // The built-ins are exactly the agents the generic tables are tuned
             // against, so they carry no overrides.
@@ -478,6 +510,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A built-in fork copies *this pane's* conversation and names the copy, or
+    /// there is no fork: copying "the most recent one" has the same two-agent
+    /// failure `--continue` has, and an unnamed copy cannot be reopened.
+    #[test]
+    fn every_builtin_fork_names_both_conversations() {
+        for agent in &Config::with_defaults().agents {
+            if agent.fork_args.is_empty() {
+                continue;
+            }
+            for placeholder in ["{parent_session_id}", "{session_id}"] {
+                assert!(
+                    agent.fork_args.iter().any(|a| a == placeholder),
+                    "{} forks without {placeholder}",
+                    agent.name
+                );
+            }
+            assert!(!agent.resume_args.is_empty(), "{} forks but cannot reopen", agent.name);
+        }
+        assert!(!Config::with_defaults().agent("claude").unwrap().fork_args.is_empty());
     }
 
     #[test]

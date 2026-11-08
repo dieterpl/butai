@@ -70,6 +70,7 @@ async fn windows_daemon_runs_commands_and_batch_agents_over_both_protocols() {
         command: agent.to_string_lossy().into_owned(),
         args: vec!["argument with spaces_日本語".into()],
         resume_args: vec![],
+        fork_args: Vec::new(),
         env: Default::default(),
         waiting_pattern: None,
         busy_pattern: None,

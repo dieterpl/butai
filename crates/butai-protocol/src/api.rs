@@ -1737,6 +1737,16 @@ pub enum ApiRequest {
         origin: Option<String>,
         parent: Option<PaneId>,
     },
+    /// Start a copy of agent `pane`: a new pane in the same workspace on a copy
+    /// of its conversation, recorded as its child. `background` and `origin`
+    /// mean what they do on [`ApiRequest::SpawnAgent`]. Refused with the reason
+    /// when the agent's launcher cannot fork, rather than started empty.
+    ForkAgent {
+        ws: SessionId,
+        pane: PaneId,
+        background: bool,
+        origin: Option<String>,
+    },
     NewProcess {
         ws: SessionId,
         name: String,
@@ -1937,6 +1947,9 @@ pub enum ApiReply {
     Ok,
     /// 201 with `{"id":<n>}`.
     Created(SessionId),
+    /// 201 with `{"pane":<n>}`: the pane a fork opened. Its own variant rather
+    /// than [`ApiReply::Created`], whose `id` is a workspace's.
+    Forked(PaneId),
     /// 404.
     NotFound(String),
     /// 400.

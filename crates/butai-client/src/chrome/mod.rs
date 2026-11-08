@@ -2566,9 +2566,15 @@ impl MenuTarget {
             // "others" and "all" mean *that agent's workspace*, wherever it is,
             // which is the same sentence on a rail — there the workspace is the
             // one you are in, and on BOOTH it is the one the row names.
-            MenuTarget::Agent { .. } => {
-                vec![("Close agent", false), ("Close others", false), ("Close all agents", true)]
-            }
+            //
+            // Fork first: it is the one row that makes something rather than
+            // ending it, and it should not sit beside "close all agents".
+            MenuTarget::Agent { .. } => vec![
+                ("Fork agent", false),
+                ("Close agent", false),
+                ("Close others", false),
+                ("Close all agents", true),
+            ],
             MenuTarget::Process(_) => vec![("Close", false), ("Restart", false)],
             MenuTarget::Tab(_) => vec![("Close workspace", true)],
             MenuTarget::RemoteTab(_) => vec![("Disconnect host", true)],
@@ -8972,6 +8978,7 @@ pub const BOOTH_KEYS: &[(&str, &str)] = &[
     ("a", "start an agent · on a machine, a folder"),
     ("A", "pick which agent"),
     ("x", "end the row · a project asks first"),
+    ("F", "fork the agent: a copy of its chat"),
     ("z", "fold this machine or project"),
     ("Z", "fold every project"),
     ("tab", "the preview"),

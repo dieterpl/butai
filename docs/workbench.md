@@ -387,13 +387,23 @@ row so its final output stays one Enter away — `x` is what dismisses it.
 | `A`, `alt-enter` | always ask |
 | `j` `k`, `enter` | move · put it on the stage |
 | `x` | kill the row. It does not ask — an agent's transcript is on disk |
-| `m` | the row's menu: its role and labels, then **close agent · close others · close all agents** |
+| `F` | fork the row: a new pane on a copy of its conversation, listed under it |
+| `m` | the row's menu: its role and labels, then **fork agent · close agent · close others · close all agents** |
 
 `m` is the right button's menu opened from the keyboard. It is the chat's tag
-menu, the same one BOOTH opens on a chat (see [BOOTH](#booth)), with the three
-close rows at the bottom; the last two of those live nowhere else in the
-interface. It is bound and documented but not drawn:
-the rail's one verb row is already full at `a new · A new... · x kill`.
+menu, the same one BOOTH opens on a chat (see [BOOTH](#booth)), with **fork
+agent** and the three close rows at the bottom; the last two of those live
+nowhere else in the interface. It is bound and documented but not drawn, and
+so is `F`: the rail's one verb row is already full at `a new · A new... · x kill`.
+
+A fork is a second pane on a copy of the agent's conversation so far, which
+then goes its own way, the same as [`butai agent fork`](cli.md#agent-fork). It
+takes the stage like a new agent, and BOOTH's fleet lists it under the agent it
+was copied from. Only a launcher with `fork_args` can fork, which out of the box
+is `claude` ([configuration.md](configuration.md#agents)). Any other agent, or
+one nobody has typed into yet, refuses with the reason in the flash line rather
+than starting an empty chat. It is capital `F` because bare `f` is the links
+picker.
 
 In the agent picker, `d` pins the highlighted agent as what `a` spawns; the
 SETTINGS page's **default agent** row does the same thing, and `ask every time`
@@ -1044,7 +1054,8 @@ state of is a row you have to unfold to read.
 The right button on a chat opens its tag menu, here and on a workspace's AGENTS
 rail alike: a role (`lead`, `worker`, `loop`, `watch`) and labels, the same ones
 the browser's BOOTH offers, set on the daemon and left open while you pick, then
-`close agent`, `close others` and `close all agents`, which close it. Like every right-click menu it opens beside the
+`fork agent`, which forks the chat (see [AGENTS](#agents)), and `close agent`,
+`close others` and `close all agents`, which close it. Like every right-click menu it opens beside the
 pointer, below and right of it, and flips above or to the left where the screen
 has no room; the same menu from `m` has no pointer to follow and is centred.
 
@@ -1078,8 +1089,8 @@ bar does not already offer about its tabs.
 Pasting with the cursor still on the fleet says `click the preview or Tab to it
 to type there` rather than silently landing in an agent on another machine.
 
-The fleet's bare keys are `j`, `k`, `enter`, `tab`, `x`, `m`, `a`, `A`, `z` and
-`Z`, and no more. It used to be the first six, and the reason given was that the
+The fleet's bare keys are `j`, `k`, `enter`, `tab`, `x`, `F`, `m`, `a`, `A`, `z`
+and `Z`, and no more. `F` forks the agent row, as on the rail. It used to be the first six, and the reason given was that the
 rest of the lettered rail verbs are about lists this page does not draw — a new
 agent belongs to a project, and BOOTH is not in one. That sentence stopped being
 true when the rows became projects. It survives in a better form: a new agent

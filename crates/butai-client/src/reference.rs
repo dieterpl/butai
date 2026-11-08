@@ -271,11 +271,21 @@ its screen in the middle.
     j / k       move the cursor
     enter       put the selected one on the stage
     x           kill it
-    m           the row's menu: close others, close all agents
+    F           fork it: a new pane on a copy of its conversation
+    m           the row's menu: fork agent, close others, close all agents
 
 `m` is the right-click menu, opened from the keyboard. It is where the two
 verbs that act on the *rest* of the rail live, and it is the only place
 they live.
+
+## Forking
+
+`F`, or **fork agent** on the menu, starts a second pane on a copy of the
+agent's conversation so far. From there the two go their own ways. The copy
+is listed under the agent it came from. Only an agent whose launcher has
+`fork_args` can be forked, which out of the box is `claude`. Any other agent
+says so in the flash line, and so does one nobody has typed into yet. A fork
+is capital `F` because bare `f` opens the links picker.
 
 ## The pin
 
