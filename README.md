@@ -76,6 +76,16 @@ against the release's `SHA256SUMS`, and drops `butai` in `/usr/local/bin` or
 `~/.local/bin`. No runtime and no dependencies — it's one binary.
 [Read it first](scripts/install.sh) if you'd rather; it's POSIX `sh`.
 
+**When GitHub's download links fail**, the same files are on
+**[the mirror](https://dieterpl.github.io/butai/)**, served by GitHub Pages:
+every recent release, each file checked against GitHub's own checksum before it
+was put there. The installer and `butai update` already fall back to it. The
+installer itself is there too:
+
+```sh
+curl -fsSL https://dieterpl.github.io/butai/install.sh | sh
+```
+
 **You only run that once.** After the first install butai keeps itself current:
 when a newer release exists it asks, once, and `yes` swaps the binary and
 restarts onto it with your workspaces, agents and scrollback intact. `no` means
@@ -111,8 +121,9 @@ curl -fsSL .../install.sh | BUTAI_VERSION=v1.0.0 BUTAI_INSTALL_DIR=~/bin sh
 <summary>Other ways</summary>
 
 **From a release tarball.** Grab it from the
-[latest release](https://github.com/dieterpl/butai/releases/latest) and put
-`butai` on your `PATH`. Every release ships the same tarball layout for each
+[latest release](https://github.com/dieterpl/butai/releases/latest), or from
+[the mirror](https://dieterpl.github.io/butai/), and put `butai` on your
+`PATH`. Every release ships the same tarball layout for each
 target below.
 
 | Platform | Targets |

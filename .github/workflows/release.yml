@@ -211,6 +211,7 @@ jobs:
           set -euo pipefail
           version="${{ steps.track.outputs.version }}"
           heading="## [$version]"
+          mirror="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
           if [ "${{ steps.track.outputs.prerelease }}" = "true" ]; then
             heading="## [Unreleased]"
           fi
@@ -237,6 +238,8 @@ jobs:
               echo "\`\`\`"
               echo
               echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
+              echo
+              echo "If a download link here fails, the same files are on the mirror: $mirror/#$GITHUB_REF_NAME"
             } >> notes.md
           else
             # A stable tag with no entry is a mistake worth failing on: it means
@@ -252,6 +255,8 @@ jobs:
               echo "Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | sh\`"
               echo
               echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
+              echo
+              echo "If a download link here fails, the same files are on the mirror: $mirror/#$GITHUB_REF_NAME"
             } >> notes.md
           fi
           echo "--- notes.md ---"; cat notes.md
@@ -271,3 +276,13 @@ jobs:
             --notes-file notes.md \
             "${flags[@]}" \
             dist/*.tar.gz dist/SHA256SUMS
+
+  # The same files on GitHub Pages, for when GitHub's anonymous download links
+  # fail — which in November 2026 they did for most requests, everywhere.
+  mirror:
+    needs: publish
+    uses: ./.github/workflows/mirror.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

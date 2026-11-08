@@ -1,0 +1,46 @@
+name: Mirror
+
+# Republishes the release mirror at https://dieterpl.github.io/butai/ — the
+# newest releases' files, checksums and version list on GitHub Pages, for when
+# GitHub's own anonymous download links fail. See scripts/mirror-site.sh.
+#
+# `release.yml` calls this after every publish, so a new tag is on the mirror
+# minutes after it is on GitHub. Dispatching it by hand rebuilds the mirror
+# from whatever is published, which is how it gets refilled after a change to
+# what it keeps.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer run supersedes a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: mirror to GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/mirror-site.sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

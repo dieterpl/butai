@@ -43,6 +43,8 @@ set -eu
 
 REPO="dieterpl/butai"
 BIN="butai"
+# The same releases on GitHub Pages; see `scripts/mirror-site.sh`.
+MIRROR="https://dieterpl.github.io/butai"
 
 say()  { printf '%s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -56,12 +58,40 @@ need uname
 need mkdir
 need tar
 
+# A request that fails is tried again. GitHub's anonymous endpoints — the only
+# kind an installer has — spent November 2026 answering most requests with a
+# 504, often after eleven seconds, and a few without, so one refusal says
+# little. `fetch` takes how many tries a source is worth (default three) and
+# `fetch_so` tries twice. curl retries only what is worth retrying (timeouts,
+# 408, 429, 5xx) and fails a 404 at once; busybox's wget has no such switch, so
+# it gets a plain loop. With curl nothing waits forever: a stalled request is
+# dropped and the next source asked. wget keeps its own defaults, because `-T`
+# crashes the busybox 1.30 that Ubuntu ships.
+#
+# A download also asks for `application/octet-stream`. The browser links and
+# the mirror ignore it; the API's per-asset link needs it to send the file
+# rather than a description of it.
 if command -v curl >/dev/null 2>&1; then
-    fetch()   { curl -fsSL "$1" -o "$2"; }
-    fetch_so() { curl -fsSL "$1"; }
+    fetch() {
+        curl -fsSL --connect-timeout 15 --max-time 300 --retry $((${3:-3} - 1)) --retry-delay 1 \
+            -H 'Accept: application/octet-stream' "$1" -o "$2"
+    }
+    fetch_so() { curl -fsSL --connect-timeout 15 --max-time 60 --retry 1 --retry-delay 1 "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-    fetch()   { wget -qO "$2" "$1"; }
-    fetch_so() { wget -qO- "$1"; }
+    fetch() {
+        _try=1
+        while [ "$_try" -le "${3:-3}" ]; do
+            wget -q -O "$2" --header='Accept: application/octet-stream' "$1" && return 0
+            [ "$_try" -lt "${3:-3}" ] && sleep "$_try"
+            _try=$((_try + 1))
+        done
+        return 1
+    }
+    fetch_so() {
+        wget -q -O- "$1" && return 0
+        sleep 1
+        wget -q -O- "$1"
+    }
 else
     err "this installer needs \`curl\` or \`wget\` and found neither"
 fi
@@ -133,21 +163,30 @@ elif [ "$channel" = dev ]; then
     # cut after a dev tag is the case where the two differ, and `BUTAI_VERSION`
     # is the way to say exactly which one you meant. The installed butai then
     # keeps itself current with the real comparison; see `crates/butai-update`.
-    version=$(fetch_so "https://api.github.com/repos/$REPO/releases?per_page=30" \
+    #
+    # When the API does not answer at all, the mirror names its newest dev tag.
+    version=$( (fetch_so "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null || true) \
         | tr -d ' \t\n' \
         | tr '{' '\n' \
         | grep '"prerelease":true' \
         | grep -v '"draft":true' \
         | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' \
         | head -n 1)
-    [ -n "$version" ] || err "this repository publishes no prerelease — install a stable build, or set BUTAI_VERSION=vX.Y.Z-dev.N"
+    [ -n "$version" ] || version=$(fetch_so "$MIRROR/latest-dev" 2>/dev/null | head -n 1 || true)
+    [ -n "$version" ] || err "could not find a dev release on GitHub or its mirror — set BUTAI_VERSION=vX.Y.Z-dev.N and retry"
 else
     say "==> finding the latest release"
-    version=$(fetch_so "https://api.github.com/repos/$REPO/releases/latest" \
+    version=$( (fetch_so "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || true) \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1)
+    [ -n "$version" ] || version=$(fetch_so "$MIRROR/latest" 2>/dev/null | head -n 1 || true)
     [ -n "$version" ] || err "could not determine the latest release — set BUTAI_VERSION=vX.Y.Z and retry"
 fi
+# Read from the network and about to be used in URLs and paths, so it must look
+# like a tag.
+case "$version" in
+    *[!A-Za-z0-9._-]*|'') err "\`$version\` does not look like a release tag" ;;
+esac
 bare_version=${version#v}
 info "version $version"
 info "target  $target"
@@ -157,6 +196,53 @@ base="https://github.com/$REPO/releases/download/$version"
 # ── download ─────────────────────────────────────────────────────────────
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t butai)
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# GitHub's description of this release, one JSON object per line — the
+# flattening the dev lookup above explains. It holds what the browser link
+# does not: each file's API link and the sha256 GitHub recorded for it. Missing
+# when the API is down, and everything below copes with that.
+release=$( (fetch_so "https://api.github.com/repos/$REPO/releases/tags/$version" 2>/dev/null || true) \
+    | tr -d ' \t\n' | tr '{' '\n')
+
+# An asset's own object is cut in two by the `uploader` object inside it: the
+# first part holds its name and API link, the second its digest and browser
+# link. So each is looked up by what shares its part.
+api_url() {
+    printf '%s\n' "$release" | grep -F "\"name\":\"$1\"" \
+        | sed -n 's|.*"url":"\(https://api\.github\.com/repos/[^"]*/releases/assets/[0-9]*\)".*|\1|p' \
+        | head -n 1
+}
+recorded_sum() {
+    printf '%s\n' "$release" | grep -F "/releases/download/$version/$1\"" \
+        | sed -n 's/.*"digest":"sha256:\([0-9a-f]\{64\}\)".*/\1/p' \
+        | head -n 1
+}
+
+# Does the release publish this file? Yes when the API did not answer, since
+# then there is no list to say otherwise.
+has_asset() {
+    [ -z "$release" ] || printf '%s\n' "$release" | grep -qF "\"name\":\"$1\""
+}
+
+# One file of the release, from wherever answers first: GitHub's link, then
+# the mirror, then the API's link — the order they kept working in when the
+# first one stopped. GitHub's link gets two tries rather than three, because the
+# mirror behind it is the one that kept answering.
+get_asset() {
+    has_asset "$1" || return 1
+    if fetch "$base/$1" "$2" 2 2>/dev/null; then return 0; fi
+    if fetch "$MIRROR/$version/$1" "$2" 2>/dev/null; then
+        info "GitHub's link failed; took $1 from the mirror"
+        return 0
+    fi
+    _api=$(api_url "$1")
+    if [ -n "$_api" ] && fetch "$_api" "$2" 2 2>/dev/null; then
+        info "GitHub's link failed; took $1 through the API"
+        return 0
+    fi
+    rm -f "$2"
+    return 1
+}
 
 # What a release publishes today: `<bin>-<version>-<triple>.tar.gz`, holding the
 # binary plus README and LICENSE — one shape for every target, from both
@@ -172,44 +258,48 @@ tar_asset="${BIN}-${bare_version}-${target}.tar.gz"
 bare_asset="${BIN}-${target}"
 
 say "==> downloading $tar_asset"
-if fetch "$base/$tar_asset" "$tmp/$tar_asset" 2>/dev/null; then
+if get_asset "$tar_asset" "$tmp/$tar_asset"; then
     asset="$tar_asset"
     asset_is_tar=1
-elif fetch "$base/$bare_asset" "$tmp/$bare_asset" 2>/dev/null; then
+elif get_asset "$bare_asset" "$tmp/$bare_asset"; then
     info "no tarball for $target; took the bare binary"
     asset="$bare_asset"
     asset_is_tar=0
 else
-    err "download failed: $base/$tar_asset (does that release have an asset for $target?)"
+    err "download failed: $tar_asset from GitHub, its API and $MIRROR (does $version have an asset for $target?)"
 fi
 
-# ── verify, when the release publishes checksums ─────────────────────────
-if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
-    if command -v sha256sum >/dev/null 2>&1; then
-        sum=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
-    elif command -v shasum >/dev/null 2>&1; then
-        sum=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
-    else
-        sum=""
-    fi
+# ── verify ───────────────────────────────────────────────────────────────
+#
+# Against the sha256 GitHub recorded when the file was uploaded, when the API
+# answered: that holds wherever the bytes came from, the mirror included. Else
+# against the release's SHA256SUMS, which comes from the same place the file did.
+if command -v sha256sum >/dev/null 2>&1; then
+    sum=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+    sum=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
+else
+    sum=""
+fi
 
-    if [ -n "$sum" ]; then
-        want=$(grep -F "$asset" "$tmp/SHA256SUMS" 2>/dev/null | cut -d' ' -f1 | head -n 1)
-        if [ -z "$want" ]; then
-            info "no checksum published for $asset — skipping verification"
-        elif [ "$sum" = "$want" ]; then
-            info "checksum ok"
-        else
-            err "checksum mismatch for $asset
-  expected $want
+want=$(recorded_sum "$asset")
+sum_from="GitHub's record"
+if [ -z "$want" ] && get_asset SHA256SUMS "$tmp/SHA256SUMS"; then
+    want=$(grep -F "$asset" "$tmp/SHA256SUMS" 2>/dev/null | cut -d' ' -f1 | head -n 1)
+    sum_from="SHA256SUMS"
+fi
+
+if [ -z "$sum" ]; then
+    info "no sha256 tool available — skipping verification"
+elif [ -z "$want" ]; then
+    info "no checksum published for $asset — skipping verification"
+elif [ "$sum" = "$want" ]; then
+    info "checksum ok ($sum_from)"
+else
+    err "checksum mismatch for $asset
+  expected $want ($sum_from)
   got      $sum
 This is worth investigating rather than working around."
-        fi
-    else
-        info "no sha256 tool available — skipping verification"
-    fi
-else
-    info "release publishes no SHA256SUMS — skipping verification"
 fi
 
 # ── unpack ───────────────────────────────────────────────────────────────

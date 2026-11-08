@@ -24,7 +24,7 @@ testsuite/             the Docker suite: a real binary, real PTYs, real apps
 docs/                  this manual
 examples/              standalone samples: an API client, themes
 scripts/               vet.sh, cut.sh, release.sh, install.sh, screenshot tooling
-.github/workflows/     ci.yml, release.yml
+.github/workflows/     ci.yml, release.yml, mirror.yml
 ```
 
 Five crates, and the dependency direction is the point of the split:
@@ -33,7 +33,7 @@ Five crates, and the dependency direction is the point of the split:
 | --- | --- | --- |
 | `butai-protocol` | `ClientMsg` / `ServerMsg`, `Command`, the REST DTOs, length-prefix framing, `~/.butai` path resolution, and `names::BINARIES` — every name this program has shipped under | nothing in the workspace |
 | `butai-server` | the daemon. The core actor, terminal panes and their PTY threads, the VT emulator, cell-run rendering, the git status cache and `git` process execution, the HTTP facade, telemetry | `butai-protocol`, `butai-update` |
-| `butai-update` | the self-updater. The GitHub release, the artifact this build is, `SHA256SUMS`, the swap and the exec. The only outbound network in the tree | nothing in the workspace |
+| `butai-update` | the self-updater. The GitHub release and its mirror, the artifact this build is, its digest or `SHA256SUMS`, the swap and the exec. The only outbound network in the tree | nothing in the workspace |
 | `butai-client` | the terminal client. Chrome geometry and row models, the keymap, palettes, the hit registry, ssh dialling, clipboard, terminal restore | `butai-protocol`, `butai-update` |
 | `butai` | the binary. Clap command tree, exit codes, `proxy`, `standalone`, the ssh handoff | all four |
 
@@ -737,15 +737,37 @@ got built. A stable tag with no changelog section still fails, deliberately:
 that one is an announcement, and shipping it with nothing written down is a
 mistake worth stopping for.
 
+**The mirror.** After `publish`, `release.yml` calls `mirror.yml`, which
+runs `scripts/mirror-site.sh` and deploys the result to GitHub Pages at
+<https://dieterpl.github.io/butai/>. It exists because in November 2026 GitHub's
+*anonymous* release downloads and API answered most requests with a 504, for
+days and in every region, while signed-in requests went through — and every
+installer and updater is anonymous. Pages is a different front end. The script
+downloads the newest five dev and three stable releases through `gh` (signed
+in), refuses any file that does not match GitHub's recorded digest and the
+release's `SHA256SUMS`, and writes `<tag>/<file>`, a `releases.json` shaped like
+the API's answer, `latest` and `latest-dev`, both installers and an
+`index.html`. Pages deploys whole sites, so every run rebuilds it from what is
+published; dispatching `mirror.yml` by hand refills it. The `github-pages`
+environment has to allow `v*` tags to deploy, since a tag push is what runs it.
+
 **What `scripts/install.sh` expects of a release**, since it is the consumer:
 
 - Assets named `butai-<bare-version>-<triple>.tar.gz` at
-  `https://github.com/dieterpl/butai/releases/download/<tag>/`. A bare
+  `https://github.com/dieterpl/butai/releases/download/<tag>/`, or failing that
+  at `https://dieterpl.github.io/butai/<tag>/`, or failing that through the
+  API's per-asset link. GitHub's link is tried twice, the mirror three times
+  and the API twice, and only failures a retry might fix are retried. A bare
   `butai-<triple>` binary is tried second so tags from before the tarballs still
   install.
-- A `SHA256SUMS` whose lines name the asset. Absent, or with no sha256 tool on
-  the box, verification is skipped with a message rather than failed.
+- A sha256 for the asset: the digest GitHub recorded at upload when the API
+  answers, which holds wherever the bytes came from, else a `SHA256SUMS` whose
+  lines name the asset. Neither, or no sha256 tool on the box, and verification
+  is skipped with a message rather than failed.
 - The tarball must contain an executable named `butai` somewhere inside it.
+
+When the API does not answer the version lookup either, the mirror's `latest`
+or `latest-dev` names the tag.
 
 It maps `uname` to a triple, prefers the musl build wherever `ldd --version`
 reports musl, honours `BUTAI_VERSION` and `BUTAI_INSTALL_DIR`, installs to

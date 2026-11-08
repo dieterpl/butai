@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.11: a mirror of the releases on GitHub Pages.** Since about
+  5 November 2026, GitHub has been answering most anonymous release downloads
+  and API requests with a 504, everywhere, so installs and updates failed
+  although every release was there. The newest five dev and three stable
+  releases are now also at <https://dieterpl.github.io/butai/>. Each file there
+  is checked against GitHub's own checksum before it is published. The mirror
+  also has the version list and both installers
+  (`curl -fsSL https://dieterpl.github.io/butai/install.sh | sh`). Every
+  release republishes it, and the release notes link to it.
 - **1.5.0-dev.10: subagents hang under the agent that started them.** A
   `butai agent spawn` run inside a butai pane now records that pane as the new
   agent's parent. BOOTH's fleet lists it right under its parent, one step in
@@ -156,6 +165,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.11: installs and updates get through GitHub's 504s.**
+  `install.sh`, `install.ps1` and `butai update` now try each file at GitHub's
+  link, then the mirror, then the API's own link, retrying what a retry might
+  fix (a 5xx, a timeout) and moving straight on from a 404. When the API
+  doesn't answer, the version comes from the mirror's list. A download is
+  checked against the sha256 GitHub recorded for it when the API answers, and
+  against `SHA256SUMS` otherwise, whichever source it came from. A stalled
+  request no longer hangs `install.sh` (with curl).
 - **1.5.0-dev.7: the Mac builds run again.** GitHub retired the `macos-14`
   runner image, so the release and CI jobs for both Apple targets were refused
   before they started. That left 1.5.0-dev.6 tagged but never published. Both

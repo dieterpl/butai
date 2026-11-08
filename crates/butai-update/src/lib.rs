@@ -56,6 +56,10 @@ use anyhow::{bail, Context, Result};
 /// The repository releases are published from.
 const REPO: &str = "dieterpl/butai";
 
+/// The same releases on GitHub Pages: every file, its digest, and a
+/// `releases.json` shaped like the API's answer. See `scripts/mirror-site.sh`.
+const MIRROR: &str = "https://dieterpl.github.io/butai";
+
 /// The binary's name, inside the tarball and on disk.
 const BIN: &str = "butai";
 
@@ -87,12 +91,17 @@ pub struct Offer {
     pub version: String,
     /// The artifact for [`TARGET`], which is also its key in `SHA256SUMS`.
     pub asset: String,
-    /// Where to fetch that artifact.
-    pub url: String,
-    /// Where to fetch the checksums, when the release publishes them. Releases
-    /// cut before `release.yml` existed do not, which `install.sh` also
-    /// tolerates.
-    pub sums_url: Option<String>,
+    /// Where to fetch that artifact, in the order to ask; see [`sources`].
+    pub urls: Vec<String>,
+    /// The artifact's sha256, as the release records it — GitHub keeps one for
+    /// every file it has been handed since mid-2025, and the mirror copies it.
+    /// When present it is what the download is checked against, wherever the
+    /// bytes came from.
+    pub digest: Option<String>,
+    /// Where to fetch the checksums, when the release publishes them and keeps
+    /// no digest. Releases cut before `release.yml` existed publish neither,
+    /// which `install.sh` also tolerates.
+    pub sums_urls: Vec<String>,
     /// The binary this would replace, already resolved and known writable.
     pub install: PathBuf,
 }
@@ -374,6 +383,10 @@ struct Release {
     /// has already excluded drafts by the time the stable channel parses one.
     #[serde(default)]
     draft: bool,
+    /// Read only off the mirror's list, which holds both tracks; GitHub's
+    /// `releases/latest` has already left the prereleases out.
+    #[serde(default)]
+    prerelease: bool,
     #[serde(default)]
     assets: Vec<Asset>,
 }
@@ -382,6 +395,13 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
+    /// The API's own link to the file, which sends the bytes when asked for
+    /// `application/octet-stream`. Absent from older answers and test bodies.
+    #[serde(default)]
+    url: String,
+    /// `sha256:<hex>`, recorded by GitHub at upload.
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// How many releases [`Channel::Dev`] reads. GitHub answers newest-first, and
@@ -399,28 +419,61 @@ const DEV_PAGE: u32 = 30;
 /// answer GitHub has already filtered — no drafts, no prereleases — which is
 /// exactly the stable track and no filter to write here. The dev track has no
 /// such endpoint, so it reads the list and chooses; see [`pick`].
+///
+/// When GitHub does not answer, the mirror's list stands in for both. That is
+/// not hypothetical: in November 2026 GitHub's anonymous API answered most
+/// requests with a 504 for days.
 pub fn check(channel: Channel) -> Result<Option<Offer>> {
     let install = writable_install_path()?;
 
-    let release = match channel {
+    let releases = match published(channel) {
+        Ok(releases) => releases,
+        Err(github) => {
+            tracing::warn!("GitHub did not answer the update check, asking the mirror: {github:#}");
+            mirrored(channel).map_err(|mirror| {
+                anyhow::anyhow!("ask GitHub: {github:#}\nask the mirror: {mirror:#}")
+            })?
+        }
+    };
+    // A repository that has published nothing this build can compare itself
+    // against. Nothing to offer, and nothing wrong either.
+    let Some(release) = pick(releases) else { return Ok(None) };
+
+    offer(release, install)
+}
+
+/// What GitHub publishes on `channel`: the one latest release, or the list.
+fn published(channel: Channel) -> Result<Vec<Release>> {
+    match channel {
         Channel::Stable => {
             let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-            let body = get_string(&url).context("ask GitHub for the latest release")?;
-            serde_json::from_str(&body).context("parse GitHub's answer as a release")?
+            let body = first_answer(&[url], RETRY_PAUSE, get_string)
+                .context("ask GitHub for the latest release")?;
+            Ok(vec![serde_json::from_str(&body).context("parse GitHub's answer as a release")?])
         }
         Channel::Dev => {
             let url = format!("https://api.github.com/repos/{REPO}/releases?per_page={DEV_PAGE}");
-            let body = get_string(&url).context("ask GitHub for the published releases")?;
-            let releases: Vec<Release> =
-                serde_json::from_str(&body).context("parse GitHub's answer as a release list")?;
-            // A repository that has published nothing this build can compare
-            // itself against. Nothing to offer, and nothing wrong either.
-            let Some(release) = pick(releases) else { return Ok(None) };
-            release
+            let body = first_answer(&[url], RETRY_PAUSE, get_string)
+                .context("ask GitHub for the published releases")?;
+            serde_json::from_str(&body).context("parse GitHub's answer as a release list")
         }
-    };
+    }
+}
 
-    offer(release, install)
+/// What the mirror holds on `channel`.
+fn mirrored(channel: Channel) -> Result<Vec<Release>> {
+    let url = format!("{MIRROR}/releases.json");
+    let body =
+        first_answer(&[url], RETRY_PAUSE, get_string).context("ask the mirror for its releases")?;
+    let releases: Vec<Release> =
+        serde_json::from_str(&body).context("parse the mirror's release list")?;
+    Ok(on_channel(releases, channel))
+}
+
+/// The mirror lists both tracks in one file; the stable channel takes only its
+/// own, as `releases/latest` would have.
+fn on_channel(releases: Vec<Release>, channel: Channel) -> Vec<Release> {
+    releases.into_iter().filter(|r| channel == Channel::Dev || !r.prerelease).collect()
 }
 
 /// The highest release in a list — the answer GitHub gives directly for the
@@ -463,15 +516,36 @@ fn offer(release: Release, install: PathBuf) -> Result<Option<Offer>> {
 
     Ok(Some(Offer {
         version,
-        url: found.browser_download_url.clone(),
-        sums_url: release
+        urls: sources(&release.tag_name, found),
+        digest: found
+            .digest
+            .as_deref()
+            .and_then(|d| d.strip_prefix("sha256:"))
+            .map(str::to_ascii_lowercase),
+        sums_urls: release
             .assets
             .iter()
             .find(|a| a.name == "SHA256SUMS")
-            .map(|a| a.browser_download_url.clone()),
+            .map(|a| sources(&release.tag_name, a))
+            .unwrap_or_default(),
         asset,
         install,
     }))
+}
+
+/// Every place one file of a release can be fetched from, in the order to ask:
+/// GitHub's link, then the mirror, then the API's link — the order they kept
+/// working in when GitHub's anonymous downloads started failing. An asset read
+/// off the mirror's own list already points at the mirror, so it is one entry.
+fn sources(tag: &str, asset: &Asset) -> Vec<String> {
+    let mirror = format!("{MIRROR}/{tag}/{}", asset.name);
+    let mut urls = Vec::with_capacity(3);
+    for url in [&asset.browser_download_url, &mirror, &asset.url] {
+        if !url.is_empty() && !urls.contains(url) {
+            urls.push(url.clone());
+        }
+    }
+    urls
 }
 
 // ── fetching it ──────────────────────────────────────────────────────────
@@ -483,18 +557,23 @@ fn offer(release: Release, install: PathBuf) -> Result<Option<Offer>> {
 /// and an exec, neither of which can hang on a slow link with the terminal
 /// already torn down.
 pub fn stage(offer: &Offer) -> Result<Staged> {
-    let tarball = get_bytes(&offer.url).with_context(|| format!("download {}", offer.asset))?;
+    let tarball = first_answer(&offer.urls, RETRY_PAUSE, get_bytes)
+        .with_context(|| format!("download {}", offer.asset))?;
 
-    // A release from before `release.yml` existed publishes no checksums, and
-    // `install.sh` installs from those anyway rather than refusing. The same
-    // judgement here: verify what can be verified, and say so in the log when
-    // there is nothing to verify against.
-    match &offer.sums_url {
-        Some(url) => {
-            let sums = get_string(url).context("download SHA256SUMS")?;
-            verify(&tarball, &sums, &offer.asset)?;
-        }
-        None => tracing::warn!("release {} publishes no SHA256SUMS", offer.version),
+    // The digest the release recorded holds wherever the bytes came from, so it
+    // is checked first and makes SHA256SUMS one request too many. A release
+    // from before `release.yml` existed publishes neither, and `install.sh`
+    // installs from those anyway rather than refusing. The same judgement
+    // here: verify what can be verified, and say so in the log when there is
+    // nothing to verify against.
+    if let Some(want) = &offer.digest {
+        matches_sum(&tarball, want, &offer.asset)?;
+    } else if !offer.sums_urls.is_empty() {
+        let sums = first_answer(&offer.sums_urls, RETRY_PAUSE, get_bytes)
+            .context("download SHA256SUMS")?;
+        verify(&tarball, &String::from_utf8_lossy(&sums), &offer.asset)?;
+    } else {
+        tracing::warn!("release {} publishes no SHA256SUMS", offer.version);
     }
 
     let binary = extract_binary(&tarball, &offer.asset)?;
@@ -510,8 +589,6 @@ pub fn stage(offer: &Offer) -> Result<Staged> {
 /// which is a mismatch worth stopping on rather than shrugging at — unlike a
 /// release with no checksum file at all.
 fn verify(bytes: &[u8], sums: &str, asset: &str) -> Result<()> {
-    use sha2::{Digest, Sha256};
-
     let want = sums
         .lines()
         .filter_map(|l| l.split_once("  ").or_else(|| l.split_once(' ')))
@@ -520,6 +597,12 @@ fn verify(bytes: &[u8], sums: &str, asset: &str) -> Result<()> {
     let Some(want) = want else {
         bail!("SHA256SUMS publishes no checksum for {asset}");
     };
+    matches_sum(bytes, &want, asset)
+}
+
+/// Check a download against one sha256, given as lowercase hex.
+fn matches_sum(bytes: &[u8], want: &str, asset: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
 
     let got = format!("{:x}", Sha256::digest(bytes));
     if got != want {
@@ -618,9 +701,9 @@ pub fn restart(install: &Path) -> anyhow::Error {
 
 // ── http ─────────────────────────────────────────────────────────────────
 
-/// One agent per call. There are at most three requests in an update and they
-/// are minutes apart at best, so a pooled connection would be closed by the far
-/// end long before it were reused.
+/// One agent per call. An update makes a handful of requests, retries
+/// included, and they are minutes apart at best, so a pooled connection would
+/// be closed by the far end long before it were reused.
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
@@ -638,13 +721,78 @@ fn get_string(url: &str) -> Result<String> {
         .with_context(|| format!("read {url}"))
 }
 
+/// A file rather than JSON. GitHub's link and the mirror ignore the `Accept`;
+/// the API's per-asset link needs it to send the file instead of describing it.
 fn get_bytes(url: &str) -> Result<Vec<u8>> {
-    let mut resp = agent().get(url).call().with_context(|| format!("GET {url}"))?;
+    let mut resp = agent()
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
     resp.body_mut()
         .with_config()
         .limit(MAX_DOWNLOAD)
         .read_to_vec()
         .with_context(|| format!("read {url}"))
+}
+
+/// How often one source is asked before the next one is.
+const TRIES: u32 = 2;
+
+/// The wait before a second try, doubled for each try after it.
+const RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// The first of `urls` to answer, each asked up to [`TRIES`] times.
+///
+/// A refusal that says the file is not there — a 404, a 403 — moves straight
+/// to the next source; only what a moment might fix is asked again: a 5xx, a
+/// 408 or 429, a timeout, a dropped connection. Every failure is in the error
+/// when none answers, since which source failed how is the whole story.
+fn first_answer<T>(
+    urls: &[String],
+    pause: Duration,
+    mut get: impl FnMut(&str) -> Result<T>,
+) -> Result<T> {
+    let mut failures = Vec::new();
+    for url in urls {
+        for attempt in 1..=TRIES {
+            match get(url) {
+                Ok(found) => {
+                    if !failures.is_empty() {
+                        tracing::info!("fetched {url} after: {}", failures.join("; "));
+                    }
+                    return Ok(found);
+                }
+                Err(err) => {
+                    let again = attempt < TRIES && worth_retrying(&err);
+                    failures.push(format!("{err:#}"));
+                    if !again {
+                        break;
+                    }
+                    std::thread::sleep(pause * attempt);
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        bail!("nowhere to fetch it from");
+    }
+    bail!("{}", failures.join("\n"))
+}
+
+/// Whether a failed request might succeed if it were simply sent again.
+fn worth_retrying(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<ureq::Error>() {
+        Some(ureq::Error::StatusCode(code)) => *code >= 500 || *code == 408 || *code == 429,
+        Some(
+            ureq::Error::Timeout(_)
+            | ureq::Error::Io(_)
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::HostNotFound
+            | ureq::Error::BodyStalled,
+        ) => true,
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
@@ -762,6 +910,96 @@ mod tests {
         let only = r#"[{"tag_name": "nightly", "draft": false, "assets": []}]"#;
         let releases: Vec<Release> = serde_json::from_str(only).unwrap();
         assert!(pick(releases).is_none());
+    }
+
+    /// The mirror's `releases.json` holds both tracks, so a stable install
+    /// reading it must not be offered a dev build GitHub would have hidden.
+    #[test]
+    fn the_mirror_offers_a_stable_install_only_stable_releases() {
+        let body = r#"[
+            {"tag_name": "v1.5.0-dev.9", "draft": false, "prerelease": true, "assets": []},
+            {"tag_name": "v1.3.0", "draft": false, "prerelease": false, "assets": []}
+        ]"#;
+        let stable = on_channel(serde_json::from_str(body).unwrap(), Channel::Stable);
+        assert_eq!(pick(stable).unwrap().tag_name, "v1.3.0");
+        let dev = on_channel(serde_json::from_str(body).unwrap(), Channel::Dev);
+        assert_eq!(pick(dev).unwrap().tag_name, "v1.5.0-dev.9");
+    }
+
+    #[test]
+    fn a_file_is_fetched_from_github_then_the_mirror_then_the_api() {
+        let asset: Asset = serde_json::from_str(
+            r#"{"name": "butai-1.5.0-x.tar.gz",
+                "browser_download_url": "https://github.com/dieterpl/butai/releases/download/v1.5.0/butai-1.5.0-x.tar.gz",
+                "url": "https://api.github.com/repos/dieterpl/butai/releases/assets/7",
+                "digest": "sha256:ABC"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sources("v1.5.0", &asset),
+            [
+                "https://github.com/dieterpl/butai/releases/download/v1.5.0/butai-1.5.0-x.tar.gz",
+                "https://dieterpl.github.io/butai/v1.5.0/butai-1.5.0-x.tar.gz",
+                "https://api.github.com/repos/dieterpl/butai/releases/assets/7",
+            ]
+        );
+
+        // Read off the mirror's own list, every link is the mirror's: one entry.
+        let mirrored: Asset = serde_json::from_str(
+            r#"{"name": "a.tar.gz",
+                "browser_download_url": "https://dieterpl.github.io/butai/v1.5.0/a.tar.gz",
+                "url": "https://dieterpl.github.io/butai/v1.5.0/a.tar.gz"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sources("v1.5.0", &mirrored),
+            ["https://dieterpl.github.io/butai/v1.5.0/a.tar.gz"]
+        );
+    }
+
+    fn status(code: u16) -> anyhow::Error {
+        anyhow::Error::new(ureq::Error::StatusCode(code)).context("GET somewhere")
+    }
+
+    #[test]
+    fn a_gateway_timeout_is_asked_again_and_then_the_next_source() {
+        let urls = ["a".to_string(), "b".to_string()];
+        let mut asked = Vec::new();
+        let got = first_answer(&urls, Duration::ZERO, |url| {
+            asked.push(url.to_string());
+            if url == "a" {
+                Err(status(504))
+            } else {
+                Ok(url.to_string())
+            }
+        })
+        .unwrap();
+        assert_eq!(got, "b");
+        assert_eq!(asked, ["a", "a", "b"]);
+    }
+
+    #[test]
+    fn a_missing_file_moves_on_without_asking_again() {
+        let urls = ["a".to_string(), "b".to_string()];
+        let mut asked = Vec::new();
+        let err = first_answer(&urls, Duration::ZERO, |url| -> Result<()> {
+            asked.push(url.to_string());
+            Err(status(404))
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(asked, ["a", "b"]);
+        // Each source's failure is in the report.
+        assert_eq!(err.lines().count(), 2, "{err}");
+    }
+
+    #[test]
+    fn a_recorded_digest_checks_the_download() {
+        // sha256("test")
+        let sum = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(matches_sum(b"test", sum, "a.tar.gz").is_ok());
+        let err = matches_sum(b"tampered", sum, "a.tar.gz").unwrap_err().to_string();
+        assert!(err.contains("checksum mismatch"), "{err}");
     }
 
     /// SETTINGS writes `as_str`, serde reads it back. A word written here that

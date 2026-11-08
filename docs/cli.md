@@ -636,9 +636,16 @@ tarball because it *is* the musl build. `scripts/install.sh` has to guess with
 option. A release with no artifact for this triple is reported, never
 approximated.
 
-The download is checked against the release's `SHA256SUMS` before anything is
-executed, and the binary is replaced by a rename in its own directory, so there
-is no moment where a half-written file is on your `PATH`.
+The download is checked against the sha256 GitHub recorded for the file, or
+the release's `SHA256SUMS` when it keeps none, before anything is executed, and
+the binary is replaced by a rename in its own directory, so there is no moment
+where a half-written file is on your `PATH`.
+
+**When GitHub does not answer**, the check reads the release list from the
+mirror at <https://dieterpl.github.io/butai/> instead, and the download is
+tried at GitHub's link, then the mirror, then the API's own link, each twice
+when the failure is one a retry might fix (a 5xx, a timeout). A file is checked
+the same way wherever it came from.
 
 **Stopping the daemon is not destructive**, and the order matters. It is the
 same snapshot `butai kill-server` takes — the open workspaces, their agents, and

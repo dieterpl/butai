@@ -91,7 +91,15 @@ labels: Array<string>,
  * spawn request and never changed. Absent for chats started before it
  * existed, or by a client too old to say, and skipped on the wire then.
  */
-origin?: string | null, };
+origin?: string | null, 
+/**
+ * The agent that started this one — the pane a `butai agent spawn` ran
+ * in — so a client can draw it under its parent, to any depth. Set once by
+ * the daemon from the spawn request. Absent for chats started by a person,
+ * by a daemon that predates it, or whose parent has since gone, and
+ * skipped on the wire then.
+ */
+parent?: PaneId | null, };
 
 /**
  * Attention state of an agent pane (rendered by the apps as
