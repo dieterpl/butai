@@ -43,10 +43,14 @@ const BARE_SCHEME = "https://";
 /** A link would have to be malformed to be longer than this. */
 const MAX_URL = 2048;
 
-/** Enough cells to recognise any scheme above — `https://` is the longest at
- *  eight. Read at the start of a row to decide whether it continues the row
- *  above or begins a link of its own. */
-const SCHEME_CELLS = 8;
+/** How far short of the widest row around it a row may stop and still read as
+ *  one a program wrapped — one cell of tolerance, not a guess at where a
+ *  sentence ended. */
+const WRAP_SLACK = 1;
+
+/** How many rows either side of a wrapped one are read to find the width that
+ *  block of output was wrapped at. */
+const PARAGRAPH_REACH = 6;
 
 const ALNUM = /[0-9A-Za-z]/;
 /** RFC 3986's unreserved and reserved sets, plus `%`. */
@@ -146,15 +150,106 @@ export interface LinkRun {
   link: number;
 }
 
+/** How one row is laid out: one past its last non-blank cell; the same with a
+ *  right-hand border taken off too, which is where its text stops; and whether
+ *  it has a letter or digit on it at all. */
+interface Shape { end: number; inner: number; words: boolean }
+
+/** Glyphs that frame text rather than being part of it: box drawing, the
+ *  eighth-blocks of a quote bar, and the bracket pieces (`⎿`). */
+const FRAME = /[─-▟⎢-⎥⎸⎹⎿]/;
+/** What may close a row on the right — only taken off when the row below has
+ *  the same glyph in the same column, because `curl https://x/a |` is a pipe. */
+const isBorder = (c: string) => FRAME.test(c) || c === "|";
+/** What a token keeps, once the sentence's punctuation is off its end, when it
+ *  is a piece of an address rather than a word. */
+const ADDRESSY = /[/.\-_?=&%#~:@+]/;
+
+function shape(row: readonly string[]): Shape {
+  let end = row.length;
+  while (end > 0 && row[end - 1] === " ") end--;
+  let inner = end;
+  while (inner > 0 && (row[inner - 1] === " " || isBorder(row[inner - 1] ?? ""))) inner--;
+  return { end, inner, words: row.some((c) => ALNUM.test(c)) };
+}
+
+/** Whether the run of URL characters ending a line holds the start of a link.
+ *  Read without `usable`, because a row can break straight after `https://`. */
+function endsInLink(chars: readonly string[]): boolean {
+  let t0 = chars.length;
+  while (t0 > 0 && URL_CHAR.test(chars[t0 - 1] ?? "")) t0--;
+  for (let i = t0; i < chars.length; i++) if (startsHere(chars, i) !== null) return true;
+  return false;
+}
+
+/** The furthest any row of the paragraph around `y` reaches — the width the
+ *  program wrapped that block of output at. */
+function paragraphWidth(shapes: readonly Shape[], y: number): number {
+  let w = shapes[y]?.inner ?? 0;
+  for (let k = y - 1; k >= Math.max(0, y - PARAGRAPH_REACH) && shapes[k]?.words; k--) {
+    w = Math.max(w, shapes[k]?.inner ?? 0);
+  }
+  for (let k = y + 1; k <= Math.min(shapes.length - 1, y + PARAGRAPH_REACH) && shapes[k]?.words; k++) {
+    w = Math.max(w, shapes[k]?.inner ?? 0);
+  }
+  return w;
+}
+
+/** Where a continuation's text starts: past blanks, frame glyphs, and the ASCII
+ *  gutters in the same column on the row above — `>`, `|`, and a diff's `+` or
+ *  `-` when the text runs straight on from it. */
+function indent(next: readonly string[], above: readonly string[]): number {
+  let x = 0;
+  while (x < next.length) {
+    const c = next[x] ?? " ";
+    const same = above[x] === c;
+    const marker = (c === "+" || c === "-") && next[x + 1] !== undefined && next[x + 1] !== " ";
+    if (!(c === " " || FRAME.test(c) || (same && (c === "|" || c === ">" || marker)))) break;
+    x++;
+  }
+  return x;
+}
+
+/** Whether row `y + 1` carries on the link row `y` ends in, and if so how much
+ *  of the line to keep and which column the continuation starts at. The same
+ *  three clauses as `continues` in `links.rs`, which documents them. */
+function continues(
+  grid: readonly (readonly string[])[], shapes: readonly Shape[],
+  chars: readonly string[], y: number, from: number,
+): { keep: number; from: number } | null {
+  const row = grid[y] ?? [];
+  const next = grid[y + 1] ?? [];
+  const s = shapes[y];
+  if (!s) return null;
+  const boxed = s.inner < s.end && next[s.end - 1] === row[s.end - 1];
+  const end = boxed ? s.inner : s.end;
+  if (end <= from) return null;
+  const keep = chars.length - (row.length - end);
+  if (!endsInLink(chars.slice(0, keep))) return null;
+  const first = next[0];
+  if (end === row.length && first !== undefined && first !== " " && !isBorder(first)) {
+    return startsHere(next, 0) === null ? { keep, from: 0 } : null;
+  }
+  if (end + WRAP_SLACK < paragraphWidth(shapes, y)) return null;
+  const start = indent(next, row);
+  const rest = next.slice(start);
+  let len = 0;
+  while (len < rest.length && URL_CHAR.test(rest[len] ?? "")) len++;
+  const token = rest.slice(0, len);
+  if (!token.some((c) => ALNUM.test(c)) || startsHere(token, 0) !== null) return null;
+  const alone = rest.slice(len).every((c) => c === " " || isBorder(c));
+  return alone || ADDRESSY.test(trimTail(token.join(""))) ? { keep, from: start } : null;
+}
+
 /**
  * Every URL on a pane's cell grid.
  *
- * **Rows are joined** when the last cell of one is not blank, because that is
- * what a program's own wrapping leaves behind — an address too long for the row
- * continues at the start of the next, and scanning the rows separately would
- * offer a link to a truncated address. The terminal client applies this rule to
+ * **Rows are joined** when one ends in the middle of a link and the next reads
+ * as the rest of it — the terminal's own wrap at the pane's edge, or a
+ * program's at its own width with the rest indented underneath. The rules are
+ * `continues` in `links.rs`, transcribed. The terminal client applies them to
  * the stage only, since the rest of its screen is chrome it laid out itself;
- * here the whole grid *is* the pane, so it applies throughout.
+ * here the whole grid *is* the pane, so they apply throughout.
  */
 export class ScreenLinks {
   private constructor(
@@ -166,29 +261,32 @@ export class ScreenLinks {
     const rows: LinkRun[][] = cells.map(() => []);
     const urls: string[] = [];
     const seen = new Map<string, number>();
+    // The trailing half of a wide glyph is an empty cell and becomes a space,
+    // so that char *i* is column *i* — the promise `scan` reads by.
+    const grid = cells.map((row) => row.map((c) => (c === "" ? " " : c)));
+    const shapes = grid.map(shape);
     let y = 0;
-    while (y < cells.length) {
+    while (y < grid.length) {
       const chars: string[] = [];
       const at: [number, number][] = [];
-      let last = y;
-      for (;;) {
-        const row = cells[last] ?? [];
-        for (let x = 0; x < row.length; x++) {
-          // The trailing half of a wide glyph is an empty cell and becomes a
-          // space, so that char *i* is column *i* — the promise `scan` reads by.
-          chars.push(row[x] === "" ? " " : (row[x] ?? " "));
-          at.push([x, last]);
+      const push = (r: number, from: number) => {
+        const row = grid[r] ?? [];
+        for (let x = from; x < row.length; x++) {
+          chars.push(row[x] ?? " ");
+          at.push([x, r]);
         }
-        const full = chars.length > 0 && chars[chars.length - 1] !== " ";
-        // ...unless the next row *starts a link of its own*, which is not a
-        // continuation of anything. A shell is the case that proves it: `$ echo
-        // https://…` fills the row exactly and the echoed URL lands underneath,
-        // so the two joined into one address that was the URL written twice.
-        const next = cells[last + 1];
-        const continues = next !== undefined &&
-          startsHere(next.slice(0, SCHEME_CELLS).map((c) => (c === "" ? " " : c)), 0) === null;
-        if (full && continues) { last++; continue; }
-        break;
+      };
+      push(y, 0);
+      let last = y;
+      let from = 0;
+      while (last + 1 < grid.length) {
+        const j = continues(grid, shapes, chars, last, from);
+        if (!j) break;
+        chars.length = j.keep;
+        at.length = j.keep;
+        last++;
+        from = j.from;
+        push(last, from);
       }
       for (const span of scan(chars)) {
         let link = seen.get(span.url);

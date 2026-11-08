@@ -717,16 +717,36 @@ the pointer and the hover are always available in a browser.
 
 **A URL too long for the row.** Inside the stage the rows are joined before they
 are scanned, because a pane's wrapping is the program's own — so an address that
-runs off the right edge and continues below is one link, and opens whole. The
-chrome is not joined: everything the client lays out itself truncates rather than
-wraps, and splicing two rows there would invent an address. The signal is the
-last cell of the row being filled, which is what a wrap leaves behind — **unless
-the row below begins a link of its own**, which is a new address rather than the
-rest of one. That second rule is not a refinement, it is the common case: `$ echo
-https://…` fills a narrow pane's row exactly and the shell echoes the same URL
-underneath, and without it the two joined into that address written twice. What
-can still be got wrong is a program that ends a line exactly at the right edge
-and then prints unrelated prose.
+runs off the right edge and continues below is one link, underlined on every
+fragment, listed once in the picker, and opens whole. The chrome is not joined:
+everything the client lays out itself truncates rather than wraps, and splicing
+two rows there would invent an address.
+
+A row is only ever continued when it **ends inside a link**, and then in one of
+two shapes:
+
+- **The terminal's wrap.** The row is filled to its last column and the next
+  carries straight on from column 0 — what `cat` of a long URL leaves. Joined
+  unless the row below begins a link of its own: `$ echo https://…` fills a
+  narrow pane's row exactly and the shell echoes the same URL underneath.
+- **The program's wrap.** Agent TUIs break a long URL at *their* width and indent
+  the rest under the text it belongs to, often behind a gutter (`⎿`, `│`, `▎`, a
+  `>` quote, a diff's `+`). That is joined when the row reaches the right edge of
+  the paragraph around it — the width that block was wrapped at, measured from
+  its neighbours rather than assumed to be the pane's — and the next row's first
+  token, past the indentation and gutter, reads as the rest of an address: URL
+  characters, not a new scheme, and either holding a `/`, `.`, `-`, `?`, `=` or
+  the like, or being all that is left on its row. The indentation and gutter are
+  left out of the link. A box's right border is left out too, when the row below
+  has the same border in the same column.
+
+What still will not join, deliberately: a program-wrapped fragment of bare
+letters followed by more text (`…/documentat` then `ion and then…`), because that
+is exactly what a URL ending a line of prose followed by the next sentence looks
+like, and splicing prose onto a link is the worse mistake; a scheme broken in two
+(`htt` / `ps://`); and a URL wrapped in quotes whose tail is bare letters then the
+closing quote. What can still be got wrong is a program that ends a line exactly
+at the pane's right edge with a URL and starts the next line at column 0.
 
 ## BOOTH
 

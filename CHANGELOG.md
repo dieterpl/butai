@@ -203,6 +203,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.15: a URL an agent wrapped is one link again.** Claude Code and
+  other agent TUIs break a long URL at their own width and indent the rest under
+  it, often behind a `⎿`, `│`, `▎`, `>` or a diff's `+`. Those rows weren't
+  joined, because the row wasn't filled to the pane's last column, so the stage
+  linked only the first half. Now a row that ends inside a link is joined to the
+  next when it reaches the right edge of its paragraph and the next row's first
+  token, past the indentation and gutter, reads as the rest of an address.
+  Every fragment is underlined as the same link, the indentation isn't, and the
+  `f` picker lists the URL once. Prose after a URL is still kept out: a next
+  line that starts with a plain word followed by more text is never spliced on.
+  The browser client follows the same rules.
 - **1.5.0-dev.12: the dev installer takes the newest dev build.**
   `BUTAI_CHANNEL=dev` took the first prerelease in GitHub's list, and that list
   isn't in date order: it put 1.5.0-dev.9 ahead of 1.5.0-dev.11, so the

@@ -56,10 +56,16 @@ const BARE_SCHEME: &str = "https://";
 /// punctuation the width of a wide terminal is not one.
 const MAX_URL: usize = 2048;
 
-/// Enough cells to recognise any scheme in [`SCHEMES`] — `https://` is the
-/// longest at eight. Read at the start of a row to decide whether it continues
-/// the row above or begins a link of its own.
-const SCHEME_CELLS: u16 = 8;
+/// How far short of the widest row around it a row may stop and still read as
+/// one a program wrapped. A hard wrapper fills the row to its width exactly, so
+/// this is one cell of tolerance for a wrapper that reserves one — not a guess
+/// at where a sentence ended.
+const WRAP_SLACK: usize = 1;
+
+/// How many rows either side of a wrapped one are read to find the width that
+/// block of output was wrapped at. Enough to see the rest of a paragraph, few
+/// enough that a status line further down the screen is not part of the answer.
+const PARAGRAPH_REACH: usize = 6;
 
 /// One clickable run, in the coordinates of whatever was scanned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,12 +278,13 @@ impl ScreenLinks {
     ///
     /// `stage` is where the streamed pane is, when one is showing
     /// ([`crate::chrome::stage_rect`]). It is the only region whose rows are
-    /// joined before scanning: a pane is a program's own output wrapped at the
-    /// pane's width, so a URL too long for the row continues on the next one,
-    /// and scanning the rows separately would offer a link to a truncated
-    /// address. Everywhere else the client is the one that laid the text out,
-    /// and it truncates rather than wraps — joining there would splice two
-    /// unrelated rows together.
+    /// joined before scanning: a pane is a program's own output, wrapped by the
+    /// terminal at the pane's width or by the program at its own, so a URL too
+    /// long for the row continues on the next one — and scanning the rows
+    /// separately would offer a link to a truncated address. How a join is
+    /// decided is [`continues`]. Everywhere else the client is the one that
+    /// laid the text out, and it truncates rather than wraps — joining there
+    /// would splice two unrelated rows together.
     pub fn of(buf: &Buffer, stage: Option<Rect>) -> Self {
         let area = buf.area;
         let mut me = Self { rows: vec![Vec::new(); area.height as usize], urls: Vec::new() };
@@ -310,37 +317,11 @@ impl ScreenLinks {
 
     /// Scan one rectangle, joining its rows when `join` is set.
     fn block(&mut self, buf: &Buffer, rect: Rect, join: bool, seen: &mut HashMap<String, usize>) {
-        let mut chars: Vec<char> = Vec::with_capacity(rect.width as usize);
-        let mut at: Vec<(u16, u16)> = Vec::with_capacity(rect.width as usize);
-        let mut y = rect.y;
-        while y < rect.bottom() {
-            chars.clear();
-            at.clear();
-            let mut last = y;
-            loop {
-                for x in rect.x..rect.right() {
-                    chars.push(cell_char(buf, x, last));
-                    at.push((x, last));
-                }
-                // A row filled to its last column is a row a program ran out
-                // of: the text continues on the next one. A row with a blank
-                // there ended on its own, and joining it to what follows would
-                // invent an address out of two lines of prose.
-                //
-                // Unless what follows *starts a link of its own*, which is not
-                // a continuation of anything. A shell is the case that proves
-                // it: `$ echo https://…` fills the row exactly and the echoed
-                // URL lands underneath, so the two joined into one address that
-                // was the URL written twice — and the picker offered it.
-                let full = chars.last().is_some_and(|c| *c != ' ');
-                let next = last + 1;
-                if join && full && next < rect.bottom() && !row_starts_a_link(buf, rect, next) {
-                    last = next;
-                    continue;
-                }
-                break;
-            }
-            for span in scan(&chars) {
+        let grid: Vec<Vec<char>> = (rect.y..rect.bottom())
+            .map(|y| (rect.x..rect.right()).map(|x| cell_char(buf, x, y)).collect())
+            .collect();
+        for line in logical_lines(&grid, join) {
+            for span in scan(&line.chars) {
                 let link = match seen.get(&span.url) {
                     Some(i) => *i,
                     None => {
@@ -350,21 +331,22 @@ impl ScreenLinks {
                     }
                 };
                 // Back to cells, breaking at every row change: a span that
-                // crossed a join is one link drawn on two rows.
+                // crossed a join is one link drawn on two rows, and the
+                // indentation the join stepped over belongs to neither.
                 let mut i = span.start;
                 while i < span.end {
-                    let (x0, row) = at[i];
+                    let (x0, row) = line.at[i];
                     let mut x1 = x0;
-                    while i < span.end && at[i].1 == row {
-                        x1 = at[i].0 + 1;
+                    while i < span.end && line.at[i].1 == row {
+                        x1 = line.at[i].0 + 1;
                         i += 1;
                     }
-                    if let Some(runs) = self.rows.get_mut(row.saturating_sub(buf.area.y) as usize) {
-                        runs.push(Run { x0, x1, link });
+                    let y = (rect.y as usize + row).saturating_sub(buf.area.y as usize);
+                    if let Some(runs) = self.rows.get_mut(y) {
+                        runs.push(Run { x0: rect.x + x0 as u16, x1: rect.x + x1 as u16, link });
                     }
                 }
             }
-            y = last + 1;
         }
     }
 
@@ -393,15 +375,214 @@ impl ScreenLinks {
     }
 }
 
-/// Whether a row begins a link rather than continuing the one above it.
+/// One line of text as a program meant it, which may be several rows of the
+/// screen: its characters, and for each the `(column, row)` of the grid it was
+/// read from — so a span found in it can be painted back onto the cells.
+#[derive(Debug, Default)]
+struct Line {
+    chars: Vec<char>,
+    at: Vec<(usize, usize)>,
+}
+
+impl Line {
+    fn push_row(&mut self, grid: &[Vec<char>], y: usize, from: usize) {
+        for (x, c) in grid[y].iter().enumerate().skip(from) {
+            self.chars.push(*c);
+            self.at.push((x, y));
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.chars.truncate(len);
+        self.at.truncate(len);
+    }
+}
+
+/// How one row is laid out, measured once per frame.
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    /// One past the last non-blank cell.
+    end: usize,
+    /// The same with a right-hand border taken off as well — a box's `│` and
+    /// the blanks inside it — which is where the row's *text* stops.
+    inner: usize,
+    /// Whether the row has a letter or digit on it. A row without one is a
+    /// rule, a border or nothing, and ends the paragraph rather than being in it.
+    words: bool,
+}
+
+fn shape(row: &[char]) -> Shape {
+    let end = row.iter().rposition(|c| *c != ' ').map_or(0, |i| i + 1);
+    let inner = row[..end].iter().rposition(|c| *c != ' ' && !border(*c)).map_or(0, |i| i + 1);
+    Shape { end, inner, words: row.iter().any(char::is_ascii_alphanumeric) }
+}
+
+/// Glyphs that frame text rather than being part of it: box drawing, the
+/// eighth-blocks agents draw a quote bar with, and the bracket pieces — `⎿` is
+/// how Claude Code hangs a tool's output off the call that made it.
+fn frame(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259f}' | '\u{23a2}'..='\u{23a5}' | '\u{23b8}' | '\u{23b9}' | '\u{23bf}')
+}
+
+/// What may close a row on the right: a frame glyph, or an ASCII box's `|`.
+/// Only ever taken off when the row below has the same glyph in the same
+/// column — `curl https://x/a |` ends in a pipe, not a box.
+fn border(c: char) -> bool {
+    frame(c) || c == '|'
+}
+
+/// Split a grid into the lines its program wrote.
 ///
-/// Only the first cells are read — enough for the longest scheme — because that
-/// is the whole question: a wrapped URL continues in the middle of a path, and
-/// a path does not begin with `https://`.
-fn row_starts_a_link(buf: &Buffer, rect: Rect, y: u16) -> bool {
-    let n = rect.width.min(SCHEME_CELLS);
-    let head: Vec<char> = (0..n).map(|i| cell_char(buf, rect.x + i, y)).collect();
-    starts_here(&head, 0).is_some()
+/// Without `join` every row is a line. With it — the stage, where the text is
+/// a program's own output — a row is continued onto the next when, and only
+/// when, it ends in the middle of a link: see [`continues`] for the evidence
+/// that takes. A continuation is added without its indentation or gutter, so
+/// the address reads through the break as one run.
+fn logical_lines(grid: &[Vec<char>], join: bool) -> Vec<Line> {
+    let shapes: Vec<Shape> =
+        if join { grid.iter().map(Vec::as_slice).map(shape).collect() } else { Vec::new() };
+    let mut out = Vec::with_capacity(grid.len());
+    let mut y = 0;
+    while y < grid.len() {
+        let mut line = Line::default();
+        line.push_row(grid, y, 0);
+        let mut last = y;
+        let mut from = 0;
+        while join && last + 1 < grid.len() {
+            let Some(j) = continues(grid, &shapes, &line, last, from) else { break };
+            line.truncate(j.keep);
+            last += 1;
+            from = j.from;
+            line.push_row(grid, last, from);
+        }
+        out.push(line);
+        y = last + 1;
+    }
+    out
+}
+
+/// How a row is joined to the line above it.
+struct Join {
+    /// How much of the line so far to keep: everything up to the end of the
+    /// wrapped row's text, so its right margin and border are not spliced in.
+    keep: usize,
+    /// The column the continuation's text starts at, past its indentation.
+    from: usize,
+}
+
+/// Whether row `y + 1` carries on the link that row `y` — the last row of
+/// `line`, read from column `from` — ends in.
+///
+/// The screen does not say which rows wrapped, so this reads the evidence a
+/// wrap leaves behind, and every clause is there because a real screen broke
+/// without it:
+///
+/// 1. **The row ends inside a link.** The run of URL characters reaching its
+///    last cell of text has to contain the start of one. A row ending in prose
+///    is never joined, whatever follows it.
+/// 2. **A terminal's own wrap**: the row is filled to its last column and the
+///    next carries straight on from column 0. Joined unless the next row
+///    starts a link of its own — `$ echo https://…` fills a narrow pane's row
+///    exactly and the shell echoes the same URL underneath, and joining the two
+///    offered that address written twice.
+/// 3. **A program's own wrap** — an agent's TUI breaks a long URL at *its*
+///    width, which need not be the pane's, and indents the rest under the text
+///    it belongs to. That takes all of:
+///    - the row reaching (within [`WRAP_SLACK`]) the right edge of the
+///      paragraph around it, which is where that program wraps. A row that
+///      stops short of its neighbours ended because the line did;
+///    - the next row's first token, past blanks and gutter glyphs, being URL
+///      characters with a letter or digit among them, and not a scheme;
+///    - and that token *reading as a piece of an address* — a `/`, `.`, `-`,
+///      `?`, `=` or the like in it — or being all that is left on its row.
+///      This is what keeps prose apart: a URL that happens to end a line at
+///      the wrap width is followed by a word and a space, and `and then` is as
+///      made of URL characters as `ion.html` is.
+fn continues(
+    grid: &[Vec<char>],
+    shapes: &[Shape],
+    line: &Line,
+    y: usize,
+    from: usize,
+) -> Option<Join> {
+    let row = &grid[y];
+    let next = &grid[y + 1];
+    let s = shapes[y];
+    // A box: the same border glyph in the same column below, so the text of
+    // this row stops inside it.
+    let boxed = s.inner < s.end && next.get(s.end - 1) == Some(&row[s.end - 1]);
+    let end = if boxed { s.inner } else { s.end };
+    if end <= from {
+        return None;
+    }
+    let keep = line.chars.len() - (row.len() - end);
+    if !ends_in_link(&line.chars[..keep]) {
+        return None;
+    }
+    if end == row.len() && next.first().is_some_and(|c| *c != ' ' && !border(*c)) {
+        return starts_here(next, 0).is_none().then_some(Join { keep, from: 0 });
+    }
+    if end + WRAP_SLACK < paragraph_width(shapes, y) {
+        return None;
+    }
+    let start = indent(next, row);
+    let rest = &next[start..];
+    let len = rest.iter().take_while(|c| url_char(**c)).count();
+    let token = &rest[..len];
+    if !token.iter().any(char::is_ascii_alphanumeric) || starts_here(token, 0).is_some() {
+        return None;
+    }
+    let alone = rest[len..].iter().all(|c| *c == ' ' || border(*c));
+    (alone || addressy(token)).then_some(Join { keep, from: start })
+}
+
+/// Whether a line so far ends in the middle of a link — the run of URL
+/// characters at its end contains a scheme or a `www.`, at a place [`scan`]
+/// would have started one. Read without [`usable`], because a row can break
+/// straight after `https://` and the address is on the next one.
+fn ends_in_link(chars: &[char]) -> bool {
+    let t0 = chars.iter().rposition(|c| !url_char(*c)).map_or(0, |i| i + 1);
+    (t0..chars.len()).any(|i| starts_here(chars, i).is_some())
+}
+
+/// The right edge of the paragraph around row `y`: the furthest any row of it
+/// reaches, the paragraph being the rows with words on them either side of it.
+/// That is the width the program wrapped this block of output at, measured
+/// rather than assumed to be the pane's.
+fn paragraph_width(shapes: &[Shape], y: usize) -> usize {
+    let lo = y.saturating_sub(PARAGRAPH_REACH);
+    let hi = (y + PARAGRAPH_REACH).min(shapes.len() - 1);
+    let up = (lo..y).rev().take_while(|k| shapes[*k].words);
+    let down = (y + 1..=hi).take_while(|k| shapes[*k].words);
+    up.chain(down).map(|k| shapes[k].inner).fold(shapes[y].inner, usize::max)
+}
+
+/// Where a continuation's text starts: past blanks, frame glyphs, and the ASCII
+/// gutters that sit in the same column on the row above — a quote's `>`, a
+/// table's `|`, and a diff's `+` or `-` when the text runs straight on from it
+/// (`+e newest…`, as Claude Code wraps an added line). A `-` followed by a
+/// space is a list item, which is a new line and not a gutter.
+fn indent(next: &[char], above: &[char]) -> usize {
+    let mut x = 0;
+    while let Some(&c) = next.get(x) {
+        let same = above.get(x) == Some(&c);
+        let marker = matches!(c, '+' | '-') && next.get(x + 1).is_some_and(|n| *n != ' ');
+        if !(c == ' ' || frame(c) || (same && (matches!(c, '|' | '>') || marker))) {
+            break;
+        }
+        x += 1;
+    }
+    x
+}
+
+/// Whether a token reads as a piece of an address rather than a word: it keeps
+/// one of the characters that join paths, hosts and queries once the sentence's
+/// own punctuation is taken off its end.
+fn addressy(token: &[char]) -> bool {
+    let token: String = token.iter().collect();
+    trim_tail(&token).chars().any(|c| {
+        matches!(c, '/' | '.' | '-' | '_' | '?' | '=' | '&' | '%' | '#' | '~' | ':' | '@' | '+')
+    })
 }
 
 /// One cell, one character.
@@ -638,6 +819,217 @@ mod tests {
         let b = buf(vec!["https://example.com ", "and then some text  "]);
         let links = ScreenLinks::of(&b, Some(Rect::new(0, 0, 20, 2)));
         assert_eq!(links.urls(), ["https://example.com"]);
+    }
+
+    /// A pane `width` cells wide showing `rows`, scanned as the stage.
+    fn pane(width: u16, rows: &[String]) -> ScreenLinks {
+        let mut b = Buffer::empty(Rect::new(0, 0, width, rows.len() as u16));
+        for (y, r) in rows.iter().enumerate() {
+            assert!(r.chars().count() <= width as usize, "row {y} is wider than the pane: {r:?}");
+            b.set_string(0, y as u16, r, ratatui::style::Style::default());
+        }
+        ScreenLinks::of(&b, Some(b.area))
+    }
+
+    fn rows(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// Wrapped output as agents and shells actually draw it, and what each
+    /// screen must come out as. Every row the joiner is meant to read as
+    /// wrapped is exactly as wide as its paragraph's widest — which is what a
+    /// hard wrapper leaves — and the cases that must *not* join are the ones
+    /// that look most like the cases that must.
+    #[test]
+    fn wrapped_urls_are_joined_and_prose_is_not() {
+        let box_row = |s: &str| format!("│ {s:<36}│");
+        let long = format!("https://example.com/{}{}cccc/d.html", "a".repeat(13), "b".repeat(40));
+        let cases: Vec<(&str, u16, Vec<String>, Vec<String>)> = vec![
+            (
+                "Claude Code wraps a command at the pane's edge and indents the rest",
+                39,
+                rows(&[
+                    "● Bash(install the client)",
+                    "  ⎿  $ curl -fsSL https://raw.githubuse",
+                    "     rcontent.com/o/r/install.sh | sh",
+                ]),
+                rows(&["https://raw.githubusercontent.com/o/r/install.sh"]),
+            ),
+            (
+                "an agent wraps at its own width, short of the pane's, and the prose after it stays out",
+                60,
+                rows(&[
+                    "● The release notes are at https://github",
+                    "  .com/dieterpl/butai/releases/tag/v1.5.0",
+                    "  and the installer picks it up from it.",
+                ]),
+                rows(&["https://github.com/dieterpl/butai/releases/tag/v1.5.0"]),
+            ),
+            (
+                "an indented markdown list item",
+                60,
+                rows(&[
+                    "  1. Follow https://docs.example.com/guide/inst",
+                    "     all-on-linux.html and then come back.",
+                ]),
+                rows(&["https://docs.example.com/guide/install-on-linux.html"]),
+            ),
+            (
+                "a URL that ends a line of prose is not spliced onto the next line",
+                60,
+                rows(&[
+                    "I put the notes at https://example.com/notes",
+                    "and the code is next to them in the repo.",
+                ]),
+                rows(&["https://example.com/notes"]),
+            ),
+            (
+                "the same, filled to the pane's edge, with the next line indented",
+                44,
+                rows(&[
+                    "I put the notes at https://example.com/notes",
+                    "  and the code is next to them in the repo.",
+                ]),
+                rows(&["https://example.com/notes"]),
+            ),
+            (
+                "a row that stops short of its paragraph ended there, even before a path",
+                60,
+                rows(&[
+                    "The spec lives at https://example.com/spec",
+                    "src/spec.rs implements it, and the tests in",
+                    "tests/spec.rs check it against the examples.",
+                ]),
+                rows(&["https://example.com/spec"]),
+            ),
+            (
+                "two URLs on consecutive rows, the first filling the row",
+                41,
+                rows(&["https://example.com/first/link/that/is/lo", "https://example.com/second"]),
+                rows(&["https://example.com/first/link/that/is/lo", "https://example.com/second"]),
+            ),
+            (
+                "a list of links is a list, not one long link",
+                60,
+                rows(&[
+                    "  - https://github.com/dieterpl/butai/pull/1",
+                    "  - https://github.com/dieterpl/butai/pull/2",
+                ]),
+                rows(&[
+                    "https://github.com/dieterpl/butai/pull/1",
+                    "https://github.com/dieterpl/butai/pull/2",
+                ]),
+            ),
+            (
+                "a list item after a link does not continue it, even when it is a path",
+                60,
+                rows(&["  - https://example.com/a/b/c", "  - src/main.rs"]),
+                rows(&["https://example.com/a/b/c"]),
+            ),
+            (
+                "inside a box: the border is not part of either half",
+                39,
+                vec![box_row("https://example.com/a/very/long/pat"), box_row("h/to/the/thing")],
+                rows(&["https://example.com/a/very/long/path/to/the/thing"]),
+            ),
+            (
+                "behind a quote bar",
+                60,
+                rows(&["▎ Claim them at https://claude.ai/settings/bi", "▎ lling/credits"]),
+                rows(&["https://claude.ai/settings/billing/credits"]),
+            ),
+            (
+                "behind a markdown quote",
+                60,
+                rows(&["> see https://example.com/a/b/c/d/e/f", "> /g/h for the rest"]),
+                rows(&["https://example.com/a/b/c/d/e/f/g/h"]),
+            ),
+            (
+                "an added line in Claude Code's diff, wrapped behind its `+`",
+                42,
+                rows(&[
+                    "      12 +  curl -fsSL https://raw.githubu",
+                    "         +sercontent.com/o/r/install.sh",
+                ]),
+                rows(&["https://raw.githubusercontent.com/o/r/install.sh"]),
+            ),
+            (
+                "broken straight after the scheme",
+                60,
+                rows(&["see the dashboard at https://", "   grafana.example.com/d/abc"]),
+                rows(&["https://grafana.example.com/d/abc"]),
+            ),
+            (
+                "three rows, the middle one nothing but address",
+                60,
+                vec![
+                    format!("● Opened {}", &long[..33]),
+                    format!("  {}", &long[33..73]),
+                    format!("  {}", &long[73..]),
+                ],
+                vec![long],
+            ),
+            (
+                "a pipe at the end of a command is not a box",
+                40,
+                rows(&["  $ curl https://example.com/a |", "    .data/x.json"]),
+                rows(&["https://example.com/a"]),
+            ),
+            (
+                "a blank row ends it",
+                40,
+                rows(&["https://example.com/aaaaaaaaaaaaaaaaaaaa", "", "bbb/c.html"]),
+                rows(&["https://example.com/aaaaaaaaaaaaaaaaaaaa"]),
+            ),
+            (
+                "a terminal's own wrap carries on from column 0, word or not",
+                30,
+                rows(&["https://example.com/documentat", "ion and more"]),
+                rows(&["https://example.com/documentation"]),
+            ),
+            (
+                "known loss: a program-wrapped tail of bare letters followed by prose",
+                60,
+                rows(&["  open https://example.com/documentat", "  ion and then read the rest of it."]),
+                rows(&["https://example.com/documentat"]),
+            ),
+        ];
+        for (name, width, screen, want) in cases {
+            let links = pane(width, &screen);
+            assert_eq!(links.urls(), want.as_slice(), "{name}");
+        }
+    }
+
+    /// Every fragment is the one link, and none of the indentation is.
+    #[test]
+    fn a_joined_url_covers_its_cells_and_not_the_indent() {
+        let links = pane(
+            39,
+            &rows(&[
+                "● Bash(install the client)",
+                "  ⎿  $ curl -fsSL https://raw.githubuse",
+                "     rcontent.com/o/r/install.sh | sh",
+            ]),
+        );
+        let url = "https://raw.githubusercontent.com/o/r/install.sh";
+        let id = id_of(url);
+        assert_eq!(links.at(18, 1), Some((id, url)), "the first half");
+        assert_eq!(links.at(38, 1), Some((id, url)), "to the last column");
+        assert_eq!(links.at(4, 2), None, "the indent is not linked");
+        assert_eq!(links.at(5, 2), Some((id, url)), "the second half");
+        assert_eq!(links.at(31, 2), Some((id, url)), "to its last character");
+        assert_eq!(links.at(32, 2), None, "and no further");
+
+        let boxed = pane(
+            39,
+            &[
+                format!("│ {:<36}│", "https://example.com/a/very/long/pat"),
+                format!("│ {:<36}│", "h/to/the/thing"),
+            ],
+        );
+        assert!(boxed.at(38, 0).is_none(), "the right border");
+        assert!(boxed.at(0, 1).is_none(), "the left border");
+        assert!(boxed.at(2, 1).is_some(), "the text inside it");
     }
 
     #[test]

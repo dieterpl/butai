@@ -767,9 +767,28 @@ offered it. So a row that *begins a link of its own* is never a continuation: a
 wrapped URL resumes in the middle of a path, and a path does not start with
 `https://`. That is cheap and it covers the case that actually occurs; a program
 that ends a line exactly at the edge and then prints unrelated prose can still be
-got wrong. If that ever bites, the fix is a per-row wrapped bit on the frame,
-which is additive and small — but it is a protocol change for an ambiguity the
-two rules above have not yet been seen to lose.
+got wrong.
+
+A wrapped bit would not have caught the commoner miss anyway. Agent TUIs —
+Claude Code is the one in front of us all day — do their own wrapping: they break
+a long URL at their width, which need not be the pane's, and indent the rest
+under the text it belongs to, behind a `⎿` or a `│`. The terminal never wrapped
+those rows, so no flag from the emulator would say they belong together. The
+client therefore reads the shape a hard wrapper leaves: the row ends inside a
+link, it reaches the right edge of *its paragraph* (the widest of the rows with
+words on them around it, so the wrap width is measured, not assumed), and the
+next row's first token past the indentation and gutter is the rest of an address
+— URL characters, not a fresh scheme, and either carrying a `/`, `.`, `-`, `=`
+and the like or being alone on its row. That last clause is the one that keeps
+prose apart: a URL that ends a line at the wrap width is followed by a word and a
+space, and `and` is as made of URL characters as `ion.html` is. The price is a
+URL broken into a fragment of bare letters with prose after it, which stays
+truncated — a missing tail is a link that fails visibly; a sentence spliced into
+one is a link that goes somewhere else.
+
+If any of this ever bites, the fix for the terminal's case is a per-row wrapped
+bit on the frame, which is additive and small — but it is a protocol change for
+an ambiguity the rules above have not yet been seen to lose.
 
 **Two ways to follow one, because there are two pointers.** OSC 8 hands the URL
 to the terminal butai is drawn on, which is what makes hover and cmd-click work
