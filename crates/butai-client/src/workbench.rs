@@ -502,6 +502,10 @@ pub async fn run(
     // effect on the next keystroke instead of the next start.
     let mut pinned = config.general.default_agent.clone();
     view.pinned_agent = pinned.clone();
+    // The template prompts the footer's `[prompts]` button lists.
+    view.prompts = config.prompts.clone();
+    // How the fleet, and the tab bar after it, was last ordered.
+    view.arrange.order = chrome::FleetOrder::from_label(&config.booth.order).unwrap_or_default();
     // Whether an announcement is allowed to bring a machine in on its own. The
     // daemon owned this until it stopped dialling; the decision is this side's
     // now, so the setting has to be read here or it stops meaning anything.
@@ -923,6 +927,7 @@ pub async fn run(
             // actually on screen.
             sync_gauges(&mut view, &daemons, &hosts);
             sync_fleet_first(&mut view, &daemons, &hosts, cols, rows);
+            sync_tab_order(&mut view, &daemons, &hosts);
             (screen_links, last_frame) = paint(
                 &mut painted,
                 cols,
@@ -2022,6 +2027,36 @@ pub async fn run(
                         view.flash = Some(format!("copied {url}"));
                         dirty = true;
                     }
+                    // A template prompt goes where a paste goes, so a program
+                    // that asked for bracketed paste gets one, and a prompt
+                    // with newlines in it is not submitted line by line.
+                    Flow::SendPrompt { name, text } => {
+                        view.flash = None;
+                        paste_text(text, &mut view, &mut files, &mut docs, stage.as_ref());
+                        if view.flash.is_none() {
+                            view.flash = Some(format!("sent {name}"));
+                        }
+                        dirty = true;
+                    }
+                    Flow::CopyPrompt { name, text } => {
+                        crate::tui::set_clipboard(&text).ok();
+                        view.flash = Some(format!("copied {name}"));
+                        dirty = true;
+                    }
+                    Flow::SavePrompt { name, text } => {
+                        view.flash = Some(match crate::config::Config::save_prompt(&name, &text) {
+                            Ok(()) => format!("saved {name}"),
+                            Err(e) => format!("{name} is not saved: {e}"),
+                        });
+                        dirty = true;
+                    }
+                    Flow::ForgetPrompt(name) => {
+                        view.flash = Some(match crate::config::Config::forget_prompt(&name) {
+                            Ok(()) => format!("deleted {name}"),
+                            Err(e) => format!("{name} is not deleted: {e}"),
+                        });
+                        dirty = true;
+                    }
                     // The text only exists on the painted screen, so the copy
                     // happens here rather than where the drag ended.
                     Flow::CopySelection => {
@@ -2511,7 +2546,11 @@ pub async fn run(
                                 // Browsing answers itself: a directory row
                                 // re-opens the list one level along, and only
                                 // "[open this folder]" leaves it.
-                                if let ListKind::Space = &list.kind {
+                                if list.kind == ListKind::FleetOrder {
+                                    if let Some(&order) = chrome::FleetOrder::ALL.get(list.sel) {
+                                        set_fleet_order(&mut view, &daemons, &hosts, order);
+                                    }
+                                } else if let ListKind::Space = &list.kind {
                                     // By row index, not by label: the row is
                                     // built from `Page::ORDER` and carries a
                                     // cursor mark and a badge, so reading the
@@ -3451,6 +3490,8 @@ async fn act_on_choice(
         // eyes, and the daemon refuses that whole family on purpose.
         ListKind::Space | ListKind::Browse { .. } | ListKind::GitGroups | ListKind::GitGroup(_) => {
         }
+        // Handled by the loop: ordering the fleet is this client's own view.
+        ListKind::FleetOrder => {}
         // Handled by the loop, and not a daemon call at all: connecting a
         // machine is this client opening a second connection of its own.
         // Both are answered by the loop: one dials a machine, the other picks
@@ -3468,6 +3509,8 @@ async fn act_on_choice(
         // Neither is following a link: the browser is on the machine this
         // client runs on, and the daemon may not even be on it.
         ListKind::Links => {}
+        // Answered in `prompts_key`, before a `Flow::Choose` is ever sent.
+        ListKind::Prompts => {}
     }
     Ok(None)
 }
@@ -4246,7 +4289,7 @@ fn page_bar_click(
             | Target::CloseTab
             | Target::NewWorkspace
             | Target::Machines
-            | Target::Footer("[resize]")
+            | Target::Footer("[prompts]")
             | Target::Footer("[detach]")
     ) {
         view.page = ret;
@@ -6104,6 +6147,24 @@ enum Flow {
     /// with. OSC 52 goes to the terminal emulator, which is on a desktop even
     /// when this client is not.
     CopyLink(String),
+    /// Paste a template prompt into the staged pane, as a bracketed paste.
+    SendPrompt {
+        name: String,
+        text: String,
+    },
+    /// Put a template prompt's text on the local clipboard.
+    CopyPrompt {
+        name: String,
+        text: String,
+    },
+    /// Write a template prompt to `[[prompts]]`. `view.prompts` already has it.
+    SavePrompt {
+        name: String,
+        text: String,
+    },
+    /// Take a template prompt out of `[[prompts]]`. Already gone from
+    /// `view.prompts`.
+    ForgetPrompt(String),
     /// Open the branch picker. Same reason: the list is a fetch.
     PickBranch,
     /// Re-read `GET /v1/usage`. A fetch, so the loop runs it rather than the
@@ -7667,6 +7728,11 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
         (_, event::KeyCode::Esc) | (_, event::KeyCode::Char('q')) => view.overlay = None,
         (Overlay::List(list), event::KeyCode::Down | event::KeyCode::Char('j')) => list.move_sel(1),
         (Overlay::List(list), event::KeyCode::Up | event::KeyCode::Char('k')) => list.move_sel(-1),
+        // The template picker answers its own rows: see [`prompts_key`].
+        (
+            Overlay::List(list),
+            event::KeyCode::Enter | event::KeyCode::Char('y') | event::KeyCode::Char('d'),
+        ) if list.kind == ListKind::Prompts => return prompts_key(k.code, view),
         (Overlay::List(_), event::KeyCode::Enter) => return Flow::Choose,
         // `d` pins the highlighted agent as the default.
         //
@@ -7799,6 +7865,9 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
                 return Flow::Continue;
             }
             list.sel = row;
+            if list.kind == ListKind::Prompts {
+                return prompts_key(event::KeyCode::Enter, view);
+            }
             Flow::Choose
         }
         // Two rows above the hits: the query, then a blank.
@@ -7824,6 +7893,53 @@ fn overlay_mouse(m: &event::MouseEvent, view: &mut View, cols: u16, rows: u16) -
             _ => Flow::Continue,
         },
     }
+}
+
+/// A key on the template picker's highlighted row.
+///
+/// Enter sends the prompt to the staged pane, `y` copies it and `d` deletes
+/// it, keeping the picker open on what is left. On the last row, Enter opens
+/// the box that saves a new one. Answered here rather than in the loop's
+/// `Flow::Choose`, because everything it needs is on the view.
+fn prompts_key(code: event::KeyCode, view: &mut View) -> Flow {
+    let Some(Overlay::List(list)) = &view.overlay else { return Flow::Continue };
+    let sel = list.sel;
+    let Some(chosen) = list.chosen().map(str::to_string) else { return Flow::Continue };
+    if chosen == chrome::PROMPT_NEW {
+        if code == event::KeyCode::Enter {
+            view.overlay = Some(chrome::save_prompt_overlay());
+        }
+        return Flow::Continue;
+    }
+    let Some(i) = chosen.parse::<usize>().ok().filter(|i| *i < view.prompts.len()) else {
+        return Flow::Continue;
+    };
+    let p = view.prompts[i].clone();
+    match code {
+        event::KeyCode::Enter => {
+            view.overlay = None;
+            Flow::SendPrompt { name: p.name, text: p.text }
+        }
+        event::KeyCode::Char('y') => {
+            view.overlay = None;
+            Flow::CopyPrompt { name: p.name, text: p.text }
+        }
+        event::KeyCode::Char('d') => {
+            view.prompts.remove(i);
+            view.overlay = Some(chrome::prompts_overlay(&view.prompts, sel));
+            Flow::ForgetPrompt(p.name)
+        }
+        _ => Flow::Continue,
+    }
+}
+
+/// `name: text` -> its two halves, trimmed. `None` when either is empty.
+///
+/// Split at the first colon, so the text can have colons of its own.
+fn parse_prompt_line(line: &str) -> Option<(String, String)> {
+    let (name, text) = line.split_once(':')?;
+    let (name, text) = (name.trim(), text.trim());
+    (!name.is_empty() && !text.is_empty()).then(|| (name.to_string(), text.to_string()))
 }
 
 /// Close a confirm box and do what it was asking about, if it was answered yes.
@@ -7935,6 +8051,7 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                     chrome::PromptKind::SshDestination => "a machine needs a destination".into(),
                     chrome::PromptKind::NewFolder { .. } => "a folder needs a name".into(),
                     chrome::PromptKind::NewLabel(_) => "a label needs a name".into(),
+                    chrome::PromptKind::SavePrompt => "type it as name: text".into(),
                     _ => "a commit needs a message".to_string(),
                 });
                 // Every other prompt is entered from the workbench, so refusing
@@ -7943,10 +8060,36 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                 // and the browsing that got here, and a stray second Enter would
                 // be enough to do it. So the caret stays, and the same rule —
                 // land where you were — is what keeps this box open.
-                if matches!(p.kind, chrome::PromptKind::NewFolder { .. }) {
+                if matches!(
+                    p.kind,
+                    chrome::PromptKind::NewFolder { .. } | chrome::PromptKind::SavePrompt
+                ) {
                     view.overlay = Some(Overlay::Prompt(p));
                 }
                 return Flow::Continue;
+            }
+            // A new template prompt: stored on the view now, so the picker it
+            // goes back to lists it, and written to the file by the loop. The
+            // same name again replaces the text rather than adding a row.
+            if p.kind == chrome::PromptKind::SavePrompt {
+                let Some((name, text)) = parse_prompt_line(&p.text) else {
+                    view.flash = Some("type it as name: text".into());
+                    view.overlay = Some(Overlay::Prompt(p));
+                    return Flow::Continue;
+                };
+                let tpl = crate::config::PromptTemplate { name: name.clone(), text: text.clone() };
+                let at = match view.prompts.iter().position(|t| t.name == name) {
+                    Some(i) => {
+                        view.prompts[i] = tpl;
+                        i
+                    }
+                    None => {
+                        view.prompts.push(tpl);
+                        view.prompts.len() - 1
+                    }
+                };
+                view.overlay = Some(chrome::prompts_overlay(&view.prompts, at));
+                return Flow::SavePrompt { name, text };
             }
             return match p.kind {
                 chrome::PromptKind::Commit { all } => {
@@ -7966,6 +8109,8 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                 chrome::PromptKind::NewFolder { dir } => {
                     Flow::MakeFolder { dir, name: p.text.trim().to_string() }
                 }
+                // Answered above, before the text is moved out.
+                chrome::PromptKind::SavePrompt => Flow::Continue,
                 // The `:` prompt speaks the same mini-language `[keys]` binds,
                 // so a typed command and a bound one go the same way from here.
                 chrome::PromptKind::Command => match crate::keymap::parse_action(&p.text) {
@@ -8091,6 +8236,10 @@ fn run_click(
             view.booth_keys = !view.booth_keys;
             Flow::Continue
         }
+        Target::FleetOrder => {
+            view.overlay = Some(order_menu(view));
+            Flow::Continue
+        }
         // The MACHINES picker. It opens with the machines already here at the
         // top of the list and the cursor on the first of them, each one saying
         // that Enter drops it — which is the whole reason a count is worth
@@ -8100,7 +8249,9 @@ fn run_click(
         // them.
         Target::Machines => Flow::PickHost,
         Target::Spaces => Flow::PickSpace,
-        Target::Footer("[resize]") => Flow::ToggleLayout,
+        // The template prompts. It took `[resize]`'s slot; resizing the rails
+        // is still `alt-l`, `C-b l` and `:layout`.
+        Target::Footer("[prompts]") => run_view(ViewVerb::Prompts, view),
         Target::Footer("[detach]") => Flow::Detach,
         Target::Footer("[help]") => run_view(ViewVerb::Help, view),
         // The same two flows the chip used to send, so the button and `alt-s`
@@ -8344,7 +8495,7 @@ fn fleet_menu_here(
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
-    fleet_menu(&chrome::booth_rows(&spaces, &machines, &view.folds), &all, row)
+    fleet_menu(&chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange), &all, row)
 }
 
 /// Send a chat's role and labels to the daemon it lives on.
@@ -8362,6 +8513,110 @@ async fn send_tags(daemons: &[Daemon], menu: &chrome::TagMenu) -> Result<()> {
 /// A menu target as the list overlay that shows it. The rows come from
 /// [`chrome::MenuTarget::rows`], which the dispatch reads by index — one table,
 /// so neither can grow a row the other does not know about.
+/// The fleet's order menu: every [`chrome::FleetOrder`], the current one
+/// marked, the cursor on it.
+fn order_menu(view: &View) -> Overlay {
+    let now = view.arrange.order;
+    let items = chrome::FleetOrder::ALL
+        .iter()
+        .map(|&o| {
+            let mark = if o == now { ">" } else { " " };
+            format!("{mark} {:<10} {}", o.label(), o.about())
+        })
+        .collect();
+    Overlay::List(ListOverlay {
+        title: "order the fleet".into(),
+        items,
+        values: None,
+        sel: chrome::FleetOrder::ALL.iter().position(|&o| o == now).unwrap_or(0),
+        kind: ListKind::FleetOrder,
+        meters: None,
+        anchor: None,
+    })
+}
+
+/// Whether two fleet rows are the same machine, project or chat.
+fn same_row(a: &chrome::BoothRow<'_>, b: &chrome::BoothRow<'_>) -> bool {
+    use chrome::BoothRow as R;
+    match (a, b) {
+        (R::Machine { daemon: x, .. }, R::Machine { daemon: y, .. }) => x == y,
+        (R::Space { space: x, .. }, R::Space { space: y, .. }) => {
+            x.daemon == y.daemon && x.id == y.id
+        }
+        (R::Agent { sel: x, .. }, R::Agent { sel: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+/// Changes the fleet's order and keeps the cursor on the row it was on.
+///
+/// `needs you` is ranked here, as it is picked, and only here: picking it again
+/// is how you re-rank. `custom` starts from the order on screen the first time.
+fn set_fleet_order(
+    view: &mut View,
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    order: chrome::FleetOrder,
+) {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    let before = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange)
+        .get(view.booth_sel)
+        .copied();
+    if order == chrome::FleetOrder::NeedsYou {
+        view.arrange.rank_needs(&spaces, &machines);
+    }
+    if order == chrome::FleetOrder::Custom && view.arrange.custom == chrome::Ranking::default() {
+        let open = chrome::Folds::default();
+        let rows = chrome::booth_rows(&spaces, &machines, &open, &view.arrange);
+        view.arrange.custom = chrome::Ranking::of(&rows, &machines);
+    }
+    view.arrange.order = order;
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
+    if let Some(at) = before.and_then(|b| rows.iter().position(|r| same_row(r, &b))) {
+        view.booth_sel = at;
+    }
+    view.flash = Some(format!("fleet: {}", order.label()));
+    remember_fleet_order(view);
+}
+
+/// Writes the fleet's order to `[booth] order`, saying so when it cannot.
+fn remember_fleet_order(view: &mut View) {
+    if let Err(e) = crate::config::Config::save_fleet_order(view.arrange.order.label()) {
+        view.flash = Some(format!("fleet order not saved: {e}"));
+    }
+}
+
+/// `J`/`K`: moves the row under the cursor down or up among its siblings, in
+/// the `custom` order — switching to it, from the order on screen, if the fleet
+/// was in another. The cursor goes with the row.
+fn nudge_fleet(view: &mut View, daemons: &[Daemon], hosts: &[Option<String>], delta: isize) {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    // Written down from what is on screen, every time: the first press starts
+    // `custom` from the order you were looking at, and later ones pick up
+    // projects and chats that opened since.
+    let open = chrome::Folds::default();
+    let rows = chrome::booth_rows(&spaces, &machines, &open, &view.arrange);
+    view.arrange.custom = chrome::Ranking::of(&rows, &machines);
+    if view.arrange.order != chrome::FleetOrder::Custom {
+        view.arrange.order = chrome::FleetOrder::Custom;
+        view.flash = Some("fleet: custom".into());
+        remember_fleet_order(view);
+    }
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
+    let Some(row) = rows.get(view.booth_sel).copied() else { return };
+    if !view.arrange.custom.nudge(&row, &machines, delta) {
+        return;
+    }
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
+    if let Some(at) = rows.iter().position(|r| same_row(r, &row)) {
+        view.booth_sel = at;
+    }
+}
+
 fn menu_overlay(kind: chrome::MenuTarget) -> Overlay {
     let rows = kind.rows();
     Overlay::List(ListOverlay {
@@ -8992,6 +9247,10 @@ fn run_view(verb: ViewVerb, view: &mut View) -> Flow {
             view.overlay = None;
             Flow::OpenHelp
         }
+        ViewVerb::Prompts => {
+            view.overlay = Some(chrome::prompts_overlay(&view.prompts, 0));
+            Flow::Continue
+        }
     }
 }
 
@@ -9291,7 +9550,12 @@ fn handle_input(
                         // agent titles and the machines they are on is one of
                         // the more useful ones to be able to quote.
                         drag.press(view, *cols, *rows, m.column, m.row, metrics);
-                        let tree = chrome::booth_rows(&fleet_spaces, &fleet_machines, &view.folds);
+                        let tree = chrome::booth_rows(
+                            &fleet_spaces,
+                            &fleet_machines,
+                            &view.folds,
+                            &view.arrange,
+                        );
                         let key = match fleet_hit {
                             hit::FleetHit::Row(row) => hit::FleetClickKey::of(tree.get(row)),
                             _ => None,
@@ -9803,6 +10067,18 @@ fn handle_input(
                     view.booth_keys = false;
                     return Flow::Continue;
                 }
+                (event::KeyCode::Char('o'), false)
+                    if view.page == Page::Booth && view.focus == Focus::AllAgents =>
+                {
+                    view.overlay = Some(order_menu(view));
+                    return Flow::Continue;
+                }
+                (event::KeyCode::Char(c @ ('J' | 'K')), false)
+                    if view.page == Page::Booth && view.focus == Focus::AllAgents =>
+                {
+                    nudge_fleet(view, daemons, hosts, if c == 'J' { 1 } else { -1 });
+                    return Flow::Continue;
+                }
                 (event::KeyCode::Char('?'), false) => return run_view(ViewVerb::Help, view),
                 // `a` spawns what the rail's `+` advertises — the pinned agent
                 // when there is one. `A` is the deliberate "let me choose",
@@ -10073,9 +10349,12 @@ fn alt_verb(code: event::KeyCode) -> Option<ViewVerb> {
         // dials it directly — there is no daemon in the middle relaying a
         // second daemon's screen any more.
         K::Char('h') => ViewVerb::Host,
-        // Alt-l: resize the rails. Also the `[resize]` button, which is where
-        // the mode is discoverable from.
+        // Alt-l: resize the rails. The footer's `[resize]` button used to
+        // open it too; that slot is `[prompts]` now.
         K::Char('l') => ViewVerb::Layout,
+        // Alt-i: the template prompts, "insert" one into the staged pane.
+        // Also the footer's `[prompts]` button.
+        K::Char('i') => ViewVerb::Prompts,
         // Alt-t: a new shell, always on the work page, because that is where
         // its pane will appear.
         K::Char('t') => ViewVerb::NewTerminal,
@@ -10215,7 +10494,7 @@ fn booth_cursor(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Bo
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, view.pinned_agent.as_deref());
-    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
     match rows.get(view.booth_sel) {
         Some(chrome::BoothRow::Machine { label, daemon, .. }) => {
             BoothCursor::Machine { label: (*label).to_string(), daemon: *daemon }
@@ -10239,7 +10518,10 @@ fn booth_previewed(daemons: &[Daemon], hosts: &[Option<String>], view: &View) ->
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
-    chrome::booth_preview(&chrome::booth_rows(&spaces, &machines, &view.folds), view.booth_sel)
+    chrome::booth_preview(
+        &chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange),
+        view.booth_sel,
+    )
 }
 
 /// The agent BOOTH's cursor is *on* — `None` on a machine or a project row.
@@ -10255,7 +10537,10 @@ fn booth_selected_agent(
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
-    chrome::booth_selected(&chrome::booth_rows(&spaces, &machines, &view.folds), view.booth_sel)
+    chrome::booth_selected(
+        &chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange),
+        view.booth_sel,
+    )
 }
 
 /// Moves BOOTH's kept top row just far enough to show the cursor once it has
@@ -10281,6 +10566,30 @@ fn sync_fleet_first(
     }
 }
 
+/// Puts the tab bar in the fleet's order, and on BOOTH notes which tab the
+/// fleet's cursor is in so the bar can scroll to it without leaving BOOTH.
+fn sync_tab_order(view: &mut View, daemons: &[Daemon], hosts: &[Option<String>]) {
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    let tabs = tab_index(daemons, hosts).len();
+    // `needs you` remembered from the last run has no ranking yet: take one as
+    // soon as there is a fleet to rank.
+    if view.arrange.order == chrome::FleetOrder::NeedsYou
+        && view.arrange.snapshot == chrome::Ranking::default()
+        && !all.is_empty()
+    {
+        view.arrange.rank_needs(&spaces, &machines);
+    }
+    view.tab_order = chrome::fleet_tab_order(&spaces, &machines, &view.arrange, tabs);
+    view.booth_tab = (view.page == Page::Booth)
+        .then(|| {
+            let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
+            chrome::booth_row_tab(&rows, &spaces, view.booth_sel)
+        })
+        .flatten();
+}
+
 /// Rows BOOTH's fleet list has on screen.
 fn fleet_height(view: &View, cols: u16, rows: u16) -> usize {
     let geom = chrome::page_geom(cols, rows, view);
@@ -10292,7 +10601,7 @@ fn booth_row_count(daemons: &[Daemon], hosts: &[Option<String>], view: &View) ->
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
-    chrome::booth_rows(&spaces, &machines, &view.folds).len()
+    chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange).len()
 }
 
 /// Every connected daemon and its telemetry, for the BOOTH page's compute
@@ -10463,7 +10772,7 @@ fn follow_new_agent(
         }
     }
     let spaces = fleet_spaces(daemons, &all, None);
-    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
     let Some(row) =
         rows.iter().position(|r| matches!(r, chrome::BoothRow::Agent { sel: s, .. } if *s == sel))
     else {
@@ -10500,8 +10809,12 @@ fn follow_new_agent(
 /// how the keyboard route came to disagree with the click route about it — the
 /// click kept the rule and every Alt key lost it.
 fn go_tab(view: &mut View, m: TabMove, count: usize) {
-    if let Some(to) = tab_target(m, view.tab, count) {
-        select_tab(view, to);
+    // By where the chips sit, which is the fleet's order: `alt-3` is the
+    // third chip on the bar and `alt->` the one to its right.
+    let order = chrome::tab_order(view, count);
+    let at = order.iter().position(|&t| t == view.tab).unwrap_or(view.tab);
+    if let Some(to) = tab_target(m, at, count) {
+        select_tab(view, order.get(to).copied().unwrap_or(to));
     }
 }
 
@@ -10707,7 +11020,7 @@ fn fold_cursors_space(daemons: &[Daemon], hosts: &[Option<String>], view: &mut V
     let all = all_agent_rows(daemons, hosts);
     let machines = machine_rows(daemons, hosts, &all);
     let spaces = fleet_spaces(daemons, &all, None);
-    let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
     let Some(header) = rows[..view.booth_sel.min(rows.len())]
         .iter()
         .rposition(|r| matches!(r, chrome::BoothRow::Space { .. }))
@@ -14997,6 +15310,105 @@ name = \"terminal\"
         assert!(view.overlay.is_some(), "`y` dismissed a branch list");
     }
 
+    fn sample_prompts() -> Vec<crate::config::PromptTemplate> {
+        let p = |name: &str, text: &str| crate::config::PromptTemplate {
+            name: name.into(),
+            text: text.into(),
+        };
+        vec![
+            p("review this diff", "Review the staged diff for bugs and risky changes."),
+            p("write tests for", "Write focused unit tests for the function under the cursor."),
+            p("explain the error", "Explain this error and the smallest fix:"),
+        ]
+    }
+
+    /// `[prompts]` opens the template picker, one row per stored prompt and the
+    /// save row last, and `alt-i` opens the same one.
+    #[test]
+    fn the_prompts_button_opens_the_template_picker() {
+        let mut view = View { prompts: sample_prompts(), ..Default::default() };
+        let flow = run_click(hit::Target::Footer("[prompts]"), &mut view, 1, None, 0);
+        assert!(matches!(flow, Flow::Continue), "{flow:?}");
+        let Some(Overlay::List(list)) = &view.overlay else { panic!("no picker opened") };
+        assert_eq!(list.kind, ListKind::Prompts);
+        assert_eq!(list.items.len(), 4);
+        assert!(list.items[0].starts_with("review this diff"), "{:?}", list.items[0]);
+        assert!(list.items[0].contains("Review the staged diff"), "no preview: {:?}", list.items);
+        assert_eq!(list.items[3], chrome::PROMPT_NEW_LABEL);
+
+        let mut by_key =
+            View { prompts: sample_prompts(), focus: Focus::Stage, ..Default::default() };
+        let alt_i = event::KeyEvent::new(event::KeyCode::Char('i'), event::KeyModifiers::ALT);
+        press(&mut by_key, alt_i, &Keymap::default());
+        assert_eq!(by_key.overlay, view.overlay, "alt-i and [prompts] disagree");
+    }
+
+    /// Enter sends the highlighted prompt, `y` copies it, `d` deletes it and
+    /// keeps the picker open, and the save row asks for `name: text`.
+    #[test]
+    fn choosing_a_template_row_yields_its_action() {
+        let k = |code| event::KeyEvent::new(code, event::KeyModifiers::NONE);
+        let open = |sel| View {
+            prompts: sample_prompts(),
+            overlay: Some(chrome::prompts_overlay(&sample_prompts(), sel)),
+            ..Default::default()
+        };
+
+        let mut view = open(1);
+        let flow = handle_overlay_key(k(event::KeyCode::Enter), &mut view);
+        assert!(
+            matches!(&flow, Flow::SendPrompt { name, text }
+                if name == "write tests for" && text.starts_with("Write focused")),
+            "{flow:?}"
+        );
+        assert!(view.overlay.is_none(), "sending left the picker open");
+
+        let mut view = open(2);
+        let flow = handle_overlay_key(k(event::KeyCode::Char('y')), &mut view);
+        assert!(
+            matches!(&flow, Flow::CopyPrompt { name, .. } if name == "explain the error"),
+            "{flow:?}"
+        );
+
+        let mut view = open(0);
+        let flow = handle_overlay_key(k(event::KeyCode::Char('d')), &mut view);
+        assert!(matches!(&flow, Flow::ForgetPrompt(n) if n == "review this diff"), "{flow:?}");
+        assert_eq!(view.prompts.len(), 2);
+        let Some(Overlay::List(list)) = &view.overlay else { panic!("the picker closed") };
+        assert_eq!(list.items.len(), 3, "the deleted row is still listed");
+
+        // The save row: Enter asks, and a typed `name: text` is stored and
+        // listed, with the picker back open on it.
+        let mut view = open(3);
+        handle_overlay_key(k(event::KeyCode::Enter), &mut view);
+        assert!(
+            matches!(&view.overlay, Some(Overlay::Prompt(p)) if p.kind == chrome::PromptKind::SavePrompt),
+            "{:?}",
+            view.overlay
+        );
+        for c in "summarize the PR: Summarize this PR: what changed and why".chars() {
+            handle_overlay_key(k(event::KeyCode::Char(c)), &mut view);
+        }
+        let flow = handle_overlay_key(k(event::KeyCode::Enter), &mut view);
+        assert!(
+            matches!(&flow, Flow::SavePrompt { name, text }
+                if name == "summarize the PR" && text == "Summarize this PR: what changed and why"),
+            "{flow:?}"
+        );
+        assert_eq!(view.prompts.len(), 4);
+        let Some(Overlay::List(list)) = &view.overlay else { panic!("no picker after saving") };
+        assert_eq!(list.sel, 3, "the cursor is not on the new prompt");
+
+        // Without a colon there is nothing to name it by, so the box stays.
+        let mut view = open(3);
+        handle_overlay_key(k(event::KeyCode::Enter), &mut view);
+        for c in "no colon here".chars() {
+            handle_overlay_key(k(event::KeyCode::Char(c)), &mut view);
+        }
+        assert!(matches!(handle_overlay_key(k(event::KeyCode::Enter), &mut view), Flow::Continue));
+        assert!(matches!(view.overlay, Some(Overlay::Prompt(_))), "the box closed");
+    }
+
     /// The table is only the keys the Alt layer binds, so everything else stays
     /// typeable even with the reading on. `∫` is Option-b, and nothing binds
     /// Alt-b — it is a character, and it must survive as one.
@@ -15039,7 +15451,9 @@ name = \"terminal\"
     fn the_mac_table_covers_the_alt_layer_or_says_why_not() {
         // Dead keys: Option-e (´), Option-n (˜) and Option-u (¨) emit nothing
         // until the next keystroke, so there is no character to read back.
-        let dead = ['e', 'n', 'u'];
+        // Option-i (ˆ) is one too, which is why `alt-i` (the template
+        // prompts) also has `C-b i`.
+        let dead = ['e', 'i', 'n', 'u'];
         let bound: Vec<char> = ('a'..='z')
             .chain('0'..='9')
             .chain([',', '.', '<', '>', '/'])
@@ -15131,17 +15545,14 @@ name = \"terminal\"
     ///
     /// While it is on, `h`/`l` resize rather than reaching a pane — which is
     /// the whole point of a mode, and why the footer says so for as long as it
-    /// lasts. `[resize]` used to toggle zen instead, which is a different
-    /// feature that already has its own key.
+    /// lasts. The mode is `alt-l` (and `C-b l`, `:layout`); its footer button
+    /// gave its slot to `[prompts]`.
     #[test]
     fn layout_mode_resizes_the_rail_the_cursor_is_in() {
         let keymap = Keymap::default();
         let mut view = View::default();
-        assert!(matches!(
-            run_click(hit::Target::Footer("[resize]"), &mut view, 1, None, 0),
-            Flow::ToggleLayout
-        ));
-        assert!(!view.zen, "[resize] is not the zen key");
+        assert!(matches!(run_view(ViewVerb::Layout, &mut view), Flow::ToggleLayout));
+        assert!(!view.zen, "layout is not the zen key");
 
         // Entering is the loop's job; do it the way the loop does.
         view.layout = Some(view.geom);
@@ -15544,7 +15955,7 @@ name = \"terminal\"
             hit::Target::Spaces,
             hit::Target::NewWorkspace,
             hit::Target::Machines,
-            hit::Target::Footer("[resize]"),
+            hit::Target::Footer("[prompts]"),
             hit::Target::Rail(Focus::Agents, 0),
             hit::Target::AgentsVerb('a'),
             hit::Target::ProcsVerb('t'),
@@ -15552,6 +15963,7 @@ name = \"terminal\"
             hit::Target::System(chrome::Gauge::Cpu),
             hit::Target::Stage(0, 0),
             hit::Target::BoothKeys,
+            hit::Target::FleetOrder,
             hit::Target::Nothing,
         ] {
             match target {
@@ -15626,7 +16038,7 @@ name = \"terminal\"
                 hit::Target::Footer(_) => {
                     let mut view = View::default();
                     for (label, code) in [
-                        ("[resize]", event::KeyCode::Char('l')),
+                        ("[prompts]", event::KeyCode::Char('i')),
                         ("[detach]", event::KeyCode::Char('d')),
                         ("[settings]", event::KeyCode::Char('s')),
                     ] {
@@ -15691,6 +16103,16 @@ name = \"terminal\"
                         Flow::Continue
                     ));
                     assert!(view.booth_keys, "the chip did not open it");
+                }
+                // The order chip is `o` on the fleet.
+                hit::Target::FleetOrder => {
+                    let mut view =
+                        View { page: Page::Booth, focus: Focus::AllAgents, ..Default::default() };
+                    press(&mut view, key(event::KeyCode::Char('o')), &Keymap::default());
+                    assert!(
+                        matches!(&view.overlay, Some(Overlay::List(l)) if l.kind == ListKind::FleetOrder),
+                        "`o` on the fleet did not open the order menu"
+                    );
                 }
                 // Blank chrome. There is nothing to reach, which is the one
                 // honest answer this test accepts.

@@ -55,6 +55,8 @@ pub struct Config {
     /// `[update]`: whether to look for a newer release, and which one was
     /// turned down.
     pub update: UpdateConfig,
+    /// `[booth]`: how BOOTH's fleet, and the tab bar after it, is ordered.
+    pub booth: BoothConfig,
     /// `[views]`: the space each workspace was last looking at, keyed by the
     /// machine it is on and the directory it is open in.
     ///
@@ -76,6 +78,36 @@ pub struct Config {
     /// the key's shape and the cap that keeps this table from growing a line
     /// per project you ever opened.
     pub views: HashMap<String, String>,
+    /// `[[prompts]]`: template prompts, kept for sending to an agent or
+    /// copying. The footer's `[prompts]` button lists them.
+    ///
+    /// ```toml
+    /// [[prompts]]
+    /// name = "review this diff"
+    /// text = "Review the staged diff for bugs and risky changes."
+    /// ```
+    ///
+    /// Nothing is seeded: an empty list is a picker with one row, the one that
+    /// saves a new prompt.
+    pub prompts: Vec<PromptTemplate>,
+}
+
+/// `[booth]`.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct BoothConfig {
+    /// The fleet's order, as the `o` menu and the FLEET chip spell it: `tree`,
+    /// `needs you`, `newest`, `a-z`, `role` or `custom`. Unset or unknown is
+    /// `tree`.
+    pub order: String,
+}
+
+/// One `[[prompts]]` block: a name to pick it by and the text it sends.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct PromptTemplate {
+    pub name: String,
+    pub text: String,
 }
 
 /// One `[[remote]]` block.
@@ -661,6 +693,61 @@ impl Config {
         })
     }
 
+    /// Store a template prompt, replacing one that already has this name.
+    ///
+    /// Replace rather than append, so saving the same name twice edits the
+    /// prompt instead of leaving two rows with one label in the picker.
+    pub fn save_prompt(name: &str, text: &str) -> std::io::Result<()> {
+        Self::save_prompt_at(&Self::path(), name, text)
+    }
+
+    /// [`save_prompt`](Self::save_prompt) against an explicit path (tests).
+    pub fn save_prompt_at(path: &Path, name: &str, text: &str) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            let prompts = array_of_tables(doc, "prompts");
+            if let Some(t) = prompts.iter_mut().find(|t| str_at(t, "name") == Some(name)) {
+                t["text"] = toml_edit::value(text);
+                return;
+            }
+            let mut t = toml_edit::Table::new();
+            t["name"] = toml_edit::value(name);
+            t["text"] = toml_edit::value(text);
+            prompts.push(t);
+        })
+    }
+
+    /// Remember the fleet's order, as `[booth] order`.
+    pub fn save_fleet_order(label: &str) -> std::io::Result<()> {
+        Self::save_fleet_order_at(&Self::path(), label)
+    }
+
+    /// [`save_fleet_order`](Self::save_fleet_order) against an explicit path
+    /// (tests).
+    pub fn save_fleet_order_at(path: &Path, label: &str) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            if !doc.contains_table("booth") {
+                doc["booth"] = toml_edit::table();
+            }
+            doc["booth"]["order"] = toml_edit::value(label);
+        })
+    }
+
+    /// Drop the template prompt with this name. Leaves the file alone when no
+    /// such prompt was stored.
+    pub fn forget_prompt(name: &str) -> std::io::Result<()> {
+        Self::forget_prompt_at(&Self::path(), name)
+    }
+
+    /// [`forget_prompt`](Self::forget_prompt) against an explicit path (tests).
+    pub fn forget_prompt_at(path: &Path, name: &str) -> std::io::Result<()> {
+        if !Self::load_from(path).0.prompts.iter().any(|p| p.name == name) {
+            return Ok(());
+        }
+        edit_config(path, |doc| {
+            array_of_tables(doc, "prompts").retain(|t| str_at(t, "name") != Some(name));
+        })
+    }
+
     /// Drop a remembered machine, named by the badge its tabs carry.
     ///
     /// **The other half of [`save_remote`](Self::save_remote), and disconnecting
@@ -1072,6 +1159,53 @@ mod tests {
         // "Draw none", for the rail that would rather spend the rows on agents.
         assert_eq!(parse("disks = []").unwrap(), DiskSelect::Named(vec![]));
         assert!(parse("disks = \"root\"").is_err(), "a bare unknown word should not parse");
+    }
+
+    /// A saved template prompt comes back on the next load, saving the same
+    /// name again edits it, and forgetting it takes the block out.
+    #[test]
+    fn a_template_prompt_is_stored_edited_and_forgotten() {
+        let dir = std::env::temp_dir().join(format!("butai-prompts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# mine\n[general]\nprefix = \"C-a\"\n").unwrap();
+
+        Config::save_prompt_at(&path, "review", "Review this diff.").unwrap();
+        Config::save_prompt_at(&path, "tests", "Write tests for:").unwrap();
+        Config::save_prompt_at(&path, "review", "Review the staged diff.").unwrap();
+        let cfg = Config::load_from(&path).0;
+        assert_eq!(
+            cfg.prompts,
+            vec![
+                PromptTemplate { name: "review".into(), text: "Review the staged diff.".into() },
+                PromptTemplate { name: "tests".into(), text: "Write tests for:".into() },
+            ]
+        );
+
+        Config::forget_prompt_at(&path, "review").unwrap();
+        let cfg = Config::load_from(&path).0;
+        assert_eq!(cfg.prompts.len(), 1);
+        assert_eq!(cfg.prompts[0].name, "tests");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("C-a"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The fleet's order is written under `[booth]` and read back, beside
+    /// whatever else the file holds.
+    #[test]
+    fn the_fleet_order_is_stored_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("butai-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# mine\n[general]\nprefix = \"C-a\"\n").unwrap();
+        Config::save_fleet_order_at(&path, "needs you").unwrap();
+        assert_eq!(Config::load_from(&path).0.booth.order, "needs you");
+        Config::save_fleet_order_at(&path, "a-z").unwrap();
+        assert_eq!(Config::load_from(&path).0.booth.order, "a-z");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("C-a"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A machine connected from `[+ host]` comes back on the next start.

@@ -48,6 +48,8 @@ pub enum Target {
     NewWorkspace,
     /// BOOTH's `[?]`, or the key card it opened: either press toggles it.
     BoothKeys,
+    /// The order chip on FLEET's bottom border: the order menu, as `o`.
+    FleetOrder,
     /// The machines button on the tab bar.
     ///
     /// One target because there is now one control. `NewHost` and `Hosts` were
@@ -203,6 +205,13 @@ pub fn at(
                 }
             }
         }
+        if c.fleet_box.height > 0 && y == c.fleet_box.y + c.fleet_box.height - 1 {
+            if let Some((start, end)) = chrome::fleet_order_span(c.fleet_box, view.arrange.order) {
+                if x >= start && x < end {
+                    return Target::FleetOrder;
+                }
+            }
+        }
         // A fleet row needs the cross-daemon list, which only [`on_fleet`]
         // takes; everything else in BOOTH's band is nothing, and crucially not
         // the rails underneath.
@@ -314,7 +323,7 @@ pub fn on_fleet(
     }
     let geom = chrome::page_geom(cols, rows, view);
     let c = chrome::booth_columns_of(cols, &geom, view);
-    let booth = chrome::booth_rows(spaces, machines, &view.folds);
+    let booth = chrome::booth_rows(spaces, machines, &view.folds, &view.arrange);
     if let Some(row) = chrome::booth_fleet_map_at(&c, &booth, view, x, y) {
         return Some(FleetHit::Row(row));
     }
@@ -1192,7 +1201,7 @@ mod tests {
         let tabs: [Tab<'_>; 0] = [];
         let geom = chrome::page_geom(WIDE, ROWS, &view);
         let c = chrome::booth_columns(chrome::booth_area(WIDE, &geom));
-        let rows = chrome::booth_rows(&spaces, &machines, &view.folds);
+        let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
         let map = chrome::fleet_map(&c, &rows, 0).expect("62 rows do not fit");
         let mx = chrome::fleet_map_x(&c);
 

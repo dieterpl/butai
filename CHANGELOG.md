@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.9: BOOTH's fleet can be ordered, and the tab bar follows it.**
+  `o` on the fleet, or the `[tree v]` chip on FLEET's bottom border, picks one
+  of six orders. `tree` is as opened and started, the default. `needs you` puts
+  asking and news first. `newest` puts the latest chat first. `a-z` is by name.
+  `role` goes lead, worker, watch, loop, then the rest. `custom` is your own:
+  `J` and `K` move the row under the cursor, and the first press starts from
+  the order on screen. Machines keep their own order. No order moves a row by
+  itself while you look: `needs you` is ranked when you pick it, and picking it
+  again re-ranks. The tab bar's chips follow the same order, numbered by where
+  they sit, and `alt-1…9` and `alt-<`/`alt->` walk them that way. On BOOTH the
+  bar scrolls to the project under the fleet's cursor and lights its chip
+  without leaving BOOTH. The order is kept as `[booth] order`.
+- **1.5.0-dev.9: template prompts.** The footer's `[resize]` button is now
+  `[prompts]` (also `alt-i`, `C-b i`, `:prompts`). It lists saved prompts by
+  name with their first line. `enter` pastes one into the agent on the stage,
+  `y` copies it and `d` deletes it. `+ save a new prompt…` takes `name: text`.
+  They are kept as `[[prompts]]` in `~/.butai/config.toml`, and none are set up
+  by default. Resizing the rails is still `alt-l`, `C-b l` or `:layout`.
 - **1.5.0-dev.6: BOOTH has a key card.** `[?]` on the FLEET border, or `?`
   with the cursor on the fleet, shows a card beside the list with every key
   the fleet answers (`j` `k`, `enter`, `a`, `A`, `x`, `z`, `Z`, `tab`, `m`,

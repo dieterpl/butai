@@ -87,6 +87,9 @@ pub enum ViewVerb {
     Update,
     /// The reference.
     Help,
+    /// The template prompts: send one to the staged pane, copy one, or save
+    /// a new one. What the footer's `[prompts]` button opens.
+    Prompts,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -262,6 +265,7 @@ pub fn parse_action(s: &str) -> Result<Action, ParseError> {
         "branch" => return Ok(Action::View(ViewVerb::Branch)),
         "update" => return Ok(Action::View(ViewVerb::Update)),
         "help" => return Ok(Action::View(ViewVerb::Help)),
+        "prompts" | "templates" => return Ok(Action::View(ViewVerb::Prompts)),
         "resize" => {
             let dir = dir_arg(arg)?;
             let cells: i16 = match words.next() {
@@ -288,7 +292,7 @@ pub fn parse_action(s: &str) -> Result<Action, ParseError> {
             let rest: String = std::iter::once(name).chain(words).collect::<Vec<_>>().join(" ");
             Command::RenameWindow(rest)
         }
-        // Bare `layout` is the rail-resizing mode the `[resize]` button opens.
+        // Bare `layout` is the rail-resizing mode `alt-l` opens.
         // Named, it is the old preset-applying command, which the workbench has
         // nothing for — kept parseable so an existing binding explains itself.
         "layout" => match arg {
@@ -490,6 +494,8 @@ pub(crate) fn default_bindings() -> HashMap<KeyEvent, Action> {
         ("f", "links"),
         ("v", "paste-image"),
         ("?", "help"),
+        // The template prompts, on the Alt layer's letter.
+        ("i", "prompts"),
         ("d", "detach"),
         (":", "prompt"),
         ("pageup", "scroll-up"),

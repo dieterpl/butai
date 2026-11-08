@@ -43,7 +43,7 @@ on the last row. The band is carved left to right — left rail, stage, right ra
 │DSK /media/fast   901/916G││                              ││d diff · p push                │
 │DSK /             202/215G││                              ││c commit · g git · ? keys      │
 └──────────────────────────┘└──────────────────────────────┘└───────────────────────────────┘
- butai ~/Projects/butai (main)  ● codex is waiting           [resize] [detach] [help] [settings]
+ butai ~/Projects/butai (main)  ● codex is waiting          [prompts] [detach] [help] [settings]
 ```
 
 ### The tab bar
@@ -254,9 +254,13 @@ each other on a narrow terminal.
   AGENTS rail it reads `● name is waiting · alt-w`, because there the footer is
   the only thing on screen naming *which* agent is blocked. Cut down to fit, and
   on a phone-width screen down to a bare `●`.
-- **Right** — `[resize] [detach] [help] [settings]`. `[help]` and `[settings]`
+- **Right** — `[prompts] [detach] [help] [settings]`. `[help]` and `[settings]`
   name pages rather than actions, so they are lit while you are on them and a
-  second press is the way back out.
+  second press is the way back out. `[prompts]` opens the template prompts
+  (`alt-i`): Enter pastes the highlighted one into the staged pane, `y` copies
+  it, `d` deletes it, and the last row saves a new one, typed as `name: text`.
+  They are stored as `[[prompts]]` in `~/.butai/config.toml`. Resizing the
+  rails, which used to have this slot, is `alt-l`.
 
 ### Where focus is, and how it moves
 
@@ -831,6 +835,22 @@ The icon is *ours*. An agent's own status glyph — Claude Code's `◐`/`✳` �
 whatever it wrote into its terminal title, and it is dropped here exactly as the
 AGENTS rail drops it, so a row reads `▲ Write the` and not `▲  ✳ Write the`.
 Only the name marquees, one space after the icon.
+
+**Six orders.** `o` on the fleet, or the `[tree v]` chip on FLEET's bottom
+border, picks how the fleet is ordered: `tree` (as opened and started, the
+default), `needs you` (asking and news first), `newest` (the latest chat first),
+`a-z`, `role` (`lead`, `worker`, `watch`, `loop`, then the rest) and `custom`.
+Machines keep their own order in all six; an order moves projects within a
+machine and chats within a project. `J` and `K` move the row under the cursor
+past its neighbour, switching to `custom` from the order on screen the first
+time. No order moves a row by itself while you look: `needs you` is ranked when
+you pick it, and picking it again re-ranks. The choice is kept as `[booth]
+order`.
+
+**The tab bar follows the fleet.** Its chips are in the fleet's project order,
+numbered by where they sit, and `alt-1…9` and `alt-<`/`alt->` walk them in that
+order. On BOOTH the bar scrolls to the project under the fleet's cursor and
+lights its chip, without leaving BOOTH.
 
 **The list moves only when the cursor nears an edge.** It keeps two rows past
 the cursor in view, so walking back up moves the cursor and not the list.
@@ -1743,6 +1763,7 @@ lockfile in the repo. Two consequences worth knowing:
 | a gauge's head row and its identity slot | `crates/butai-client/src/chrome/mod.rs` (`Head`, `gauge_head`, `fit_words`, `cpu_ident`) |
 | row text: sprites, status tokens, marquee, traces | `crates/butai-client/src/chrome/model.rs` (`agent_sprite`, `agent_status`, `marquee`, `braille_trace`, `braille_traffic`) |
 | the glyph an agent writes into its own title, and dropping it | `crates/butai-client/src/chrome/model.rs` (`split_status_glyph`, `agent_name`) |
+| BOOTH: the fleet's orders, and the tab bar following them | `crates/butai-client/src/chrome/mod.rs` (`FleetOrder`, `Arrange`, `Ranking`, `booth_rows`, `fleet_tab_order`, `tab_strip`), `crates/butai-client/src/workbench.rs` (`order_menu`, `set_fleet_order`, `nudge_fleet`, `sync_tab_order`, `go_tab`) |
 | BOOTH: where the fleet list starts | `crates/butai-client/src/chrome/mod.rs` (`fleet_first`, `fleet_top`, `FLEET_MARGIN`), `crates/butai-client/src/workbench.rs` (`sync_fleet_first`, `page_wheel`) |
 | the CHANGES rail: rows, label, verbs, split | `crates/butai-client/src/chrome/mod.rs` (`change_rows`, `changes_label`, `changes_verbs`, `changes_split`) |
 | every verb table, the footer packing, the `?` text | `crates/butai-client/src/verbs.rs` |

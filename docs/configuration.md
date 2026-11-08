@@ -519,6 +519,42 @@ asks the far machine where its daemon listens (`butai ls` to make one exist, the
 A block with neither `host` nor `socket` is skipped by both paths and does
 nothing.
 
+### `[booth]`
+
+How BOOTH's fleet is ordered, and so the tab bar, whose chips follow the fleet.
+Written by the workbench when you pick an order (`o` on the fleet, or the order
+chip on FLEET's bottom border) or move a row with `J`/`K`.
+
+| Key | Type | Default | Read by | What it changes |
+|---|---|---|---|---|
+| `order` | string | `"tree"` | client | One of `tree`, `needs you`, `newest`, `a-z`, `role`, `custom`. An unknown word is `tree`. |
+
+```toml
+[booth]
+order = "needs you"
+```
+
+Only the order's name is kept. The `needs you` ranking is taken again at start,
+and a `custom` order is rebuilt with `J`/`K` each run: both name projects and
+chats by the ids a daemon hands out fresh every time it starts.
+
+### `[[prompts]]`
+
+Template prompts for the footer's `[prompts]` button (`alt-i`, `C-b i`,
+`:prompts`). Written by the picker when you save or delete one; edit by hand if
+you like. Nothing is set up by default.
+
+| Key | Type | Default | Read by | What it changes |
+|---|---|---|---|---|
+| `name` | string | — | client | What the picker lists it by. Saving a name that is already there replaces its text. |
+| `text` | string | — | client | What `enter` pastes into the staged pane and `y` copies. |
+
+```toml
+[[prompts]]
+name = "review this diff"
+text = "Review the staged diff for bugs, risky changes and missing tests."
+```
+
 ### `[views]`
 
 Which space each workspace was last looking at, so going to a workspace goes to
@@ -673,6 +709,8 @@ exactly as it was.
 | the machines button (`alt-h`), or SETTINGS → MACHINES → **add a machine**, once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
 | Disconnecting a machine (`alt-h`, the tab's row menu, or SETTINGS → MACHINES → **disconnect**) | removes that `[[remote]]` block |
 | SETTINGS → MACHINES → **forget**, on a configured machine that is not connected | removes that `[[remote]]` block — the half of a disconnect that is left over when there is no link to drop |
+| Picking a fleet order (`o` on BOOTH's fleet, or its order chip), or the first `J`/`K` that switches to `custom` | `[booth] order` |
+| Saving or deleting a template prompt in the `[prompts]` picker | that `[[prompts]]` block |
 | Changing space (`alt-o`, `alt-,`/`alt-.`, the spaces menu, a space button), about two seconds later — and at once when you leave the workspace or the workbench | one line of `[views]`, for the workspace you are in |
 
 Six properties of those writes are load-bearing:
@@ -718,6 +756,7 @@ be silently discarding something the file's owner typed on purpose.
 | `[theme] name` | live from the SETTINGS page, which applies each palette as the cursor passes it and puts the old one back if you leave without choosing |
 | `[general] default_agent`, `remote_auto_attach`, `[ui]`, `[update] check` | live when *you* change them in the client; a hand edit needs a restart |
 | `[[remote]]` | dialled at the next client start, as above — but SETTINGS → MACHINES re-reads the blocks off disk when you first open the page, on `r`, and after each of its own `disconnect` and `forget` writes, so the section is never listing a machine the file has stopped naming |
+| `[booth] order`, `[[prompts]]` | read once at client start; the workbench's own changes apply at once, a hand edit needs a restart |
 | `[views]` | read once at client start and kept in memory from then on, so a hand edit — or another client's write — needs a restart to be seen |
 
 `:reload-config` is a command to the daemon and reloads the daemon's half only —

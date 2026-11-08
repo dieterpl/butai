@@ -245,6 +245,14 @@ on the two bars puts you back on the page you came from.
 
     alt-z       zen: collapse both rails to markers
     alt-l       layout: resize them, arrows to adjust, esc saves
+
+## Template prompts
+
+    alt-i       the saved prompts, also `[prompts]` in the footer
+
+Enter pastes the highlighted prompt into the staged pane, `y` copies it and
+`d` deletes it. The last row saves a new one, typed as `name: text`. They are
+kept as `[[prompts]]` in `~/.butai/config.toml`.
 ",
     },
     Topic {
@@ -696,10 +704,13 @@ eating it.
     enter       stage the row, or open what it names
 
 BOOTH's fleet takes `j`, `k`, `pgdn`, `pgup`, `home`, `end`, `enter`, `tab`,
-`x`, `m`, `a`, `A`, `z` and `Z` — and each of them acts on the row's own
-machine and project, not on the tab you are looking at. `a`/`A` are the AGENTS
-rail's verbs, `z`/`Z` are the diff's folds and the page keys are the pages';
-nothing here is a key this workbench did not already have.
+`x`, `m`, `a`, `A`, `z`, `Z`, `o`, `J` and `K` — and each of them acts on the
+row's own machine and project, not on the tab you are looking at. `a`/`A` are
+the AGENTS rail's verbs, `z`/`Z` are the diff's folds and the page keys are the
+pages'. `o` picks the fleet's order — tree, needs you, newest, a-z, role or
+custom — and `J`/`K` move the row under the cursor, in your own order. The tab
+bar's chips follow the fleet's order, and on BOOTH the bar scrolls to the
+project under the cursor.
 
 `?` on the fleet, or the `[?]` on its border, puts those keys on a card beside
 the list, with what the buttons and icons mean. The keys still work while it
@@ -764,6 +775,7 @@ palette. What it takes:
     find                    search the workspace
     links                   the URLs on screen: enter opens, y copies
     layout                  resize the rails
+    prompts                 the template prompts
     zoom                    zen
     git-menu
     close-pane              kill what is staged

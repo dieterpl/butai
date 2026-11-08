@@ -2128,6 +2128,8 @@ pub enum PromptKind {
     NewFolder {
         dir: String,
     },
+    /// A new template prompt, typed as `name: text`. Saved to `[[prompts]]`.
+    SavePrompt,
 }
 
 impl PromptOverlay {
@@ -2443,6 +2445,9 @@ pub enum ListKind {
     Pick(PickTarget),
     /// The git menu's top level: choose a group.
     GitGroups,
+    /// How BOOTH's fleet is ordered. Rows are [`FleetOrder::ALL`], read by
+    /// index.
+    FleetOrder,
     /// One group of the git menu. `..` goes back up.
     GitGroup(crate::git_menu::MenuGroup),
     /// Looking through the filesystem for somewhere to open a workspace.
@@ -2457,6 +2462,65 @@ pub enum ListKind {
     /// A URL on screen. Enter opens it on the machine this client is running
     /// on, `y` copies it — see [`crate::links`].
     Links,
+    /// The template prompts from `[[prompts]]`, then a row that saves a new
+    /// one. Enter pastes the highlighted prompt into the staged pane, `y`
+    /// copies it, `d` deletes it. Rows carry their index in `values`, or
+    /// [`PROMPT_NEW`] for the last row.
+    Prompts,
+}
+
+/// The value of the template picker's last row, the one that saves a prompt.
+pub const PROMPT_NEW: &str = "+new";
+
+/// What the template picker's last row says.
+pub const PROMPT_NEW_LABEL: &str = "+ save a new prompt…";
+
+/// How much of a prompt's text its row previews.
+const PROMPT_PREVIEW: usize = 56;
+
+/// The template picker, with the cursor on row `sel`.
+///
+/// One row per template, its name padded to the widest one and its text's
+/// first line beside it, so a row says both what it is called and what it
+/// sends. The save row is always last, so an empty list is still a way in.
+pub fn prompts_overlay(prompts: &[crate::config::PromptTemplate], sel: usize) -> Overlay {
+    let name_w = prompts.iter().map(|p| p.name.chars().count()).max().unwrap_or(0).min(24);
+    let mut items: Vec<String> = prompts
+        .iter()
+        .map(|p| {
+            let name = ellipsize(&p.name, name_w);
+            let first = p.text.lines().next().unwrap_or_default();
+            let more = p.text.lines().nth(1).is_some();
+            let mut preview = ellipsize(first, PROMPT_PREVIEW);
+            if more && preview.chars().count() < PROMPT_PREVIEW {
+                preview.push_str(" …");
+            }
+            format!("{name:<name_w$}   {preview}")
+        })
+        .collect();
+    items.push(PROMPT_NEW_LABEL.into());
+    let mut values: Vec<String> = (0..prompts.len()).map(|i| i.to_string()).collect();
+    values.push(PROMPT_NEW.into());
+    Overlay::List(ListOverlay {
+        title: "PROMPTS — enter sends · y copies · d deletes".into(),
+        sel: sel.min(items.len() - 1),
+        items,
+        values: Some(values),
+        kind: ListKind::Prompts,
+        meters: None,
+        anchor: None,
+    })
+}
+
+/// The box that asks for a new template, as `name: text` on one line.
+pub fn save_prompt_overlay() -> Overlay {
+    Overlay::Prompt(PromptOverlay {
+        title: "SAVE A PROMPT".into(),
+        text: String::new(),
+        cursor: 0,
+        kind: PromptKind::SavePrompt,
+        subtitle: Some("name: text  ·  e.g.  review: Review the staged diff for bugs".into()),
+    })
 }
 
 /// What a context menu was opened on.
@@ -2710,6 +2774,243 @@ fn toggle<T: Ord>(set: &mut BTreeSet<T>, key: T) {
     }
 }
 
+/// How BOOTH's fleet orders the projects on each machine and the chats in each
+/// project — and so how the tab bar orders its chips, which follow the fleet.
+///
+/// Machines keep their own order (`local`, then by name) in every one of them:
+/// a machine is where things are, and the tree is read from it down.
+///
+/// **None of them moves a row on its own.** [`booth_rows`] explains why a list
+/// re-sorted live by urgency was measured and rejected, and that still holds:
+/// `needs you` is a ranking taken when you pick it, and every other order
+/// reads only what does not change while you look — names, start times, roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FleetOrder {
+    /// Projects as they were opened, chats as they were started.
+    #[default]
+    Tree,
+    /// What asks for you first: asking, crashed, landed, working, then the
+    /// rest. Taken once, when picked; pick it again to re-rank.
+    NeedsYou,
+    /// The most recently started chat first, and its project with it.
+    Newest,
+    /// Projects and chats by name.
+    Name,
+    /// `lead`, `worker`, `watch`, `loop`, other roles, then chats with none.
+    Role,
+    /// Your own order: `J` and `K` move the row under the cursor.
+    Custom,
+}
+
+impl FleetOrder {
+    /// Every order, in the order the menu offers them.
+    pub const ALL: [FleetOrder; 6] = [
+        FleetOrder::Tree,
+        FleetOrder::NeedsYou,
+        FleetOrder::Newest,
+        FleetOrder::Name,
+        FleetOrder::Role,
+        FleetOrder::Custom,
+    ];
+
+    /// The word on the FLEET border and in the menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            FleetOrder::Tree => "tree",
+            FleetOrder::NeedsYou => "needs you",
+            FleetOrder::Newest => "newest",
+            FleetOrder::Name => "a-z",
+            FleetOrder::Role => "role",
+            FleetOrder::Custom => "custom",
+        }
+    }
+
+    /// The order a [`label`](Self::label) names, as `[booth] order` stores it.
+    pub fn from_label(label: &str) -> Option<FleetOrder> {
+        FleetOrder::ALL.into_iter().find(|o| o.label() == label)
+    }
+
+    /// What the menu says it does.
+    pub fn about(self) -> &'static str {
+        match self {
+            FleetOrder::Tree => "as opened and started",
+            FleetOrder::NeedsYou => "asking and news first, ranked now",
+            FleetOrder::Newest => "the latest chat first",
+            FleetOrder::Name => "by name",
+            FleetOrder::Role => "lead, worker, watch, loop",
+            FleetOrder::Custom => "yours: J and K move a row",
+        }
+    }
+}
+
+/// An order written down: projects by machine label and id, chats by machine
+/// label, workspace id and pane. Anything not in it goes after what is, in
+/// tree order, so a project opened since keeps a place rather than vanishing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ranking {
+    pub spaces: Vec<(String, SessionId)>,
+    pub agents: Vec<(String, SessionId, PaneId)>,
+}
+
+impl Ranking {
+    /// The order `rows` are in, written down. Pass rows built with nothing
+    /// folded, or the folded ones lose their place.
+    pub fn of(rows: &[BoothRow<'_>], machines: &[MachineRow<'_>]) -> Ranking {
+        let mut out = Ranking::default();
+        for row in rows {
+            match row {
+                BoothRow::Space { space, machine, .. } => {
+                    out.spaces.push((machine.to_string(), space.id));
+                }
+                BoothRow::Agent { row, .. } => {
+                    let machine = machines.get(row.daemon).map_or("", |m| m.label);
+                    out.agents.push((machine.to_string(), row.workspace_id, row.agent.pane));
+                }
+                BoothRow::Machine { .. } => {}
+            }
+        }
+        out
+    }
+
+    fn space_at(&self, machine: &str, id: SessionId) -> usize {
+        self.spaces.iter().position(|(m, s)| m == machine && *s == id).unwrap_or(usize::MAX)
+    }
+
+    fn agent_at(&self, machine: &str, ws: SessionId, pane: PaneId) -> usize {
+        self.agents
+            .iter()
+            .position(|(m, w, p)| m == machine && *w == ws && *p == pane)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Moves the project or chat at `row` past its neighbour in the direction
+    /// of `delta`, among its own siblings only. False when there is none.
+    pub fn nudge(&mut self, row: &BoothRow<'_>, machines: &[MachineRow<'_>], delta: isize) -> bool {
+        let step = |len: usize, i: usize, same: &dyn Fn(usize) -> bool| -> Option<usize> {
+            let mut j = i;
+            loop {
+                j = if delta < 0 { j.checked_sub(1)? } else { j + 1 };
+                if j >= len {
+                    return None;
+                }
+                if same(j) {
+                    return Some(j);
+                }
+            }
+        };
+        match row {
+            BoothRow::Space { space, machine, .. } => {
+                let Some(i) = self.spaces.iter().position(|(m, s)| m == machine && *s == space.id)
+                else {
+                    return false;
+                };
+                let spaces = &self.spaces;
+                let Some(j) = step(spaces.len(), i, &|j| spaces[j].0 == *machine) else {
+                    return false;
+                };
+                self.spaces.swap(i, j);
+                true
+            }
+            BoothRow::Agent { row, .. } => {
+                let machine = machines.get(row.daemon).map_or("", |m| m.label);
+                let key = (machine.to_string(), row.workspace_id, row.agent.pane);
+                let Some(i) = self.agents.iter().position(|a| *a == key) else { return false };
+                let agents = &self.agents;
+                let Some(j) =
+                    step(agents.len(), i, &|j| agents[j].0 == key.0 && agents[j].1 == key.1)
+                else {
+                    return false;
+                };
+                self.agents.swap(i, j);
+                true
+            }
+            BoothRow::Machine { .. } => false,
+        }
+    }
+}
+
+/// The fleet's order and the rankings two of its orders read.
+///
+/// In the [`View`] with the folds. The order itself is remembered as `[booth]
+/// order`; the rankings are not, because they name projects and chats by the
+/// ids a daemon hands out fresh each time it starts.
+#[derive(Debug, Clone, Default)]
+pub struct Arrange {
+    pub order: FleetOrder,
+    /// What `J`/`K` have made. Kept when you switch away, so coming back to
+    /// `custom` finds your order where you left it.
+    pub custom: Ranking,
+    /// The `needs you` ranking, as it was when that order was picked.
+    pub snapshot: Ranking,
+}
+
+impl Arrange {
+    fn sort_spaces(&self, machine: &str, spaces: &mut [&SpaceRow<'_>]) {
+        match self.order {
+            FleetOrder::Tree => {}
+            FleetOrder::Name => spaces.sort_by_cached_key(|s| s.name.to_lowercase()),
+            FleetOrder::Newest => spaces.sort_by_key(|s| {
+                std::cmp::Reverse(s.agents.iter().map(|a| a.agent.started_ms).max().unwrap_or(0))
+            }),
+            FleetOrder::Role => spaces.sort_by_key(|s| {
+                s.agents.iter().map(|a| role_rank(a.agent)).min().unwrap_or(u8::MAX)
+            }),
+            FleetOrder::NeedsYou => spaces.sort_by_key(|s| self.snapshot.space_at(machine, s.id)),
+            FleetOrder::Custom => spaces.sort_by_key(|s| self.custom.space_at(machine, s.id)),
+        }
+    }
+
+    /// `idx` are indices into `space.agents`, in tree order on the way in.
+    fn sort_agents(&self, machine: &str, space: &SpaceRow<'_>, idx: &mut [usize]) {
+        let a = |i: usize| space.agents[i].agent;
+        match self.order {
+            FleetOrder::Tree => {}
+            FleetOrder::Name => idx.sort_by_cached_key(|&i| agent_name(&a(i).title).to_lowercase()),
+            FleetOrder::Newest => idx.sort_by_key(|&i| std::cmp::Reverse(a(i).started_ms)),
+            FleetOrder::Role => idx.sort_by_key(|&i| role_rank(a(i))),
+            FleetOrder::NeedsYou => {
+                idx.sort_by_key(|&i| self.snapshot.agent_at(machine, space.id, a(i).pane))
+            }
+            FleetOrder::Custom => {
+                idx.sort_by_key(|&i| self.custom.agent_at(machine, space.id, a(i).pane))
+            }
+        }
+    }
+
+    /// Ranks the fleet by what needs you, now, for `needs you` to read.
+    pub fn rank_needs(&mut self, spaces: &[SpaceRow<'_>], machines: &[MachineRow<'_>]) {
+        let key = |a: &AgentDto| (need_rank(a).unwrap_or(8), a.state != AgentState::Working);
+        let mut ranked: Vec<(_, (String, SessionId))> = Vec::new();
+        let mut agents: Vec<(_, (String, SessionId, PaneId))> = Vec::new();
+        for (n, s) in spaces.iter().enumerate() {
+            let machine = machines.get(s.daemon).map_or("", |m| m.label).to_string();
+            let best = s.agents.iter().map(|a| key(a.agent)).min().unwrap_or((9, true));
+            ranked.push(((best, n), (machine.clone(), s.id)));
+            for (i, a) in s.agents.iter().enumerate() {
+                agents.push(((key(a.agent), n, i), (machine.clone(), s.id, a.agent.pane)));
+            }
+        }
+        ranked.sort_by_key(|(k, _)| *k);
+        agents.sort_by_key(|(k, _)| *k);
+        self.snapshot = Ranking {
+            spaces: ranked.into_iter().map(|(_, s)| s).collect(),
+            agents: agents.into_iter().map(|(_, a)| a).collect(),
+        };
+    }
+}
+
+/// Where a chat's role puts it under [`FleetOrder::Role`].
+fn role_rank(a: &AgentDto) -> u8 {
+    match a.role.as_deref() {
+        Some("lead") => 0,
+        Some("worker") => 1,
+        Some("watch") => 2,
+        Some("loop") => 3,
+        Some(_) => 4,
+        None => 5,
+    }
+}
+
 /// Everything about the view that belongs to *this* client — where the cursor
 /// is, what it is looking at, how wide it made the rails.
 ///
@@ -2747,6 +3048,15 @@ pub struct View {
     pub booth_followed: usize,
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
+    /// How the fleet, and the tab bar after it, is ordered.
+    pub arrange: Arrange,
+    /// The tab bar's chips in the fleet's order, as indices into the tab list.
+    /// Kept in step by the client before each frame; a list of the wrong length
+    /// reads as the plain order (see [`tab_order`]).
+    pub tab_order: Vec<usize>,
+    /// The tab of the project under BOOTH's cursor. The tab bar scrolls to it
+    /// and marks it while BOOTH is up, without leaving BOOTH.
+    pub booth_tab: Option<usize>,
     pub(crate) fleet_clicks: crate::hit::FleetClicks,
     /// BOOTH's key card is up: [`FLEET_KEYS_LABEL`] or `?` on the fleet.
     pub booth_keys: bool,
@@ -2848,6 +3158,9 @@ pub struct View {
     /// geometry from here: a rail drawn for four gauges and clicked as if it
     /// had three is how a pointer lands two rows off.
     pub gauges: Vec<Gauge>,
+    /// The template prompts from `[[prompts]]`, in file order. On the view so
+    /// the picker can be opened and answered without a trip through the loop.
+    pub prompts: Vec<crate::config::PromptTemplate>,
 }
 
 impl Default for View {
@@ -2864,6 +3177,9 @@ impl Default for View {
             changes_sel: 0,
             booth_sel: 0,
             folds: Folds::default(),
+            arrange: Arrange::default(),
+            tab_order: Vec::new(),
+            booth_tab: None,
             fleet_clicks: crate::hit::FleetClicks::default(),
             booth_keys: false,
             zen: false,
@@ -2901,6 +3217,7 @@ impl Default for View {
             // anything about GPUs or interfaces. The real list arrives with the
             // first telemetry and the rail grows into it.
             gauges: vec![Gauge::Cpu, Gauge::Ram],
+            prompts: Vec::new(),
         }
     }
 }
@@ -3953,12 +4270,14 @@ pub fn booth_rows<'a>(
     spaces: &'a [SpaceRow<'a>],
     machines: &'a [MachineRow<'a>],
     folds: &Folds,
+    arrange: &Arrange,
 ) -> Vec<BoothRow<'a>> {
     let mut out = Vec::new();
     for daemon in booth_machine_order(machines) {
         let m = &machines[daemon];
-        let mine = spaces.iter().filter(|s| s.daemon == daemon);
-        let agents = mine.clone().map(|s| s.agents.len()).sum();
+        let mut mine: Vec<&SpaceRow<'a>> = spaces.iter().filter(|s| s.daemon == daemon).collect();
+        arrange.sort_spaces(m.label, &mut mine);
+        let agents = mine.iter().map(|s| s.agents.len()).sum();
         let folded = folds.machine_folded(m.label);
         out.push(BoothRow::Machine { label: m.label, agents, daemon, folded });
         if folded {
@@ -3970,12 +4289,72 @@ pub fn booth_rows<'a>(
             if folded {
                 continue;
             }
-            for (i, row) in space.agents.iter().enumerate() {
-                out.push(BoothRow::Agent { row: *row, sel: space.first + i });
+            // `sel` stays the agent's place in the fleet list, whatever the
+            // order: it is an identity, and only the row it is drawn on moves.
+            let mut idx: Vec<usize> = (0..space.agents.len()).collect();
+            arrange.sort_agents(m.label, space, &mut idx);
+            for i in idx {
+                out.push(BoothRow::Agent { row: space.agents[i], sel: space.first + i });
             }
         }
     }
     out
+}
+
+/// The tab bar's chips in the fleet's order: each project's tab, in the order
+/// the fleet lists the projects with nothing folded. Tabs the fleet does not
+/// list keep their places at the end.
+pub fn fleet_tab_order(
+    spaces: &[SpaceRow<'_>],
+    machines: &[MachineRow<'_>],
+    arrange: &Arrange,
+    tabs: usize,
+) -> Vec<usize> {
+    let mut out: Vec<usize> = booth_rows(spaces, machines, &Folds::default(), arrange)
+        .iter()
+        .filter_map(|r| match r {
+            BoothRow::Space { space, .. } => Some(space.tab),
+            _ => None,
+        })
+        .filter(|&t| t < tabs)
+        .collect();
+    for t in 0..tabs {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// The order the tab bar draws its chips in, as indices into the tab list.
+///
+/// [`View::tab_order`] when it is a list of every tab, and the plain order
+/// otherwise — so a frame drawn before the client has filled it in, or one
+/// where a tab opened since, still draws every chip.
+pub fn tab_order(view: &View, tabs: usize) -> Vec<usize> {
+    let ok = view.tab_order.len() == tabs && (0..tabs).all(|t| view.tab_order.contains(&t));
+    if ok {
+        view.tab_order.clone()
+    } else {
+        (0..tabs).collect()
+    }
+}
+
+/// The tab of the project the fleet row at `sel` belongs to: the project
+/// itself, an agent's project, or a machine's first project.
+pub fn booth_row_tab(rows: &[BoothRow<'_>], spaces: &[SpaceRow<'_>], sel: usize) -> Option<usize> {
+    match rows.get(sel)? {
+        BoothRow::Space { space, .. } => Some(space.tab),
+        BoothRow::Agent { row, .. } => spaces
+            .iter()
+            .find(|s| s.daemon == row.daemon && s.id == row.workspace_id)
+            .map(|s| s.tab),
+        BoothRow::Machine { .. } => rows[sel + 1..].iter().find_map(|r| match r {
+            BoothRow::Space { space, .. } => Some(space.tab),
+            BoothRow::Machine { .. } => None,
+            BoothRow::Agent { .. } => None,
+        }),
+    }
 }
 
 /// The agent the cursor is on, as an index into the fleet list — `None` when it
@@ -4525,7 +4904,7 @@ fn draw_booth_page(
 ) -> Painted {
     let cols = booth_columns_of(width, geom, view);
     let focused = view.focus == Focus::AllAgents;
-    let rows = booth_rows(scene.spaces, scene.machines, &view.folds);
+    let rows = booth_rows(scene.spaces, scene.machines, &view.folds, &view.arrange);
     let spines = fleet_spines(&rows);
     let preview = booth_preview(&rows, view.booth_sel);
     let mut out = Painted::default();
@@ -4762,6 +5141,17 @@ fn draw_booth_page(
                     );
                 }
             }
+        }
+        // The order, on the bottom border whether or not the list scrolls:
+        // faint while it is the tree, lit once it is anything else.
+        if let Some((x, end)) = fleet_order_span(cols.fleet_box, view.arrange.order) {
+            let foot = cols.fleet_box.y + cols.fleet_box.height.saturating_sub(1);
+            let pen = if view.arrange.order == FleetOrder::Tree {
+                Pen::new(theme.faint, theme.ground)
+            } else {
+                Pen { fg: theme.accent, bg: theme.ground, bold: true }
+            };
+            put_str(buf, x, foot, &fleet_order_label(view.arrange.order), end, pen);
         }
     }
 
@@ -5378,7 +5768,8 @@ pub fn tab_close_span(
     let active = active_chip(view)?;
     let (start, end) = (*tab_strip(area, tabs, view, daemons).spans.get(active)?)?;
     let tab = tabs.get(active)?;
-    let len = tab_label(active, tab, true).chars().count() as u16;
+    let p = tab_order(view, tabs.len()).iter().position(|&t| t == active).unwrap_or(active);
+    let len = tab_label(p, tab, true).chars().count() as u16;
     let w = TAB_CLOSE_MARK.chars().count() as u16;
     // The label ends ` [x] ]`, so the mark sits two columns in from its right
     // edge. Measured off the string the drawing built rather than guessed at,
@@ -5666,15 +6057,23 @@ pub fn tab_strip(area: &LRect, tabs: &[Tab<'_>], view: &View, daemons: usize) ->
     if tabs.is_empty() || bound <= x0 {
         return out;
     }
-    // The scroll follows `view.tab` even while BOOTH has the screen — coming
-    // back to a workspace should find the strip where you left it — but the
-    // bracketing follows what the bar actually paints.
-    let active = view.tab.min(tabs.len() - 1);
+    // Laid out by *position* — the fleet's order, see [`tab_order`] — and
+    // reported by tab, so a span still names its workspace.
+    let order = tab_order(view, tabs.len());
+    let pos = |t: usize| order.iter().position(|&o| o == t).unwrap_or(0);
+    // The scroll follows the tab you are on, and on BOOTH the project under
+    // the fleet's cursor: walking the fleet walks the strip with it, without
+    // leaving BOOTH. The bracketing follows what the bar actually paints.
+    let anchor = match view.page {
+        Page::Booth => view.booth_tab.unwrap_or(view.tab),
+        _ => view.tab,
+    };
+    let active = pos(anchor.min(tabs.len() - 1));
     let bracketed = active_chip(view).map(|i| i.min(tabs.len() - 1));
-    let widths: Vec<u16> = tabs
+    let widths: Vec<u16> = order
         .iter()
         .enumerate()
-        .map(|(i, t)| tab_label(i, t, Some(i) == bracketed).chars().count() as u16)
+        .map(|(p, &t)| tab_label(p, &tabs[t], Some(t) == bracketed).chars().count() as u16)
         .collect();
     let total: u32 = widths.iter().map(|w| *w as u32).sum();
     let strip_w = bound - x0;
@@ -5703,19 +6102,19 @@ pub fn tab_strip(area: &LRect, tabs: &[Tab<'_>], view: &View, daemons: usize) ->
     // is clickable across the half that is.
     let mut x = x0;
     let mut last = first;
-    for (i, w) in widths.iter().enumerate().skip(first) {
+    for (p, w) in widths.iter().enumerate().skip(first) {
         if x >= right {
             break;
         }
-        out.spans[i] = Some((x, (x + w).min(right)));
-        last = i;
+        out.spans[order[p]] = Some((x, (x + w).min(right)));
+        last = p;
         x += w;
     }
 
     if arrows {
         let px = x0 - (ARROW_W + 1);
-        out.prev = first.checked_sub(1).map(|i| ((px, px + ARROW_W), i));
-        out.next = (last + 1 < tabs.len()).then_some(((bound - ARROW_W, bound), last + 1));
+        out.prev = first.checked_sub(1).map(|p| ((px, px + ARROW_W), order[p]));
+        out.next = (last + 1 < tabs.len()).then(|| ((bound - ARROW_W, bound), order[last + 1]));
     }
     out
 }
@@ -5881,8 +6280,11 @@ fn draw_tabbar(
         put_str(buf, sx, area.y, TAB_SEP, bound, Pen::new(theme.rule, theme.ground));
     }
     let strip = tab_strip(area, tabs, view, daemons);
+    let order = tab_order(view, tabs.len());
     for ((i, tab), span) in tabs.iter().enumerate().zip(&strip.spans) {
         let Some((x, end)) = *span else { continue };
+        // Numbered by where it sits, so `alt-3` is the third chip you see.
+        let p = order.iter().position(|&t| t == i).unwrap_or(i);
         let s = tab.summary;
         // Only a machine we are hearing from gets to claim your attention. The
         // counts behind `!` are a snapshot taken when the link died, and a red
@@ -5899,22 +6301,33 @@ fn draw_tabbar(
         } else {
             fg
         };
+        // BOOTH's cursor is in this project: the chip says so in ink and keeps
+        // its width, so marking it slides nothing.
+        let here = view.page == Page::Booth && view.booth_tab == Some(i);
+        let (fg, bg) = if here { (theme.accent, theme.row_bg(true)) } else { (fg, bg) };
         // Clipped at the span's own end, not the bar's: the last chip on a full
         // strip stops where the arrows begin.
-        put_str(buf, x, area.y, &tab_label(i, tab, active), end, Pen { fg, bg, bold: active });
+        let bold = active || here;
+        put_str(buf, x, area.y, &tab_label(p, tab, active), end, Pen { fg, bg, bold });
     }
     // The arrows, and only the one that has somewhere to go. Their columns stay
     // reserved either way, so the strip does not resize under the pointer as it
     // scrolls — an arrow you can see is an arrow that moves you. Each says how
     // many tabs are behind it and what they hold; the right one is drawn hard
     // against its end, so its `›` sits where the strip stops.
-    let visible: Vec<usize> =
-        strip.spans.iter().enumerate().filter(|(_, s)| s.is_some()).map(|(i, _)| i).collect();
+    // By position, as the strip is laid out.
+    let in_order: Vec<Tab<'_>> = order.iter().map(|&t| tabs[t]).collect();
+    let visible: Vec<usize> = order
+        .iter()
+        .enumerate()
+        .filter(|(_, &t)| strip.spans[t].is_some())
+        .map(|(p, _)| p)
+        .collect();
     for (prev, arrow) in [(true, strip.prev), (false, strip.next)] {
         let Some(((x, end), _)) = arrow else { continue };
         let hidden = match (prev, visible.first(), visible.last()) {
-            (true, Some(&f), _) => &tabs[..f],
-            (false, _, Some(&l)) => &tabs[l + 1..],
+            (true, Some(&f), _) => &in_order[..f],
+            (false, _, Some(&l)) => &in_order[l + 1..],
             _ => continue,
         };
         let runs = tab_arrow_runs(hidden, prev);
@@ -8458,12 +8871,31 @@ pub fn fleet_keys_span(fleet_box: LRect) -> Option<(u16, u16)> {
     Some((new - 1 - w, new - 1))
 }
 
+/// The order chip on FLEET's bottom border: `[tree v]`, `[needs you v]`. A
+/// press opens the order menu, as `o` does.
+pub fn fleet_order_label(order: FleetOrder) -> String {
+    format!("[{} v]", order.label())
+}
+
+/// Where [`fleet_order_label`] sits on the bottom border, right-aligned one
+/// column of rule in from the corner. `None` when the box is too narrow to
+/// keep the position (` 12–30 of 64 `) beside it.
+pub fn fleet_order_span(fleet_box: LRect, order: FleetOrder) -> Option<(u16, u16)> {
+    const POSITION: u16 = 16;
+    let w = fleet_order_label(order).chars().count() as u16;
+    let end = fleet_box.right().saturating_sub(2);
+    let start = end.checked_sub(w)?;
+    (start >= fleet_box.x + 2 + POSITION).then_some((start, end))
+}
+
 /// What the key card lists: every key the fleet answers, in the order the
 /// rows of `docs/keys.md` give them.
 pub const BOOTH_KEYS: &[(&str, &str)] = &[
     ("j k", "walk the rows"),
     ("pgdn", "a page down · pgup, a page up"),
     ("home", "the top · end, the bottom"),
+    ("o", "the order: tree, needs you, a-z…"),
+    ("J K", "move the row, in your own order"),
     ("enter", "go there: the agent, or the project"),
     ("a", "start an agent · on a machine, a folder"),
     ("A", "pick which agent"),
@@ -8779,7 +9211,10 @@ fn draw_right_rail(
 /// client and not the workspace live — the layout, the connection, the
 /// reference. It replaced `[:cmd]`, which advertised a keystroke rather than a
 /// place and was the one button here that opened a box to type in.
-pub const FOOTER_BUTTONS: &str = "[resize] [detach] [help] [settings]";
+///
+/// `[prompts]` took `[resize]`'s slot. Resizing the rails is still `alt-l`,
+/// `C-b l` and `:layout`; the button now opens the template prompts.
+pub const FOOTER_BUTTONS: &str = "[prompts] [detach] [help] [settings]";
 
 /// Each footer button and the columns it occupies, or nothing when the screen
 /// is too narrow for the row (in which case none of them was drawn either).
@@ -8794,7 +9229,7 @@ pub fn footer_button_spans(width: u16) -> Vec<(&'static str, u16, u16)> {
         let w = label.len() as u16;
         out.push((
             match label {
-                "[resize]" => "[resize]",
+                "[prompts]" => "[prompts]",
                 "[detach]" => "[detach]",
                 "[help]" => "[help]",
                 _ => "[settings]",
@@ -9087,6 +9522,153 @@ mod tests {
             .collect()
     }
 
+    /// Every order but the tree reorders projects within their machine and
+    /// chats within their project — never across them, and never the machines.
+    #[test]
+    fn an_order_moves_rows_only_among_their_siblings() {
+        let sys = SysDto::default();
+        let mut agents = [
+            agent(1, "zeta", AgentState::Idle),
+            agent(2, "alpha", AgentState::Idle),
+            agent(3, "middle", AgentState::Waiting),
+            agent(4, "gpu", AgentState::Idle),
+        ];
+        agents[0].role = Some("worker".into());
+        agents[1].role = Some("lead".into());
+        let all = booth_fleet(&agents);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let rows = |arrange: &Arrange| shape(&booth_rows(&spaces, &ms, &Folds::default(), arrange));
+        let tree = rows(&Arrange::default());
+
+        let name = Arrange { order: FleetOrder::Name, ..Default::default() };
+        let by_name = rows(&name);
+        assert_eq!(by_name.len(), tree.len());
+        let pos = |rows: &[String], s: &str| rows.iter().position(|r| r.contains(s)).unwrap();
+        assert!(pos(&by_name, "alpha") < pos(&by_name, "zeta"), "{by_name:?}");
+        assert_eq!(by_name[0], tree[0], "machines keep their order");
+
+        let role = Arrange { order: FleetOrder::Role, ..Default::default() };
+        let by_role = rows(&role);
+        assert!(pos(&by_role, "alpha") < pos(&by_role, "zeta"), "lead before worker: {by_role:?}");
+
+        // `needs you`: caliper's chat is asking, so caliper heads `local`.
+        let mut needs = Arrange { order: FleetOrder::NeedsYou, ..Default::default() };
+        needs.rank_needs(&spaces, &ms);
+        let by_need = rows(&needs);
+        assert!(pos(&by_need, "space:caliper") < pos(&by_need, "space:butai"), "{by_need:?}");
+        // And the ranking is a snapshot: the agent stopping asking moves nothing.
+        let mut calm = agents.clone();
+        calm[2].state = AgentState::Idle;
+        let all2 = booth_fleet(&calm);
+        let spaces2 = booth_spaces(&all2);
+        let again = shape(&booth_rows(&spaces2, &ms, &Folds::default(), &needs));
+        assert_eq!(again, by_need, "a state change moved a row under `needs you`");
+    }
+
+    /// `J`/`K` swap a project with its neighbour on the same machine, and a chat
+    /// with its neighbour in the same project, and stop at the ends.
+    #[test]
+    fn a_custom_order_moves_one_row_past_its_neighbour() {
+        let sys = SysDto::default();
+        let agents = [
+            agent(1, "one", AgentState::Idle),
+            agent(2, "two", AgentState::Idle),
+            agent(3, "three", AgentState::Idle),
+            agent(4, "gpu", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let open = Folds::default();
+        let mut arrange = Arrange { order: FleetOrder::Custom, ..Default::default() };
+        arrange.custom = Ranking::of(&booth_rows(&spaces, &ms, &open, &arrange), &ms);
+
+        let rows = booth_rows(&spaces, &ms, &open, &arrange);
+        let caliper = *rows
+            .iter()
+            .find(|r| matches!(r, BoothRow::Space { space, .. } if space.name == "caliper"))
+            .unwrap();
+        assert!(arrange.custom.nudge(&caliper, &ms, -1));
+        let after = shape(&booth_rows(&spaces, &ms, &open, &arrange));
+        let pos = |s: &str| after.iter().position(|r| r == s).unwrap();
+        assert!(pos("space:caliper") < pos("space:butai"), "{after:?}");
+        // `diffusion` is alone on `gpu-box`: there is nowhere for it to go.
+        let rows = booth_rows(&spaces, &ms, &open, &arrange);
+        let diffusion = *rows
+            .iter()
+            .find(|r| matches!(r, BoothRow::Space { space, .. } if space.name == "diffusion"))
+            .unwrap();
+        assert!(!arrange.custom.nudge(&diffusion, &ms, -1), "it crossed a machine");
+
+        // A chat moves within its project.
+        let two = *rows
+            .iter()
+            .find(|r| matches!(r, BoothRow::Agent { row, .. } if row.agent.title == "two"))
+            .unwrap();
+        assert!(arrange.custom.nudge(&two, &ms, -1));
+        let after = shape(&booth_rows(&spaces, &ms, &open, &arrange));
+        let at = |t: &str| after.iter().position(|r| r.contains(t)).unwrap();
+        assert!(at(":two:") < at(":one:"), "{after:?}");
+    }
+
+    /// The tab bar's chips follow the fleet's project order, and a list of the
+    /// wrong length falls back to the plain one.
+    #[test]
+    fn the_tab_bar_follows_the_fleet_order() {
+        let sys = SysDto::default();
+        let agents = [
+            agent(1, "one", AgentState::Idle),
+            agent(2, "two", AgentState::Idle),
+            agent(3, "three", AgentState::Waiting),
+            agent(4, "gpu", AgentState::Idle),
+        ];
+        let all = booth_fleet(&agents);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        assert_eq!(fleet_tab_order(&spaces, &ms, &Arrange::default(), 4), vec![0, 1, 2, 3]);
+        let mut needs = Arrange { order: FleetOrder::NeedsYou, ..Default::default() };
+        needs.rank_needs(&spaces, &ms);
+        let order = fleet_tab_order(&spaces, &ms, &needs, 4);
+        assert_eq!(order[0], 1, "caliper is asking, so its chip comes first: {order:?}");
+
+        let names = ["butai", "caliper", "notes", "diffusion"].map(ws_summary);
+        let tabs: Vec<Tab<'_>> =
+            names.iter().map(|s| Tab { summary: s, host: None, live: true }).collect();
+        let view = View { tab_order: order.clone(), ..Default::default() };
+        let geom = Chrome::compute(160, 40, false, view.geom, system_h_wanted(&view.gauges));
+        let strip = tab_strip(&geom.tabbar, &tabs, &view, 1);
+        let x = |t: usize| strip.spans[t].expect("four chips fit 160 columns").0;
+        assert!(x(1) < x(0), "the chips are not in the fleet's order");
+        let mut b = buf(160, 40);
+        draw(&mut b, 160, 40, &scene(&tabs, None, &sys, &[]), &view, &Theme::default());
+        assert!(text_of(&b, 0).contains("1:caliper"), "numbered by place: {}", text_of(&b, 0));
+
+        assert_eq!(
+            tab_order(&View { tab_order: vec![1], ..Default::default() }, 4),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    /// On BOOTH the bar scrolls to the project under the fleet's cursor and
+    /// leaves the page where it is.
+    #[test]
+    fn on_booth_the_tab_bar_scrolls_to_the_cursors_project() {
+        let sys = SysDto::default();
+        let names: Vec<String> = (0..14).map(|i| format!("project-{i}")).collect();
+        let sums: Vec<WorkspaceSummary> = names.iter().map(|n| ws_summary(n)).collect();
+        let tabs: Vec<Tab<'_>> =
+            sums.iter().map(|s| Tab { summary: s, host: None, live: true }).collect();
+        let view = View { page: Page::Booth, tab: 0, booth_tab: Some(12), ..Default::default() };
+        let geom = page_geom(160, 40, &view);
+        let strip = tab_strip(&geom.tabbar, &tabs, &view, 1);
+        assert!(strip.spans[12].is_some(), "the cursor's project is off the bar");
+        assert!(strip.spans[0].is_none(), "fourteen chips should not all fit");
+        let mut b = buf(160, 40);
+        draw(&mut b, 160, 40, &scene(&tabs, None, &sys, &[]), &view, &Theme::default());
+        assert!(text_of(&b, 0).contains("13:project-12"), "{}", text_of(&b, 0));
+    }
+
     /// The fleet list groups machine → workspace → agent, and **the order does
     /// not read agent state at all**.
     ///
@@ -9108,7 +9690,7 @@ mod tests {
         let ms = machines(&sys, &all);
         let spaces = booth_spaces(&all);
         let open = Folds::default();
-        let before = shape(&booth_rows(&spaces, &ms, &open));
+        let before = shape(&booth_rows(&spaces, &ms, &open, &Arrange::default()));
         assert_eq!(
             before,
             vec![
@@ -9138,7 +9720,11 @@ mod tests {
         let all2 = booth_fleet(&stirred);
         let ms2 = machines(&sys, &all2);
         let spaces2 = booth_spaces(&all2);
-        assert_eq!(shape(&booth_rows(&spaces2, &ms2, &open)), before, "state changed the order");
+        assert_eq!(
+            shape(&booth_rows(&spaces2, &ms2, &open, &Arrange::default())),
+            before,
+            "state changed the order"
+        );
     }
 
     /// Remembered machines land in whatever order their ssh links come up, so
@@ -9184,13 +9770,14 @@ mod tests {
                 .collect();
             // An agent row's fleet index differs between the two orders by
             // design, so only its name is compared.
-            let rows: Vec<String> = shape(&booth_rows(&spaces, &ms, &Folds::default()))
-                .into_iter()
-                .map(|r| match r.strip_prefix("agent:") {
-                    Some(rest) => format!("agent:{}", rest.split(':').next().unwrap()),
-                    None => r,
-                })
-                .collect();
+            let rows: Vec<String> =
+                shape(&booth_rows(&spaces, &ms, &Folds::default(), &Arrange::default()))
+                    .into_iter()
+                    .map(|r| match r.strip_prefix("agent:") {
+                        Some(rest) => format!("agent:{}", rest.split(':').next().unwrap()),
+                        None => r,
+                    })
+                    .collect();
             rows
         };
         let rows = draw(["local", "zeta", "alpha"]);
@@ -9273,7 +9860,7 @@ mod tests {
             preferred: None,
             tab: 0,
         }];
-        let rows = booth_rows(&spaces, &ms, &Folds::default());
+        let rows = booth_rows(&spaces, &ms, &Folds::default(), &Arrange::default());
         let view = View { page: Page::Booth, ..Default::default() };
         let c = booth_columns_of(160, &page_geom(160, 12, &view), &view);
         let map = fleet_map(&c, &rows, 0).expect("22 rows do not fit the column");
@@ -9287,7 +9874,7 @@ mod tests {
         // Folding the project keeps its news on the map, on the project's row.
         let mut folds = Folds::default();
         folds.toggle_space("local", SessionId(1));
-        let folded = booth_rows(&spaces, &ms, &folds);
+        let folded = booth_rows(&spaces, &ms, &folds, &Arrange::default());
         assert!(fleet_map(&c, &folded, 0).is_none(), "two rows fit; there is no bar");
         assert_eq!(row_news(&folded[1]), FleetNews::Ask, "a fold hid the question");
     }
@@ -9388,11 +9975,11 @@ mod tests {
         let ms = machines(&sys, &all);
         let spaces = booth_spaces(&all);
         let mut folds = Folds::default();
-        let open = shape(&booth_rows(&spaces, &ms, &folds));
+        let open = shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default()));
 
         // One project. Its agents go; every other row stays where it was.
         folds.toggle_space("local", SessionId(1));
-        let one = shape(&booth_rows(&spaces, &ms, &folds));
+        let one = shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default()));
         assert_eq!(
             one,
             vec![
@@ -9415,14 +10002,18 @@ mod tests {
         // A machine takes its projects with it.
         folds.toggle_machine("local");
         assert_eq!(
-            shape(&booth_rows(&spaces, &ms, &folds)),
+            shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default())),
             vec!["machine:local", "machine:gpu-box", "space:diffusion", "agent:gemini:3"]
         );
 
         // And unfolding is exactly the inverse.
         folds.toggle_machine("local");
         folds.toggle_space("local", SessionId(1));
-        assert_eq!(shape(&booth_rows(&spaces, &ms, &folds)), open, "unfolding did not restore");
+        assert_eq!(
+            shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default())),
+            open,
+            "unfolding did not restore"
+        );
     }
 
     /// `Z` folds every project and leaves the machines open — the index view.
@@ -9447,7 +10038,7 @@ mod tests {
 
         let mut folds = Folds::default();
         folds.toggle_all_spaces(&keys);
-        let index = shape(&booth_rows(&spaces, &ms, &folds));
+        let index = shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default()));
         assert_eq!(
             index,
             vec![
@@ -9464,7 +10055,9 @@ mod tests {
         // Pressing it again opens everything.
         folds.toggle_all_spaces(&keys);
         assert!(
-            shape(&booth_rows(&spaces, &ms, &folds)).iter().any(|r| r.starts_with("agent:")),
+            shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default()))
+                .iter()
+                .any(|r| r.starts_with("agent:")),
             "a second Z should open the fleet back up"
         );
 
@@ -9473,7 +10066,7 @@ mod tests {
         // the direction that gets you the index in one press.
         folds.toggle_space("local", SessionId(1));
         folds.toggle_all_spaces(&keys);
-        assert_eq!(shape(&booth_rows(&spaces, &ms, &folds)), index);
+        assert_eq!(shape(&booth_rows(&spaces, &ms, &folds, &Arrange::default())), index);
     }
 
     #[test]
@@ -9489,16 +10082,16 @@ mod tests {
         let machines = machines(&sys, &all);
         let spaces = booth_spaces(&all);
         let mut folds = Folds::default();
-        let rows = booth_rows(&spaces, &machines, &folds);
+        let rows = booth_rows(&spaces, &machines, &folds, &Arrange::default());
         assert_eq!(
             fleet_spines(&rows),
             ["", "├─", "│ ├─", "│ └─", "├─", "│ └─", "└─", "", "└─", "  └─"]
         );
         folds.toggle_space("local", SessionId(1));
-        let rows = booth_rows(&spaces, &machines, &folds);
+        let rows = booth_rows(&spaces, &machines, &folds, &Arrange::default());
         assert_eq!(fleet_spines(&rows), ["", "├─", "├─", "│ └─", "└─", "", "└─", "  └─"]);
         folds.toggle_machine("local");
-        let rows = booth_rows(&spaces, &machines, &folds);
+        let rows = booth_rows(&spaces, &machines, &folds, &Arrange::default());
         assert_eq!(fleet_spines(&rows), ["", "", "└─", "  └─"]);
     }
 
@@ -9520,7 +10113,7 @@ mod tests {
         let sys = SysDto::default();
         let ms = machines(&sys, &all);
         let spaces = booth_spaces(&all);
-        let rows = booth_rows(&spaces, &ms, &Folds::default());
+        let rows = booth_rows(&spaces, &ms, &Folds::default(), &Arrange::default());
 
         let row_of = |name: &str| {
             rows.iter().position(|r| shape(std::slice::from_ref(r))[0] == name).expect(name)
@@ -10741,7 +11334,7 @@ mod tests {
         let scene = Scene { machines: &ms, spaces: &spaces, ..scene(&[], None, &sys, &all) };
 
         // The cursor on the agent, so the stage is titled with it too.
-        let rows = booth_rows(&spaces, &ms, &Folds::default());
+        let rows = booth_rows(&spaces, &ms, &Folds::default(), &Arrange::default());
         let sel = rows
             .iter()
             .position(|r| matches!(r, BoothRow::Agent { sel: 0, .. }))
@@ -13776,5 +14369,56 @@ index 1111111..2222222 100644
         let corner = b.cell((area.x, area.y)).expect("stage corner");
         assert_eq!(corner.symbol(), "x", "the last frame was cleared instead of kept");
         assert_eq!(corner.fg, theme.faint, "the last frame was left looking live");
+    }
+
+    /// `[prompts]` is drawn in the slot `[resize]` had, and the hit test
+    /// reports it at the columns it is drawn at.
+    #[test]
+    fn the_footer_draws_prompts_where_layout_was() {
+        let (cols, rows) = (160, 40);
+        let sys = SysDto::default();
+        let view = View::default();
+        let mut b = buf(cols, rows);
+        draw_all(&mut b, cols, rows, &scene(&[], None, &sys, &[]), &view, &Theme::default());
+        let y = Geom::compute(cols, rows, false, view.geom, system_h_wanted(&view.gauges)).footer.y;
+        let footer = text_of(&b, y);
+        assert!(footer.ends_with("[prompts] [detach] [help] [settings]"), "{footer:?}");
+        assert!(!footer.contains("[resize]"), "{footer:?}");
+
+        let (label, start, end) = footer_button_spans(cols)[0];
+        assert_eq!(label, "[prompts]");
+        assert_eq!(start, cols - FOOTER_BUTTONS.len() as u16);
+        let drawn: String =
+            (start..end).filter_map(|x| b.cell((x, y)).map(|c| c.symbol().to_string())).collect();
+        assert_eq!(drawn, "[prompts]");
+    }
+
+    fn sample_prompts() -> Vec<crate::config::PromptTemplate> {
+        let p = |name: &str, text: &str| crate::config::PromptTemplate {
+            name: name.into(),
+            text: text.into(),
+        };
+        vec![
+            p("review this diff", "Review the staged diff for bugs, risky changes and missing tests."),
+            p("write tests for", "Write focused unit tests for the function under the cursor.\nCover the edge cases."),
+            p("explain the error", "Explain this error, its likely cause and the smallest fix:"),
+            p("summarize the PR", "Summarize this PR for a reviewer: what changed, why, and what to check."),
+        ]
+    }
+
+    /// The picker lists each template by name with a preview, then the save row.
+    #[test]
+    fn the_prompts_picker_lists_names_previews_and_the_save_row() {
+        let Overlay::List(list) = prompts_overlay(&sample_prompts(), 0) else { panic!() };
+        assert_eq!(list.kind, ListKind::Prompts);
+        assert_eq!(list.items.len(), 5);
+        assert!(list.items[1].starts_with("write tests for  "), "{:?}", list.items[1]);
+        // A text that goes on past its row, or onto a second line, ends in `…`.
+        assert!(list.items[1].ends_with('…'), "the cut is not shown: {:?}", list.items[1]);
+        assert_eq!(list.items[4], PROMPT_NEW_LABEL);
+        assert_eq!(list.values.as_ref().unwrap()[4], PROMPT_NEW);
+        // An empty library still has its way in.
+        let Overlay::List(empty) = prompts_overlay(&[], 3) else { panic!() };
+        assert_eq!((empty.items.len(), empty.sel), (1, 0));
     }
 }

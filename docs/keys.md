@@ -116,6 +116,7 @@ whichever GPU monitor the machine has (`nvtop`, `nvidia-smi`, `rocm-smi`,
 |---|---|---|---|
 | zen — collapse the rails | `alt-z` | `C-b z` | |
 | layout — resize them | `alt-l` | `C-b l` | |
+| template prompts — `[prompts]` | `alt-i` | `C-b i` | |
 | find | `alt-/` | `C-b /` | `/` |
 | links — the URLs on screen | | `C-b f` | `f` |
 | the git menu | | `C-b g` | `g` |
@@ -180,7 +181,9 @@ and the diff keys above work there. The rail is unchanged and still owns the
 commit box and the sync buttons, which is what `C` goes to.
 
 **BOOTH** — `j` `k` walk the rows · `pgdn` `pgup` a page at a time · `home`
-`end` the top and the bottom · `enter` go there: an agent's workspace on its
+`end` the top and the bottom · `o` the order: `tree`, `needs you`, `newest`,
+`a-z`, `role` or `custom` · `J` `K` move the row down or up, in your own order ·
+`enter` go there: an agent's workspace on its
 machine, or the project the cursor names · `a` start that project's agent, or on
 a machine row open a folder there · `A` pick which · `x` end what the row is: the
 session on an agent, the workspace and
@@ -294,6 +297,7 @@ branch                  the branch picker
 update                  check for a newer butai, and offer it
 find                    search the workspace
 layout                  resize the rails
+prompts                 the template prompts
 zoom                    zen
 git-menu
 close-pane              kill what is staged
