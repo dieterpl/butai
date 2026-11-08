@@ -42,14 +42,21 @@ export interface Tagged {
 }
 
 export interface Tags {
-  role: Role | null;
+  /// A built-in [`Role`] or a word from a `[[roles]]` block.
+  role: string | null;
   labels: string[];
 }
 
-/// The role, if it is one this client knows. An unknown word from a newer
-/// daemon is shown as nothing rather than guessed at.
-export function roleOf(a: Tagged): Role | null {
-  return (ROLES as readonly string[]).includes(a.role ?? "") ? (a.role as Role) : null;
+/// The role: a built-in, or a word a person defined in a `[[roles]]` block.
+/// Anything that is not a role word (as `is_role_word` checks) is nothing.
+export function roleOf(a: Tagged): string | null {
+  const r = a.role ?? "";
+  return r.length > 0 && r.length <= MAX_LABEL_LEN && /^[a-z0-9_-]+$/.test(r) ? r : null;
+}
+
+/// A role's pen: the built-ins' own, and plain ink for a role of your own.
+export function roleTone(role: string): string {
+  return (ROLE_TONE as Readonly<Record<string, string>>)[role] ?? "text-foreground";
 }
 
 export function labelsOf(a: Tagged): string[] {

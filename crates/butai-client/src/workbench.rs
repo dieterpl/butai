@@ -503,7 +503,8 @@ pub async fn run(
     let mut pinned = config.general.default_agent.clone();
     view.pinned_agent = pinned.clone();
     // The template prompts the footer's `[prompts]` button lists.
-    view.prompts = config.prompts.clone();
+    view.prompts = crate::roles::prompts(&config.prompts);
+    view.roles = config.roles.clone();
     // How the fleet, and the tab bar after it, was last ordered.
     view.arrange.order = chrome::FleetOrder::from_label(&config.booth.order).unwrap_or_default();
     // Whether an announcement is allowed to bring a machine in on its own. The
@@ -1884,7 +1885,7 @@ pub async fn run(
                                             Err(e) => view.flash = Some(format!("{e:#}")),
                                         }
                                     }
-                                    None => match fleet_agent_picker(&daemons, daemon, id, &name)
+                                    None => match fleet_agent_picker(&daemons, daemon, id, &name, &view)
                                         .await
                                     {
                                         Ok(overlay) => view.overlay = Some(overlay),
@@ -3574,10 +3575,18 @@ async fn act_on_choice(
     match kind {
         // The only choice that makes a pane, and therefore the only one with
         // anything to stage.
-        ListKind::SpawnAgent => return spawn_agent(daemons, hosts, view, choice).await.map(Some),
+        ListKind::SpawnAgent => {
+            if let Some(p) = crate::roles::Preset::parse(choice) {
+                return spawn_preset(daemons, d, ws.id, &p).await.map(Some);
+            }
+            return spawn_agent(daemons, hosts, view, choice).await.map(Some);
+        }
         // Into the project the picker was opened on, which on BOOTH is
         // routinely neither the active tab nor even on its machine.
         ListKind::SpawnAgentIn { daemon, workspace } => {
+            if let Some(p) = crate::roles::Preset::parse(choice) {
+                return spawn_preset(daemons, *daemon, *workspace, &p).await.map(Some);
+            }
             return spawn_agent_in(daemons, *daemon, *workspace, choice).await.map(Some);
         }
         ListKind::Branch => {
@@ -4831,7 +4840,8 @@ async fn agent_picker(
     pinned: Option<&str>,
 ) -> Result<Overlay> {
     let d = active_daemon(daemons, hosts, view);
-    let rows = agent_rows(&daemons[d], pinned).await?;
+    let mut rows = agent_rows(&daemons[d], pinned).await?;
+    add_presets(&mut rows, view, pinned);
     Ok(Overlay::List(ListOverlay {
         // The title carries `d`, because `?` was the only place that mentioned
         // it and a key you have to leave the picker to find out about is one
@@ -4913,8 +4923,92 @@ fn arrange_agents(
     AgentRows { items, names, meters }
 }
 
-/// The agent picker's title, naming the one key in it that is not Enter.
-pub const AGENT_PICKER_TITLE: &str = "SPAWN AGENT — d pins as default";
+/// Put the presets under the harness rows: one per prompt that carries a role
+/// (the built-in `coordinator`, `worker`, `loop`, `watch` and your own), then
+/// one per `[[roles]]` block. See [`crate::roles::presets`].
+///
+/// Under, not over, so the pinned harness is still the row Enter starts on.
+/// A preset's value is the whole [`Preset`](crate::roles::Preset), which is
+/// what lets the spawn and `tab` work from the list alone.
+fn add_presets(rows: &mut AgentRows, view: &View, pinned: Option<&str>) {
+    let margin = if rows.items.first().is_some_and(|i| i.starts_with('★')) { "  " } else { "" };
+    for p in crate::roles::presets(&view.prompts, &view.roles, &rows.names, pinned) {
+        rows.items.push(format!("{margin}{}", p.row()));
+        rows.names.push(p.value());
+        if let Some(m) = rows.meters.as_mut() {
+            m.push(0);
+        }
+    }
+}
+
+/// `tab` on a preset row: the next harness the daemon has, in the picker's own
+/// order. Read off the list's plain rows, so nothing outside it is needed.
+fn cycle_preset_agent(list: &mut ListOverlay) -> bool {
+    let Some(values) = list.values.as_mut() else { return false };
+    let Some(mut p) = values.get(list.sel).and_then(|v| crate::roles::Preset::parse(v)) else {
+        return false;
+    };
+    let agents: Vec<&String> =
+        values.iter().filter(|v| crate::roles::Preset::parse(v).is_none()).collect();
+    let Some(at) = agents.iter().position(|a| **a == p.agent) else { return false };
+    p.agent = agents[(at + 1) % agents.len()].clone();
+    let margin = if list.items[list.sel].starts_with("  ") { "  " } else { "" };
+    list.items[list.sel] = format!("{margin}{}", p.row());
+    values[list.sel] = p.value();
+    true
+}
+
+/// Start a preset: its harness, then its role and labels, then — once the
+/// agent has drawn something — its prompt, pasted and submitted the way
+/// `butai agent spawn --prompt` does it.
+///
+/// The paste waits in a task of its own, because an agent can take seconds to
+/// come up and the workbench must not freeze meanwhile.
+async fn spawn_preset(
+    daemons: &[Daemon],
+    daemon: usize,
+    workspace: SessionId,
+    p: &crate::roles::Preset,
+) -> Result<PaneId> {
+    let pane = spawn_agent_in(daemons, daemon, workspace, &p.agent).await?;
+    let api = daemons[daemon].api.clone();
+    let base = format!("/v1/workspaces/{workspace}/panes/{pane}");
+    let body = serde_json::to_vec(&serde_json::json!({ "role": p.role, "labels": p.labels }))?;
+    api.call(hyper::Method::PUT, &format!("{base}/tags"), Some(body)).await?;
+    if let Some(text) = p.prompt.clone() {
+        tokio::spawn(async move {
+            if let Err(e) = paste_when_ready(&api, &base, &text).await {
+                tracing::warn!("the preset's prompt was not sent to {base}: {e:#}");
+            }
+        });
+    }
+    Ok(pane)
+}
+
+/// Wait (up to [`PRESET_READY`]) for a new agent to draw, then paste and submit.
+async fn paste_when_ready(api: &crate::api::Api, base: &str, text: &str) -> Result<()> {
+    use butai_protocol::api::PaneOutputDto;
+    let deadline = std::time::Instant::now() + PRESET_READY;
+    let out = format!("{base}/output?lines=8&source=footer&format=text");
+    while std::time::Instant::now() < deadline {
+        let dto: PaneOutputDto = api.get_as(&out).await?;
+        if dto.lines.iter().any(|l| !l.trim().is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let input = format!("{base}/input");
+    api.post(&input, &serde_json::json!({ "paste": text })).await?;
+    api.post(&input, &serde_json::json!({ "key": { "code": "enter" } })).await?;
+    Ok(())
+}
+
+/// How long a preset's prompt waits for its agent to draw before it is sent
+/// anyway. The CLI's `--prompt` waits the same way.
+const PRESET_READY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The agent picker's title, naming the keys in it that are not Enter.
+pub const AGENT_PICKER_TITLE: &str = "SPAWN AGENT — tab harness · d pins as default";
 
 /// Pin (or unpin) the agent the rail's `a` spawns without asking.
 ///
@@ -7889,6 +7983,22 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
         // a `d` that did something different per list is a key you cannot
         // learn. The overlay closes because the pin is confirmed by a flash in
         // the footer, which an open modal would cover.
+        // `tab` on a preset row starts it on the next harness instead.
+        (Overlay::List(list), event::KeyCode::Tab)
+            if matches!(list.kind, ListKind::SpawnAgent | ListKind::SpawnAgentIn { .. }) =>
+        {
+            if !cycle_preset_agent(list) {
+                view.flash = Some("tab changes a preset's harness".into());
+            }
+        }
+        // A preset is not something the rail's `a` can start bare, so it
+        // cannot be the pin.
+        (Overlay::List(list), event::KeyCode::Char('d'))
+            if list.kind == ListKind::SpawnAgent
+                && list.chosen().is_some_and(|c| crate::roles::Preset::parse(c).is_some()) =>
+        {
+            view.flash = Some("d pins a harness, not a preset".into());
+        }
         (Overlay::List(list), event::KeyCode::Char('d'))
             if list.kind == ListKind::SpawnAgent && list.chosen().is_some() =>
         {
@@ -8218,7 +8328,15 @@ fn handle_prompt_key(k: event::KeyEvent, view: &mut View) -> Flow {
                     view.overlay = Some(Overlay::Prompt(p));
                     return Flow::Continue;
                 };
-                let tpl = crate::config::PromptTemplate { name: name.clone(), text: text.clone() };
+                // Saving over a built-in keeps its role, as the next load would.
+                let role =
+                    view.prompts.iter().find(|t| t.name == name).and_then(|t| t.role.clone());
+                let tpl = crate::config::PromptTemplate {
+                    name: name.clone(),
+                    text: text.clone(),
+                    role,
+                    hidden: false,
+                };
                 let at = match view.prompts.iter().position(|t| t.name == name) {
                     Some(i) => {
                         view.prompts[i] = tpl;
@@ -8623,7 +8741,9 @@ fn tag_menu(
         workspace,
         pane: agent.pane,
         title: agent.title.clone(),
-        role: agent.role.clone().filter(|r| butai_protocol::api::AGENT_ROLES.contains(&r.as_str())),
+        // Kept whatever it is: a `[[roles]]` word is not a row here, but
+        // toggling a label must not take it off.
+        role: agent.role.clone(),
         labels: agent.labels.clone(),
         known,
     };
@@ -11165,9 +11285,11 @@ async fn fleet_agent_picker(
     daemon: usize,
     workspace: SessionId,
     project: &str,
+    view: &View,
 ) -> Result<Overlay> {
     let Some(d) = daemons.get(daemon) else { anyhow::bail!("that machine has gone") };
-    let rows = agent_rows(d, None).await?;
+    let mut rows = agent_rows(d, None).await?;
+    add_presets(&mut rows, view, None);
     Ok(Overlay::List(ListOverlay {
         title: format!("START IN {project}"),
         items: rows.items,
@@ -14121,6 +14243,73 @@ name = \"terminal\"
         assert_eq!(view.geom.procs_h, None, "and `0` lets go of it again");
     }
 
+    /// The built-in role prompts and `[[roles]]` blocks are picker rows.
+    #[test]
+    fn the_agent_picker_lists_role_presets_under_the_harnesses() {
+        let reviewer = crate::roles::RoleDef {
+            name: "reviewer".into(),
+            agent: Some("codex".into()),
+            labels: vec!["review".into()],
+            ..Default::default()
+        };
+        let view = View {
+            prompts: crate::roles::prompts(&[]),
+            roles: vec![reviewer],
+            ..Default::default()
+        };
+        let mut rows = arrange_agents(vec!["claude".into(), "codex".into()], &[], Some("codex"));
+        add_presets(&mut rows, &view, Some("codex"));
+        assert_eq!(&rows.items[..2], ["★ codex", "  claude"], "the harnesses are untouched");
+        let p = |i: usize| crate::roles::Preset::parse(&rows.names[i]).expect("a preset");
+        // The pin is the presets' harness, and a role's own harness wins.
+        assert_eq!(
+            (p(2).name.as_str(), p(2).agent.as_str(), p(2).role.as_str()),
+            ("coordinator", "codex", "lead")
+        );
+        assert!(p(2).prompt.unwrap().starts_with("You are the coordinator"));
+        assert_eq!((p(6).name.as_str(), p(6).agent.as_str()), ("reviewer", "codex"));
+        assert_eq!(p(6).labels, ["review"]);
+        assert!(rows.items[2].starts_with("  coordinator") && rows.items[2].contains("→ lead"));
+        assert_eq!(rows.items.len(), rows.names.len());
+    }
+
+    /// Enter on a preset hands its value to the spawn, `tab` moves it to the
+    /// next harness, and `d` will not pin it.
+    #[test]
+    fn a_preset_row_spawns_cycles_its_harness_and_is_not_pinned() {
+        let view0 = View { prompts: crate::roles::prompts(&[]), ..Default::default() };
+        let mut rows = arrange_agents(vec!["claude".into(), "codex".into()], &[], None);
+        add_presets(&mut rows, &view0, None);
+        let picker = Overlay::List(ListOverlay {
+            title: AGENT_PICKER_TITLE.into(),
+            items: rows.items,
+            values: Some(rows.names),
+            sel: 2,
+            kind: ListKind::SpawnAgent,
+            meters: None,
+            anchor: None,
+        });
+        let chosen = |v: &View| match &v.overlay {
+            Some(Overlay::List(l)) => crate::roles::Preset::parse(l.chosen().unwrap()).unwrap(),
+            _ => panic!("the picker closed"),
+        };
+        let mut view = View { overlay: Some(picker.clone()), ..Default::default() };
+        assert_eq!(chosen(&view).agent, "claude");
+        handle_overlay_key(key(event::KeyCode::Tab), &mut view);
+        assert_eq!(chosen(&view).agent, "codex");
+        assert_eq!(chosen(&view).role, "lead", "only the harness moves");
+        handle_overlay_key(key(event::KeyCode::Tab), &mut view);
+        assert_eq!(chosen(&view).agent, "claude", "and wraps");
+
+        let flow = handle_overlay_key(key(event::KeyCode::Char('d')), &mut view);
+        assert!(matches!(flow, Flow::Continue), "{flow:?}");
+        assert!(view.overlay.is_some());
+
+        let mut view = View { overlay: Some(picker), ..Default::default() };
+        let flow = handle_overlay_key(key(event::KeyCode::Enter), &mut view);
+        assert!(matches!(flow, Flow::Choose), "{flow:?}");
+    }
+
     /// `d` in the agent picker pins the highlighted agent.
     ///
     /// The help screen has advertised this key for as long as the pin existed,
@@ -15555,6 +15744,7 @@ name = \"terminal\"
         let p = |name: &str, text: &str| crate::config::PromptTemplate {
             name: name.into(),
             text: text.into(),
+            ..Default::default()
         };
         vec![
             p("review this diff", "Review the staged diff for bugs and risky changes."),

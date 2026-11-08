@@ -287,7 +287,7 @@ def an_agent_takes_a_role_and_labels_and_keeps_them(ctx):
     row = d.http.get(f"/v1/workspaces/{ws}/agents").json()[0]
     assert row["role"] == "lead" and row["labels"] == ["review", "bug"], row
 
-    for bad in ({"role": "boss"}, {"labels": ["two words"]}):
+    for bad in ({"role": "Two Words"}, {"labels": ["two words"]}):
         refused = d.http.put(route, json_body=bad)
         assert refused.status == 400, refused.text
     row = d.http.get(f"/v1/workspaces/{ws}/agents").json()[0]

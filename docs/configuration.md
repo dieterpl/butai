@@ -577,17 +577,49 @@ chats by the ids a daemon hands out fresh every time it starts.
 
 Template prompts for the footer's `[prompts]` button (`alt-i`, `C-b i`,
 `:prompts`). Written by the picker when you save or delete one; edit by hand if
-you like. Nothing is set up by default.
+you like.
+
+Four are built in, one per built-in role: `coordinator` (role `lead`: hands
+each request to a worker agent and keeps the user informed), `worker`, `loop`
+and `watch`. A block with a built-in's name replaces it where it stands.
+Deleting a built-in in the picker writes `hidden = true` under its name, since
+the built-in would otherwise come back. Every prompt with a `role` is also a
+preset in the agent picker, which starts an agent with that role and pastes the
+text.
 
 | Key | Type | Default | Read by | What it changes |
 |---|---|---|---|---|
 | `name` | string | — | client | What the picker lists it by. Saving a name that is already there replaces its text. |
 | `text` | string | — | client | What `enter` pastes into the staged pane and `y` copies. |
+| `role` | string | unset | client | Makes it an agent-picker preset that starts an agent with this role. Unset on a block that replaces a built-in keeps the built-in's role. |
+| `hidden` | bool | `false` | client | Hides the built-in of this name. |
 
 ```toml
 [[prompts]]
 name = "review this diff"
 text = "Review the staged diff for bugs, risky changes and missing tests."
+```
+
+### `[[roles]]`
+
+Roles of your own. The daemon accepts any lowercase role word of up to 24
+letters, digits, `-` or `_`; the built-ins are `lead`, `worker`, `loop` and
+`watch`. Each block is listed in the agent picker as a preset under the
+built-in ones.
+
+| Key | Type | Default | Read by | What it changes |
+|---|---|---|---|---|
+| `name` | string | — | client | The role the agent is tagged with, and the preset's name. Not a role word: the block is skipped. |
+| `agent` | string | the pinned agent, else `claude` | client | The harness to start, if this machine has it. |
+| `prompt` | string | unset | client | A `[[prompts]]` name whose text is pasted once the agent is up. If it names no prompt, it is taken as the text itself. |
+| `labels` | array | `[]` | client | Labels the agent is tagged with. |
+
+```toml
+[[roles]]
+name = "reviewer"
+agent = "codex"
+prompt = "review this diff"
+labels = ["review"]
 ```
 
 ### `[views]`

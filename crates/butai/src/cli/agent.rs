@@ -63,7 +63,7 @@ pub enum AgentCmd {
         /// Give up after this many milliseconds when waiting
         #[arg(long, value_name = "MS", default_value_t = 300_000)]
         timeout: u64,
-        /// Give the new agent a role: lead, worker, loop or watch
+        /// Give the new agent a role: lead, worker, loop, watch, or a role of your own
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
         /// Give the new agent a label (repeatable, or comma-separated)
@@ -104,7 +104,7 @@ pub enum AgentCmd {
     Tag {
         /// Pane id, agent name, or `stage`
         target: String,
-        /// Set the role: lead, worker, loop or watch
+        /// Set the role: lead, worker, loop, watch, or a role of your own
         #[arg(long, value_name = "ROLE", conflicts_with = "no_role")]
         role: Option<String>,
         /// Take the role off
@@ -771,7 +771,10 @@ mod tests {
     #[test]
     fn a_bad_tag_is_a_usage_error() {
         let bad = |e: TagEdit| exit::code_for(&e.apply(None, vec![]).unwrap_err());
-        assert_eq!(bad(TagEdit { role: Some("boss".into()), ..Default::default() }), exit::USAGE);
+        assert_eq!(
+            bad(TagEdit { role: Some("two words".into()), ..Default::default() }),
+            exit::USAGE
+        );
         assert_eq!(bad(TagEdit { add: labels(&["no spaces"]), ..Default::default() }), exit::USAGE);
         let nine: Vec<String> = (0..9).map(|i| format!("l{i}")).collect();
         assert_eq!(bad(TagEdit { add: nine, ..Default::default() }), exit::USAGE);

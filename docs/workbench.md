@@ -409,6 +409,15 @@ In the agent picker, `d` pins the highlighted agent as what `a` spawns; the
 SETTINGS page's **default agent** row does the same thing, and `ask every time`
 is how you unpin.
 
+**Starting an agent as something.** Under the harnesses, the picker lists role
+presets: one for each template prompt that carries a role (the built-in
+`coordinator`, `worker`, `loop` and `watch`, and any of yours), then one for
+each `[[roles]]` block. Enter on `coordinator  claude → lead  ✎` starts claude,
+tags it `lead`, and pastes the coordinator prompt once it has drawn its first
+screen. `tab` moves the highlighted preset to the next harness. Presets can't
+be pinned; `d` pins harnesses only. See [`[[prompts]]` and
+`[[roles]]`](configuration.md#prompts).
+
 **The picker is ordered by what you start.** Most-picked first (`[general]
 agent_order`, see [configuration](configuration.md#general)), with the pinned
 agent first of all and marked `★`. On a terminal at least 60 columns by 16 rows a

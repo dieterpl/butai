@@ -137,16 +137,28 @@ pub struct AgentDto {
 /// Where a chat can have been started from, as [`AgentDto::origin`] names it.
 pub const AGENT_ORIGINS: [&str; 4] = ["cli", "tui", "web", "agent"];
 
-/// The roles a chat can be given, in the order a picker lists them.
+/// The built-in roles, in the order a picker lists them. A role can also be a
+/// word a person defined (a `[[roles]]` block in the client's config): any
+/// lowercase `[a-z0-9_-]` word of at most [`MAX_LABEL_LEN`] characters, so these
+/// four are the ones every client knows how to colour, not the only ones the
+/// daemon accepts.
 pub const AGENT_ROLES: [&str; 4] = ["lead", "worker", "loop", "watch"];
 
 /// The most labels one chat carries, and the longest one may be.
 pub const MAX_LABELS: usize = 8;
 pub const MAX_LABEL_LEN: usize = 24;
 
+/// Whether `r` can be a role: a built-in or a user-defined word.
+pub fn is_role_word(r: &str) -> bool {
+    !r.is_empty()
+        && r.len() <= MAX_LABEL_LEN
+        && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
 /// Check and tidy a role and a label list as a person typed them.
 ///
-/// The role must be one of [`AGENT_ROLES`] or absent. Labels are lowercased and
+/// The role must be one of [`AGENT_ROLES`], a user-defined role word (lowercase
+/// `[a-z0-9_-]`, at most [`MAX_LABEL_LEN`] characters), or absent. Labels are lowercased and
 /// trimmed of a leading `#`, must be non-empty `[a-z0-9_-]` words of at most
 /// [`MAX_LABEL_LEN`] characters, and repeat nothing; there are at most
 /// [`MAX_LABELS`]. The first problem is returned as the message to show.
@@ -160,9 +172,12 @@ pub fn normalize_tags(
 ) -> Result<(Option<String>, Vec<String>), String> {
     let role = match role.map(str::trim).filter(|r| !r.is_empty()) {
         None => None,
-        Some(r) if AGENT_ROLES.contains(&r) => Some(r.to_string()),
+        Some(r) if is_role_word(r) => Some(r.to_string()),
         Some(r) => {
-            return Err(format!("unknown role {r:?}; expected one of {}", AGENT_ROLES.join(", ")))
+            return Err(format!(
+                "bad role {r:?}; use {} or a lowercase word of up to {MAX_LABEL_LEN} letters, digits, - or _",
+                AGENT_ROLES.join(", ")
+            ))
         }
     };
     let mut out: Vec<String> = Vec::new();
@@ -2012,13 +2027,16 @@ mod tests {
     }
 
     #[test]
-    fn a_role_is_one_of_the_four_or_nothing() {
+    fn a_role_is_a_builtin_a_user_word_or_nothing() {
         for r in AGENT_ROLES {
             assert_eq!(normalize_tags(Some(r), &[]).unwrap().0.as_deref(), Some(r));
         }
         assert_eq!(normalize_tags(None, &[]).unwrap().0, None);
         assert_eq!(normalize_tags(Some("  "), &[]).unwrap().0, None, "blank is no role");
-        assert!(normalize_tags(Some("boss"), &[]).is_err());
+        // A `[[roles]]` block's name is a role too.
+        assert_eq!(normalize_tags(Some("reviewer"), &[]).unwrap().0.as_deref(), Some("reviewer"));
+        assert!(normalize_tags(Some("has space"), &[]).is_err());
+        assert!(normalize_tags(Some(&"x".repeat(MAX_LABEL_LEN + 1)), &[]).is_err());
         assert!(normalize_tags(Some("Lead"), &[]).is_err(), "roles are lowercase words");
     }
 

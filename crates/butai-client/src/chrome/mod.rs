@@ -3178,6 +3178,9 @@ pub struct View {
     /// The template prompts from `[[prompts]]`, in file order. On the view so
     /// the picker can be opened and answered without a trip through the loop.
     pub prompts: Vec<crate::config::PromptTemplate>,
+    /// `[[roles]]`: roles of your own, which the agent picker lists as presets
+    /// beside the prompts that carry a role.
+    pub roles: Vec<crate::roles::RoleDef>,
 }
 
 impl Default for View {
@@ -3237,6 +3240,7 @@ impl Default for View {
             // first telemetry and the rail grows into it.
             gauges: vec![Gauge::Cpu, Gauge::Ram],
             prompts: Vec::new(),
+            roles: Vec::new(),
         }
     }
 }
@@ -4696,13 +4700,28 @@ fn put_tags(
     }
 }
 
+/// The most cells a role's chip spends on a row, padding aside. Every built-in
+/// fits; a `[[roles]]` word up to 24 long is cut with `…`, so a nested row
+/// keeps room for its title.
+const ROLE_CELLS: usize = 8;
+
+/// A role as a row draws it: whole if it fits [`ROLE_CELLS`], else cut.
+fn short_role(r: &str) -> String {
+    if r.chars().count() <= ROLE_CELLS {
+        return r.to_string();
+    }
+    let mut s: String = r.chars().take(ROLE_CELLS - 1).collect();
+    s.push('…');
+    s
+}
+
 /// A chat's role, labels and origin as fleet-row runs, at most `room` cells.
 /// The role carries a cell of padding each side, which is its chip.
 ///
 /// Gives way in a fixed order as the column narrows: every label, then a count
 /// of them, then the origin, then the count, then the role.
 fn fleet_tags(agent: &AgentDto, room: usize) -> Vec<(String, TagInk)> {
-    let role = agent.role.clone().map(|r| (format!(" {r} "), TagInk::Role));
+    let role = agent.role.as_deref().map(|r| (format!(" {} ", short_role(r)), TagInk::Role));
     let origin = agent.origin.clone().map(|o| (o, TagInk::Origin));
     let labels: Vec<_> = agent.labels.iter().map(|l| (format!("#{l}"), TagInk::Label)).collect();
     let count =
@@ -11862,6 +11881,12 @@ mod tests {
         }
         // An untagged chat from an older client draws nothing at all.
         assert!(fleet_tags(&agent(2, "codex", AgentState::Idle), 40).is_empty());
+        // A role of your own is cut to a short chip; a built-in never is.
+        let mut long = agent(3, "claude", AgentState::Idle);
+        long.role = Some("release-coordinator".into());
+        assert_eq!(fleet_tags(&long, 40)[0].0, " release… ");
+        long.role = Some("worker".into());
+        assert_eq!(fleet_tags(&long, 40)[0].0, " worker ");
         // The runs say what they are, so the row can colour them.
         let kinds: Vec<TagInk> = fleet_tags(&a, 40).into_iter().map(|(_, k)| k).collect();
         assert_eq!(kinds, [TagInk::Role, TagInk::Label, TagInk::Label, TagInk::Origin]);
@@ -14654,6 +14679,7 @@ index 1111111..2222222 100644
         let p = |name: &str, text: &str| crate::config::PromptTemplate {
             name: name.into(),
             text: text.into(),
+            ..Default::default()
         };
         vec![
             p("review this diff", "Review the staged diff for bugs, risky changes and missing tests."),

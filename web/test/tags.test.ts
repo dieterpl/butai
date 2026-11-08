@@ -12,9 +12,10 @@ import {
 } from "../src/logic/tags.ts";
 
 describe("roles", () => {
-  test("only the four known words are roles", () => {
+  test("a role is a built-in or a word of your own", () => {
     expect(roleOf({ role: "lead" })).toBe("lead");
-    expect(roleOf({ role: "boss" })).toBeNull();
+    expect(roleOf({ role: "reviewer" })).toBe("reviewer");
+    expect(roleOf({ role: "Has Space" })).toBeNull();
     expect(roleOf({ role: null })).toBeNull();
     expect(roleOf({})).toBeNull();
   });

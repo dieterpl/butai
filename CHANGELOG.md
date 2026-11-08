@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.18: start an agent as something, and roles of your own.** The
+  agent picker (`alt-enter`, `a`) now lists role presets under the harnesses.
+  Each one starts a harness, tags its role and labels, and pastes a prompt once
+  the agent has drawn: `coordinator  claude → lead` starts a lead that hands
+  each request to worker agents. `tab` moves a preset to the next harness.
+  Four template prompts are now built in, one per built-in role: `coordinator`,
+  `worker`, `loop` and `watch`. A `[[prompts]]` block with the same name
+  replaces one, and deleting one in the `[prompts]` picker writes
+  `hidden = true`. Prompts take an optional `role`, and `[[roles]]` blocks (a
+  name, plus an optional `agent`, `prompt` and `labels`) add roles of your own.
+  The daemon now accepts any lowercase role word of up to 24 letters, digits,
+  `-` or `_`, so `butai agent tag 7 --role reviewer` works. The four built-ins
+  are unchanged. The terminal's tag menu no longer drops a custom role when you
+  toggle a label, and the browser now shows a custom role instead of nothing.
+  AGENTS and BOOTH rows cut a role longer than 8 cells to `release…`, so nested
+  rows still fit.
 - **1.5.0-dev.17: the workbench remembers its layout.** The borders you drag
   on BOOTH (FLEET and COMPUTE) and on the DOCKER and GIT pages (the list
   column) now come back at the same width after a restart or a reattach, as

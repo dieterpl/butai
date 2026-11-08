@@ -42,7 +42,7 @@ import {
   type SpaceRow,
 } from "@/logic/fleet.ts";
 import type { TermTheme } from "@/logic/palette.ts";
-import { ROLE_TONE, knownLabels, labelsOf, roleOf, toggleLabel, type Tags } from "@/logic/tags.ts";
+import { roleTone, knownLabels, labelsOf, roleOf, toggleLabel, type Tags } from "@/logic/tags.ts";
 import { homeVerbs } from "@/logic/verbs.ts";
 
 import { MARK_TONE, SCROLLER, agentMark, hints, loadTone, num, sysGauges } from "./parts.ts";
@@ -152,7 +152,7 @@ function TagWords({ agent }: { agent: { role?: string | null | undefined; labels
       {labels.map((l) => (
         <span key={l} className="shrink-0 text-dim">#{l}</span>
       ))}
-      {role ? <span className={cn("shrink-0", ROLE_TONE[role])}>{role}</span> : null}
+      {role ? <span className={cn("shrink-0", roleTone(role))}>{role}</span> : null}
     </span>
   );
 }

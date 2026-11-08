@@ -390,7 +390,7 @@ has no verb for it.
 | `--prompt <TEXT>` | string | none | send this prompt once the agent is up |
 | `--wait` | bool | off | with `--prompt`, block until the agent finishes it |
 | `--timeout <MS>` | u64 | `300000` | give up after this many milliseconds when waiting |
-| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` | none | give the new agent this role |
+| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` \| a word of your own | none | give the new agent this role |
 | `--label <LABEL>` | string, repeatable or comma-separated | none | give the new agent these labels |
 
 `<KIND>` is an agent type as configured under `[[agents]]` — see
@@ -461,7 +461,7 @@ A target that names no pane is exit 2.
 
 | flag | type | default | effect |
 |---|---|---|---|
-| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` | none | set the role |
+| `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` \| a word of your own | none | set the role |
 | `--no-role` | bool | off | take the role off |
 | `--label <LABEL>` | string, repeatable or comma-separated | none | add a label |
 | `--unlabel <LABEL>` | string, repeatable or comma-separated | none | take a label off |

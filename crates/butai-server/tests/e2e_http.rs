@@ -762,12 +762,18 @@ async fn http_api_tags_an_agent() {
     assert!(body.contains("\"labels\":[\"review\",\"bug\"]"), "tidied, in order: {body}");
 
     // Refused values leave the tags alone.
-    let (status, _) = http(&socket, "PUT", &route, Some(r#"{"role":"boss"}"#)).await;
+    let (status, _) = http(&socket, "PUT", &route, Some(r#"{"role":"Two Words"}"#)).await;
     assert_eq!(status, 400);
     let (status, _) = http(&socket, "PUT", &route, Some(r#"{"labels":["two words"]}"#)).await;
     assert_eq!(status, 400);
     let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
     assert!(body.contains("\"role\":\"lead\""), "a refused write changed nothing: {body}");
+
+    // A role of your own (a `[[roles]]` block's name) is a role too.
+    let (status, body) = http(&socket, "PUT", &route, Some(r#"{"role":"reviewer"}"#)).await;
+    assert_eq!(status, 200, "body: {body}");
+    let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+    assert!(body.contains("\"role\":\"reviewer\""), "body: {body}");
 
     // Sending nothing clears both.
     let (status, _) = http(&socket, "PUT", &route, Some("{}")).await;

@@ -269,7 +269,8 @@ no value a toggle could report while an ssh is still landing.
 
 **Overlays** — `j` `k` move · `enter` choose · `esc` or `q` dismiss · `y` / `n`
 answer a confirmation. In the agent picker, `d` pins the highlighted agent as
-what `a` spawns. In the link picker, `y` copies the highlighted URL instead of
+what `a` spawns, and `tab` on a role preset (`coordinator  claude → lead`)
+changes which harness it starts. In the link picker, `y` copies the highlighted URL instead of
 opening it — which is the one that works from an ssh session with no browser on
 it, and what `enter` falls back to there.
 

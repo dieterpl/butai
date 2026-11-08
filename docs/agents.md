@@ -91,7 +91,9 @@ butai agent tag 7 --label blocked           # adds; keeps the others
 butai agent tag 7                           # pane 7 worker #review #blocked (agent)
 ```
 
-A role and labels are what a person sees on the agent's row in the terminal and
+A role is `lead`, `worker`, `loop`, `watch`, or a word of your own (lowercase
+letters, digits, `-` and `_`, up to 24); see
+[`[[roles]]`](configuration.md#roles). A role and labels are what a person sees on the agent's row in the terminal and
 the browser, so an orchestrating agent can mark its helpers the same way a
 person would from the right-click menu. An agent spawned from inside a pane is
 recorded as started by `agent`; the same command typed in a shell says `cli`.

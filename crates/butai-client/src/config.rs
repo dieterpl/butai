@@ -87,9 +87,13 @@ pub struct Config {
     /// text = "Review the staged diff for bugs and risky changes."
     /// ```
     ///
-    /// Nothing is seeded: an empty list is a picker with one row, the one that
-    /// saves a new prompt.
+    /// These are only the file's own blocks. The built-ins (`coordinator`,
+    /// `worker`, `loop`, `watch`) are merged in by [`crate::roles::prompts`]: a
+    /// block with a built-in's name replaces it, and `hidden = true` hides it.
     pub prompts: Vec<PromptTemplate>,
+    /// `[[roles]]`: roles of your own, listed in the spawn picker beside the
+    /// built-ins. See [`crate::roles::RoleDef`].
+    pub roles: Vec<crate::roles::RoleDef>,
 }
 
 /// `[booth]`.
@@ -108,6 +112,11 @@ pub struct BoothConfig {
 pub struct PromptTemplate {
     pub name: String,
     pub text: String,
+    /// The role an agent started with this prompt is given. Unset on a block
+    /// that replaces a built-in keeps the built-in's role.
+    pub role: Option<String>,
+    /// Hide the built-in prompt of this name. What deleting one writes.
+    pub hidden: bool,
 }
 
 /// One `[[remote]]` block.
@@ -781,6 +790,7 @@ impl Config {
             let prompts = array_of_tables(doc, "prompts");
             if let Some(t) = prompts.iter_mut().find(|t| str_at(t, "name") == Some(name)) {
                 t["text"] = toml_edit::value(text);
+                t.remove("hidden");
                 return;
             }
             let mut t = toml_edit::Table::new();
@@ -813,12 +823,23 @@ impl Config {
     }
 
     /// [`forget_prompt`](Self::forget_prompt) against an explicit path (tests).
+    ///
+    /// A built-in's name is not dropped but hidden: its block becomes
+    /// `hidden = true`, since without a block the built-in would come back.
     pub fn forget_prompt_at(path: &Path, name: &str) -> std::io::Result<()> {
-        if !Self::load_from(path).0.prompts.iter().any(|p| p.name == name) {
+        let builtin = crate::roles::is_builtin_prompt(name);
+        if !builtin && !Self::load_from(path).0.prompts.iter().any(|p| p.name == name) {
             return Ok(());
         }
         edit_config(path, |doc| {
-            array_of_tables(doc, "prompts").retain(|t| str_at(t, "name") != Some(name));
+            let prompts = array_of_tables(doc, "prompts");
+            prompts.retain(|t| str_at(t, "name") != Some(name));
+            if builtin {
+                let mut t = toml_edit::Table::new();
+                t["name"] = toml_edit::value(name);
+                t["hidden"] = toml_edit::value(true);
+                prompts.push(t);
+            }
         })
     }
 
@@ -1261,8 +1282,16 @@ mod tests {
         assert_eq!(
             cfg.prompts,
             vec![
-                PromptTemplate { name: "review".into(), text: "Review the staged diff.".into() },
-                PromptTemplate { name: "tests".into(), text: "Write tests for:".into() },
+                PromptTemplate {
+                    name: "review".into(),
+                    text: "Review the staged diff.".into(),
+                    ..Default::default()
+                },
+                PromptTemplate {
+                    name: "tests".into(),
+                    text: "Write tests for:".into(),
+                    ..Default::default()
+                },
             ]
         );
 
@@ -1272,6 +1301,19 @@ mod tests {
         assert_eq!(cfg.prompts[0].name, "tests");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# mine") && text.contains("C-a"), "{text}");
+
+        // A built-in has no block to drop, so forgetting one writes a hidden
+        // block, and saving the name again brings it back as your text.
+        Config::forget_prompt_at(&path, "watch").unwrap();
+        let cfg = Config::load_from(&path).0;
+        assert!(crate::roles::prompts(&cfg.prompts).iter().all(|p| p.name != "watch"));
+        Config::save_prompt_at(&path, "watch", "Watch the build.").unwrap();
+        let all = crate::roles::prompts(&Config::load_from(&path).0.prompts);
+        let watch = all.iter().find(|p| p.name == "watch").expect("unhidden");
+        assert_eq!(
+            (watch.text.as_str(), watch.role.as_deref()),
+            ("Watch the build.", Some("watch"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

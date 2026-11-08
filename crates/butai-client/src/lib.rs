@@ -18,6 +18,7 @@ pub mod keys;
 pub mod layout;
 pub mod links;
 pub mod reference;
+pub mod roles;
 pub mod scroll;
 pub mod selection;
 pub mod ssh;
