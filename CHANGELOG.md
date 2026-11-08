@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.12: one installer per track.** The mirror now also serves
+  `install-dev.sh` and `install-stable.sh`:
+  `curl -fsSL https://dieterpl.github.io/butai/install-dev.sh | sh` installs the
+  newest dev build over the butai you have, restarts its daemon with your
+  workspaces kept, and sets `[update] channel = "dev"` so butai offers the next
+  dev build itself. Running it again updates. `install-stable.sh` does the same
+  for stable releases, and is the way back from dev. Both are `install.sh` with
+  its new `BUTAI_SET_CHANNEL=1` and the channel preset, generated when the
+  mirror is built.
 - **1.5.0-dev.11: a mirror of the releases on GitHub Pages.** Since about
   5 November 2026, GitHub has been answering most anonymous release downloads
   and API requests with a 504, everywhere, so installs and updates failed
@@ -165,6 +174,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.12: the dev installer takes the newest dev build.**
+  `BUTAI_CHANNEL=dev` took the first prerelease in GitHub's list, and that list
+  isn't in date order: it put 1.5.0-dev.9 ahead of 1.5.0-dev.11, so the
+  installer installed the older build. It now sorts by publish date, and so
+  does the mirror when it picks the releases to keep.
 - **1.5.0-dev.11: installs and updates get through GitHub's 504s.**
   `install.sh`, `install.ps1` and `butai update` now try each file at GitHub's
   link, then the mirror, then the API's own link, retrying what a retry might

@@ -79,12 +79,17 @@ against the release's `SHA256SUMS`, and drops `butai` in `/usr/local/bin` or
 **When GitHub's download links fail**, the same files are on
 **[the mirror](https://dieterpl.github.io/butai/)**, served by GitHub Pages:
 every recent release, each file checked against GitHub's own checksum before it
-was put there. The installer and `butai update` already fall back to it. The
-installer itself is there too:
+was put there. The installer and `butai update` already fall back to it. It
+also serves one installer per track:
 
 ```sh
-curl -fsSL https://dieterpl.github.io/butai/install.sh | sh
+curl -fsSL https://dieterpl.github.io/butai/install-stable.sh | sh   # stable releases
+curl -fsSL https://dieterpl.github.io/butai/install-dev.sh | sh      # dev builds
 ```
+
+Either one installs over the butai you have, restarts its daemon with your
+workspaces kept, and sets `[update] channel` so butai keeps itself on that
+track. Run it again to update; `install-stable.sh` is also the way back from dev.
 
 **You only run that once.** After the first install butai keeps itself current:
 when a newer release exists it asks, once, and `yes` swaps the binary and

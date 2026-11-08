@@ -237,6 +237,12 @@ jobs:
               echo "curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/scripts/install.sh | BUTAI_VERSION=$GITHUB_REF_NAME sh"
               echo "\`\`\`"
               echo
+              echo "Or follow the dev track from now on — installs the newest dev build and sets \`[update] channel = \"dev\"\`; run it again to update:"
+              echo
+              echo "\`\`\`sh"
+              echo "curl -fsSL $mirror/install-dev.sh | sh"
+              echo "\`\`\`"
+              echo
               echo "Checksums are in \`SHA256SUMS\`; the installer verifies them."
               echo
               echo "If a download link here fails, the same files are on the mirror: $mirror/#$GITHUB_REF_NAME"

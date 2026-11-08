@@ -746,8 +746,10 @@ installer and updater is anonymous. Pages is a different front end. The script
 downloads the newest five dev and three stable releases through `gh` (signed
 in), refuses any file that does not match GitHub's recorded digest and the
 release's `SHA256SUMS`, and writes `<tag>/<file>`, a `releases.json` shaped like
-the API's answer, `latest` and `latest-dev`, both installers and an
-`index.html`. Pages deploys whole sites, so every run rebuilds it from what is
+the API's answer, `latest` and `latest-dev`, both installers, an
+`index.html`, and `install-dev.sh` and `install-stable.sh`: `install.sh` with
+its channel default and `BUTAI_SET_CHANNEL=1` baked in, generated with `sed` and
+checked, so a person picks a track by picking a URL. Pages deploys whole sites, so every run rebuilds it from what is
 published; dispatching `mirror.yml` by hand refills it. The `github-pages`
 environment has to allow `v*` tags to deploy, since a tag push is what runs it.
 
@@ -767,7 +769,13 @@ environment has to allow `v*` tags to deploy, since a tag push is what runs it.
 - The tarball must contain an executable named `butai` somewhere inside it.
 
 When the API does not answer the version lookup either, the mirror's `latest`
-or `latest-dev` names the tag.
+or `latest-dev` names the tag. The dev lookup sorts the API's list by
+`published_at` itself, because GitHub does not answer it in date order.
+
+`BUTAI_SET_CHANNEL=1` also writes `[update] channel = "<track>"` into the
+config of the butai being installed (`$BUTAI_HOME/config.toml`, else
+`~/.butai/config.toml`): straight under an existing `[update]` header, replacing
+the channel there, or as a new table at the end, with every other line kept.
 
 It maps `uname` to a triple, prefers the musl build wherever `ldd --version`
 reports musl, honours `BUTAI_VERSION` and `BUTAI_INSTALL_DIR`, installs to

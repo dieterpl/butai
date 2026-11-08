@@ -25,6 +25,15 @@
 #   BUTAI_CHANNEL=dev        take the newest prerelease off the dev track
 #   BUTAI_INSTALL_DIR=~/bin  install somewhere other than the default
 #   BUTAI_NO_RESTART=1       install the binary and leave the daemon alone
+#   BUTAI_SET_CHANNEL=1      also write the channel into the config, so the
+#                            installed butai updates itself along that track
+#
+# The mirror serves this script twice more with those two set, so neither needs
+# typing: `install-dev.sh` (the dev track, kept) and `install-stable.sh` (the
+# stable track, kept — the way back from dev). Run either again to update.
+#
+#   curl -fsSL https://dieterpl.github.io/butai/install-dev.sh | sh
+#   curl -fsSL https://dieterpl.github.io/butai/install-stable.sh | sh
 #
 # The two channels are two sets of tags. A version with a `-` in it — `1.3.0-dev.1`
 # — is cut from `develop` and published as a GitHub prerelease, which is kept out
@@ -135,6 +144,7 @@ fi
 
 # ── which version? ───────────────────────────────────────────────────────
 channel="${BUTAI_CHANNEL:-stable}"
+set_channel="${BUTAI_SET_CHANNEL:-}"
 case "$channel" in
     stable|dev) ;;
     *) err "BUTAI_CHANNEL is \`stable\` or \`dev\`, not \`$channel\`" ;;
@@ -158,11 +168,16 @@ elif [ "$channel" = dev ]; then
     # fall between the tag and the flags that describe it. It also survives the
     # compact shape, since flattening one is a no-op.
     #
-    # Newest *published*, not highest version — the list is in publish order,
-    # and comparing versions is not something to write in `sed`. A stable patch
-    # cut after a dev tag is the case where the two differ, and `BUTAI_VERSION`
-    # is the way to say exactly which one you meant. The installed butai then
-    # keeps itself current with the real comparison; see `crates/butai-update`.
+    # Newest *published*, not highest version — comparing versions is not
+    # something to write in `sed`. A stable patch cut after a dev tag is the
+    # case where the two differ, and `BUTAI_VERSION` is the way to say exactly
+    # which one you meant. The installed butai then keeps itself current with
+    # the real comparison; see `crates/butai-update`.
+    #
+    # **Sorted here, by `published_at`**, because the list is not in date
+    # order: GitHub answered `v1.5.0-dev.9` ahead of `v1.5.0-dev.11`, published
+    # ten hours later, and taking the first entry installed the older build.
+    # ISO dates sort as text, and the date sits in the same chunk as its tag.
     #
     # When the API does not answer at all, the mirror names its newest dev tag.
     version=$( (fetch_so "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null || true) \
@@ -170,8 +185,10 @@ elif [ "$channel" = dev ]; then
         | tr '{' '\n' \
         | grep '"prerelease":true' \
         | grep -v '"draft":true' \
-        | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' \
-        | head -n 1)
+        | sed -n 's/.*"tag_name":"\([^"]*\)".*"published_at":"\([^"]*\)".*/\2 \1/p' \
+        | sort -r \
+        | head -n 1 \
+        | cut -d' ' -f2)
     [ -n "$version" ] || version=$(fetch_so "$MIRROR/latest-dev" 2>/dev/null | head -n 1 || true)
     [ -n "$version" ] || err "could not find a dev release on GitHub or its mirror — set BUTAI_VERSION=vX.Y.Z-dev.N and retry"
 else
@@ -369,7 +386,39 @@ if [ "$had_one" -eq 1 ] && [ -S "$sock" ] && [ -z "${BUTAI_NO_RESTART:-}" ]; the
     fi
 fi
 
-if [ "$channel" = dev ]; then
+# ── keep it on its track ─────────────────────────────────────────────────
+#
+# Which config is the one belonging to the butai this will run as: `BUTAI_HOME`'s
+# when this shell sets one — a second butai, beside your own — else
+# `~/.butai`'s, the order `crates/butai-protocol`'s `paths.rs` resolves it in.
+if [ -n "${BUTAI_HOME:-}" ]; then
+    cfg="$BUTAI_HOME/config.toml"
+else
+    cfg="$HOME/.butai/config.toml"
+fi
+
+# `[update] channel = "<track>"`, changing nothing else in the file: the line
+# goes straight under an existing `[update]` header, replacing any channel the
+# table had, or the table is appended. A plain rewrite of the lines, since the
+# config is hand-edited TOML and `sed -i` does not work the same way on macOS.
+write_channel() {
+    mkdir -p "$(dirname "$cfg")"
+    [ -f "$cfg" ] || : > "$cfg"
+    awk -v want="channel = \"$1\"" '
+        /^[[:space:]]*\[/ { in_update = ($0 ~ /^[[:space:]]*\[update\][[:space:]]*(#.*)?$/) }
+        in_update && /^[[:space:]]*channel[[:space:]]*=/ { next }
+        { print }
+        in_update && /^[[:space:]]*\[/ && !seen { print want; seen = 1 }
+        END { if (!seen) { print ""; print "[update]"; print want } }
+    ' "$cfg" > "$cfg.butai-install" && mv "$cfg.butai-install" "$cfg"
+}
+
+if [ -n "$set_channel" ]; then
+    write_channel "$channel"
+    say ""
+    say "this butai now follows the $channel track: [update] channel = \"$channel\" in $cfg"
+    say "It offers new $channel builds itself, and running this script again updates it."
+elif [ "$channel" = dev ]; then
     # Which config, and the answer is not this shell's `BUTAI_HOME`. A dev build
     # is usually installed to a directory of its own and *launched* with one, so
     # the file that governs it is the one belonging to the butai it will be —
@@ -391,7 +440,8 @@ if [ "$channel" = dev ]; then
     fi
     say ""
     say "Without it, this build follows the stable track and sits quiet until"
-    say "stable overtakes it."
+    say "stable overtakes it. BUTAI_SET_CHANNEL=1, or install-dev.sh from the"
+    say "mirror, writes it for you."
 fi
 
 case ":$PATH:" in
