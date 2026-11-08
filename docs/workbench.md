@@ -628,6 +628,15 @@ parsing that program's output and is the only thing that can decide, so it drops
 what was not wanted. The wheel over the stage is scrollback; over a rail it moves
 that rail's cursor without taking focus, because you are looking, not choosing.
 
+**Scrolling speeds up.** A held `j`/`k` and a fast wheel spin both go further per
+step the longer the run lasts, and a pause or a change of direction starts over
+at one row — see [keys.md](keys.md#the-rule) for the numbers.
+A terminal reports a held key as the same press repeated and a spin as notches
+arriving close together, with no release in either case, so the only signal is
+time: steps closer than a gap (120ms for keys, 80ms for the wheel) are one run,
+and the run's age picks the step. The wheel over text also moves three lines a
+notch rather than one. Both live in `crates/butai-client/src/scroll.rs`.
+
 **Selection.** Dragging paints a selection over the *composed screen*, not over a
 pane, so it copies whatever is under it — a rail's rows, a diff, a file. The drag
 is confined to the region it began in, so straying into a neighbouring column
@@ -867,6 +876,18 @@ the cursor in view, so walking back up moves the cursor and not the list.
 `pgdn` `pgup` move a page and `home` `end` go to the ends. The wheel scrolls the
 list three rows a notch without moving the cursor, so the stage keeps the agent
 it had; the next key that moves the cursor brings the list back to it.
+
+**The stage waits for the cursor to stop.** BOOTH's stage follows the fleet
+cursor, so holding `j` used to open a stream for every agent on the way — and
+for an agent on another machine, a fresh connection. Now a change of agent that
+comes within `[ui] stage_settle_ms` (default 120ms) of the last one waits until
+the cursor has rested that long, and only then loads the row it rested on. The
+first change after a quiet spell goes through at once, so a single `j` is as
+quick as it was. Anything that hands the preview the keyboard — `tab`, a click
+on an agent — loads immediately, so keys typed there reach the agent under the
+cursor rather than the one before it. For that brief wait the stage still shows
+the previous agent. The rest of the workbench never waits: elsewhere the stage
+only changes because you asked for a pane. `0` turns the wait off.
 
 **The scrollbar is a map of the whole list.** When the fleet is longer than its
 column, the FLEET box's right border becomes a scrollbar with one cell per slice

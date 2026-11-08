@@ -31,6 +31,17 @@ columns in 26.
 Two gestures are the pointer's alone, deliberately: **dragging to select text**
 and **the wheel**. Neither stands for a verb, so neither has a key.
 
+**Held keys and fast wheels go further.** A held `j`/`k` (or arrow) moves one
+row at a time for the first quarter second of auto-repeat, then one row more per
+step every 120ms, up to eight a step. Let go, pause, or turn round, and it is one
+row again — so tapping stays exact. The wheel is one row a notch over a list and
+three lines a notch over text (HELP, a diff, an open file, a commit), and a
+spin — notches under 80ms apart — ramps to six times that within about a third
+of a second. This applies to the rails, BOOTH's fleet, FILES/DOCS, GIT, DIFF,
+HELP and Docker; line-select mode, SETTINGS and the overlays stay a row a step,
+and the wheel over the stage is still the daemon's scrollback. The curves are
+`KEY_CURVE` and `WHEEL_CURVE` in `crates/butai-client/src/scroll.rs`.
+
 ## The two layers
 
 The same set on the same letters, reaching the workbench from anywhere.
@@ -220,6 +231,11 @@ of a project and the next machine show before you reach them. The wheel over the
 list scrolls it three rows a notch and leaves the cursor, and the agent on the
 stage, where they were; the next key that moves the cursor brings the list back
 to it. A click never scrolls the list.
+
+Holding `j` or `k` here does not load every agent it passes. The stage waits for
+the cursor to rest for 120ms (`[ui] stage_settle_ms`) and then shows the row it
+stopped on; a single step, `enter`, a click, or `tab` to the preview still shows
+its agent at once.
 
 **FILES / DOCS** — `j` `k` move · `←` `h` up a level · `→` `l` into · `space`
 peek · `enter` open · `backspace` up · `/` find · `e` edit · `C-s` save · `esc`

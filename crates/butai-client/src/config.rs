@@ -283,6 +283,17 @@ pub struct UiConfig {
     /// and the picker (`alt-f`) keeps working either way, because it never
     /// leaves this client.
     pub links: bool,
+    /// How long, in milliseconds, BOOTH's fleet cursor rests on a row before
+    /// the stage loads that agent. Moving faster than this loads only where
+    /// you stop. `0` loads every row on the way, as before.
+    pub stage_settle_ms: u64,
+}
+
+impl UiConfig {
+    /// [`Self::stage_settle_ms`] as the delay [`crate::scroll::Settle`] takes.
+    pub fn stage_settle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.stage_settle_ms)
+    }
 }
 
 impl Default for UiConfig {
@@ -296,6 +307,7 @@ impl Default for UiConfig {
             net: NetSelect::default(),
             disks: DiskSelect::default(),
             links: true,
+            stage_settle_ms: crate::scroll::STAGE_SETTLE.as_millis() as u64,
         }
     }
 }
@@ -1119,6 +1131,16 @@ mod tests {
         assert_eq!(cfg3.ui.left_rail, Some(24));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `[ui] stage_settle_ms` defaults to the built-in delay, and `0` is a real
+    /// value — load every row the fleet cursor passes, as before it existed.
+    #[test]
+    fn the_stage_settle_defaults_and_can_be_turned_off() {
+        let parse = |s: &str| toml::from_str::<UiConfig>(s).unwrap().stage_settle();
+        assert_eq!(parse(""), crate::scroll::STAGE_SETTLE);
+        assert_eq!(parse("stage_settle_ms = 250"), std::time::Duration::from_millis(250));
+        assert_eq!(parse("stage_settle_ms = 0"), std::time::Duration::ZERO);
     }
 
     /// `[ui] net` takes a word or a list, and the untagged enum has to tell them

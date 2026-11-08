@@ -3070,6 +3070,11 @@ pub struct View {
     /// and marks it while BOOTH is up, without leaving BOOTH.
     pub booth_tab: Option<usize>,
     pub(crate) fleet_clicks: crate::hit::FleetClicks,
+    /// How fast a held `j`/`k` is going, and how fast the wheel is spinning —
+    /// see [`crate::scroll`]. Two, because they are two gestures: a spin
+    /// that ends as a key is pressed should not hand the key its speed.
+    pub(crate) key_scroll: crate::scroll::Momentum,
+    pub(crate) wheel_scroll: crate::scroll::Momentum,
     /// BOOTH's key card is up: [`FLEET_KEYS_LABEL`] or `?` on the fleet.
     pub booth_keys: bool,
     pub zen: bool,
@@ -3193,6 +3198,8 @@ impl Default for View {
             tab_order: Vec::new(),
             booth_tab: None,
             fleet_clicks: crate::hit::FleetClicks::default(),
+            key_scroll: crate::scroll::Momentum::default(),
+            wheel_scroll: crate::scroll::Momentum::default(),
             booth_keys: false,
             zen: false,
 

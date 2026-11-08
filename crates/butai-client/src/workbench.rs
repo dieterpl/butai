@@ -570,6 +570,9 @@ pub async fn run(
     let mut input = spawn_raw_input();
 
     let mut stage: Option<Stage> = None;
+    // Which pane the stage shows, held back while BOOTH's fleet cursor is still
+    // moving — see `stage_follows_cursor`.
+    let mut stage_settle = crate::scroll::Settle::new(None, config.ui.stage_settle());
     let mut files = Files::default();
     // The Docs page is the same widget over a filtered listing, so it is the
     // same type with its own cursor and its own open buffer: switching spaces
@@ -884,7 +887,12 @@ pub async fn run(
             let rect = chrome::stage_rect(cols, rows, &view);
             // Follow the stage. `watch` is what makes this cost no reconnect —
             // switching panes is a message, not a redial.
-            match (current_stage(&daemons, &hosts, &view, &docker), stage.as_mut()) {
+            //
+            // Through the settle, so that holding `j` down BOOTH's fleet does
+            // not open — and on another machine, redial — every agent it passes.
+            let want = current_stage(&daemons, &hosts, &view, &docker);
+            let now_please = !stage_follows_cursor(&view);
+            match (stage_settle.offer(want, Instant::now(), now_please), stage.as_mut()) {
                 // Re-point only within the same daemon; a tab on another
                 // machine is a different socket, so that is a reconnect.
                 (Some((d, pane)), Some(s)) if s.daemon == d && s.lost.is_none() => {
@@ -951,11 +959,16 @@ pub async fn run(
             last_paint = Some(Instant::now());
         }
 
+        let settle_due = stage_settle.due();
         tokio::select! {
             // A paint that was held back wakes the loop when its window closes.
             _ = tokio::time::sleep_until(
                 tokio::time::Instant::from_std(last_paint.unwrap_or_else(Instant::now) + MIN_PAINT)
             ), if dirty => {}
+            // The fleet cursor has stopped: time to load what it stopped on.
+            _ = tokio::time::sleep_until(
+                tokio::time::Instant::from_std(settle_due.unwrap_or_else(Instant::now))
+            ), if settle_due.is_some() => dirty = true,
             ev = next_any_event(&mut daemons) => match ev {
                 // The stream task retries the socket for as long as the client
                 // runs, which is the whole answer when the far daemon merely
@@ -3367,6 +3380,19 @@ async fn browse_into(daemons: &[Daemon], hosts: &[Option<String>], view: &mut Vi
         Ok(overlay) => view.overlay = Some(overlay),
         Err(e) => view.flash = Some(format!("browse: {e:#}")),
     }
+}
+
+/// Whether the stage is following a cursor that may be moving, and so may wait
+/// for it to stop before loading what it lands on.
+///
+/// Only BOOTH's fleet: it is the one list whose cursor *is* the stage, so it is
+/// the one where walking a list opened a pane per row. Everywhere else the
+/// stage changes because you asked for a pane — Enter, a click, a tab — and
+/// that goes through at once. So does the fleet the moment it hands over the
+/// keyboard: once `tab` has given the preview the keys, they must reach the
+/// agent you are looking at, not the one from a row ago.
+fn stage_follows_cursor(view: &View) -> bool {
+    view.page == Page::Booth && view.focus == Focus::AllAgents
 }
 
 /// The daemon and pane the active tab has on its stage, if any.
@@ -6534,11 +6560,11 @@ fn handle_files_key(k: event::KeyEvent, view: &mut View, files: &mut Files) -> O
     };
     match k.code {
         event::KeyCode::Down | event::KeyCode::Char('j') if view.focus != Focus::Stage => {
-            files.move_sel(1);
+            files.move_sel(held(view, 1));
             Some(Flow::Continue)
         }
         event::KeyCode::Up | event::KeyCode::Char('k') if view.focus != Focus::Stage => {
-            files.move_sel(-1);
+            files.move_sel(held(view, -1));
             Some(Flow::Continue)
         }
         // From inside the file, `←` is still "back": it hands the keyboard to
@@ -6599,11 +6625,11 @@ fn handle_files_key(k: event::KeyEvent, view: &mut View, files: &mut Files) -> O
         // Scrolling the open file needs the cursor off the tree; the `j`/`k`
         // above belong to the listing.
         event::KeyCode::Down | event::KeyCode::Char('j') => {
-            files.open.as_mut()?.scroll_by(1);
+            files.open.as_mut()?.scroll_by(held(view, 1));
             Some(Flow::Continue)
         }
         event::KeyCode::Up | event::KeyCode::Char('k') => {
-            files.open.as_mut()?.scroll_by(-1);
+            files.open.as_mut()?.scroll_by(held(view, -1));
             Some(Flow::Continue)
         }
         // Closes the page, not the session — see the note on the diff page's
@@ -6917,8 +6943,8 @@ fn handle_git_key(
             {
                 body.step_line(-1)
             }
-            event::KeyCode::Char('j') | event::KeyCode::Down => body.scroll_by(1),
-            event::KeyCode::Char('k') | event::KeyCode::Up => body.scroll_by(-1),
+            event::KeyCode::Char('j') | event::KeyCode::Down => body.scroll_by(held(view, 1)),
+            event::KeyCode::Char('k') | event::KeyCode::Up => body.scroll_by(held(view, -1)),
             event::KeyCode::PageDown => body.scroll_by(rows.max(1) as isize),
             event::KeyCode::PageUp => body.scroll_by(-(rows.max(1) as isize)),
             // Hunk to hunk, across files. The keys the DIFF page uses, because
@@ -6978,8 +7004,8 @@ fn handle_git_key(
     // a constant that is wrong at every other terminal size.
     let page = rows.max(1) as isize;
     let step = match k.code {
-        event::KeyCode::Char('j') | event::KeyCode::Down => 1,
-        event::KeyCode::Char('k') | event::KeyCode::Up => -1,
+        event::KeyCode::Char('j') | event::KeyCode::Down => held(view, 1),
+        event::KeyCode::Char('k') | event::KeyCode::Up => held(view, -1),
         event::KeyCode::PageDown => page,
         event::KeyCode::PageUp => -page,
         // Home/End only. `g` is the git menu here — the footer says so on every
@@ -7450,8 +7476,8 @@ fn handle_help_key(
     let screen = (height as usize).saturating_sub(2).max(1);
 
     match k.code {
-        K::Down | K::Char('j') => st.scroll = (st.scroll + 1).min(max),
-        K::Up | K::Char('k') => st.scroll = st.scroll.saturating_sub(1),
+        K::Down | K::Char('j') => st.scroll = (st.scroll + held(view, 1) as usize).min(max),
+        K::Up | K::Char('k') => st.scroll = st.scroll.saturating_sub(-held(view, -1) as usize),
         K::PageDown | K::Char(' ') | K::Char('f') => st.scroll = (st.scroll + screen).min(max),
         K::PageUp | K::Char('b') => st.scroll = st.scroll.saturating_sub(screen),
         K::Home | K::Char('g') => st.scroll = 0,
@@ -7547,11 +7573,11 @@ fn handle_docker_key(
             Some(Flow::Continue)
         }
         event::KeyCode::Down | event::KeyCode::Char('j') => {
-            docker.move_sel(1, rows.len());
+            docker.move_sel(held(view, 1), rows.len());
             Some(Flow::Continue)
         }
         event::KeyCode::Up | event::KeyCode::Char('k') => {
-            docker.move_sel(-1, rows.len());
+            docker.move_sel(held(view, -1), rows.len());
             Some(Flow::Continue)
         }
         event::KeyCode::Enter => {
@@ -7668,11 +7694,11 @@ fn handle_diff_key(k: event::KeyEvent, view: &mut View, diff: &mut DiffView) -> 
             Some(Flow::Continue)
         }
         event::KeyCode::Down | event::KeyCode::Char('j') => {
-            diff.scroll_by(1);
+            diff.scroll_by(held(view, 1));
             Some(Flow::Continue)
         }
         event::KeyCode::Up | event::KeyCode::Char('k') => {
-            diff.scroll_by(-1);
+            diff.scroll_by(held(view, -1));
             Some(Flow::Continue)
         }
         event::KeyCode::PageDown => {
@@ -8756,6 +8782,9 @@ fn page_click(
 /// worked because every column of every page was a pane. Now only the docker
 /// logs are, so each page's own scroll is a number this client already holds —
 /// and moving that number is all a wheel over it can mean.
+///
+/// `delta` is rows, already sped up for a fast spin. A cursor moves by it as it
+/// is; text moves by [`crate::scroll::WHEEL_LINES`] times it.
 #[allow(clippy::too_many_arguments)]
 fn page_wheel(
     view: &mut View,
@@ -8775,6 +8804,7 @@ fn page_wheel(
     x: u16,
     y: u16,
 ) -> Option<Flow> {
+    let text = delta * crate::scroll::WHEEL_LINES;
     // BOOTH has three columns and each takes the wheel differently: the fleet
     // moves its cursor, compute scrolls as a block, and the middle is a pane and
     // so is the daemon's scrollback like any other.
@@ -8814,8 +8844,10 @@ fn page_wheel(
             // Clamped to the last machine so the column cannot be scrolled into
             // empty space it can never scroll back from.
             let last = machines_len.saturating_sub(1);
-            view.booth_compute_scroll =
-                (view.booth_compute_scroll as isize + delta).clamp(0, last as isize) as usize;
+            //
+            // A machine a notch, however fast: there are a handful of them.
+            view.booth_compute_scroll = (view.booth_compute_scroll as isize + delta.signum())
+                .clamp(0, last as isize) as usize;
             return Some(Flow::Continue);
         }
         return None;
@@ -8827,7 +8859,7 @@ fn page_wheel(
     if view.page == Page::Help {
         let (lines, height) = help_metrics(view, help, cols, rows);
         let max = chrome::help::max_scroll(lines, height);
-        help.scroll = (help.scroll as isize + delta).clamp(0, max as isize) as usize;
+        help.scroll = (help.scroll as isize + text).clamp(0, max as isize) as usize;
         return Some(Flow::Continue);
     }
     // The GIT page has three scrollable columns, and the wheel belongs to
@@ -8851,7 +8883,7 @@ fn page_wheel(
         }
         if c.body_box.contains(x, y) {
             if let Some(body) = git.body.as_mut() {
-                body.scroll_by(delta);
+                body.scroll_by(text);
             }
             return Some(Flow::Continue);
         }
@@ -8870,7 +8902,7 @@ fn page_wheel(
         if !geom.stage_box.contains(x, y) {
             return None;
         }
-        diff.scroll_by(delta);
+        diff.scroll_by(text);
         return Some(Flow::Continue);
     }
     let tree = page_tree(view.page, files, docs);
@@ -8893,7 +8925,7 @@ fn page_wheel(
         // it is the same file, so the wheel is the same scroll.
         hit::PageTarget::Body | hit::PageTarget::Minimap(_) if view.page.is_tree() => {
             if let Some(open) = tree.open.as_mut() {
-                open.scroll_by(delta);
+                open.scroll_by(text);
             }
             Some(Flow::Continue)
         }
@@ -9903,7 +9935,13 @@ fn handle_input(
                 }
                 event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                     let down = matches!(m.kind, event::MouseEventKind::ScrollDown);
-                    let delta = if down { 1 } else { -1 };
+                    // One row a notch, more in a spin; text multiplies it by
+                    // [`crate::scroll::WHEEL_LINES`] in `page_wheel`.
+                    let delta = view.wheel_scroll.step(
+                        &crate::scroll::WHEEL_CURVE,
+                        if down { 1 } else { -1 },
+                        Instant::now(),
+                    );
                     // A full-screen page owns the wheel over its own columns,
                     // before the rails are consulted — same precedence a click
                     // gets, for the same reason.
@@ -9953,7 +9991,10 @@ fn handle_input(
                         // between two rails — still reaches the staged pane's
                         // scrollback, which is where the wheel has always gone
                         // when it landed on no control.
-                        _ => return Flow::Scroll(delta as i16),
+                        //
+                        // A page a notch whatever the speed: a page is already
+                        // further than a spin would take a list.
+                        _ => return Flow::Scroll(delta.signum() as i16),
                     }
                 }
                 _ => {}
@@ -10236,8 +10277,10 @@ fn handle_input(
                     return stage_selected(view.focus, view.page)
                 }
                 (event::KeyCode::Enter, false) => view.focus = Focus::Stage,
+                // Held, these speed up; see [`held`].
                 (event::KeyCode::Down | event::KeyCode::Char('j'), false) => {
-                    move_sel(view, counts, 1)
+                    let step = held(view, 1);
+                    move_sel(view, counts, step)
                 }
                 // A long fleet a page at a time, and to either end of it.
                 (
@@ -10257,7 +10300,8 @@ fn handle_input(
                     move_sel(view, counts, delta)
                 }
                 (event::KeyCode::Up | event::KeyCode::Char('k'), false) => {
-                    move_sel(view, counts, -1)
+                    let step = held(view, -1);
+                    move_sel(view, counts, step)
                 }
                 _ => {}
             }
@@ -11091,6 +11135,16 @@ fn fold_cursors_space(daemons: &[Daemon], hosts: &[Option<String>], view: &mut V
 fn clamp_booth_sel(daemons: &[Daemon], hosts: &[Option<String>], view: &mut View) {
     let len = booth_row_count(daemons, hosts, view);
     view.booth_sel = view.booth_sel.min(len.saturating_sub(1));
+}
+
+/// One `j`/`k` towards `dir`, as the distance it should move: one row, or more
+/// once it is part of a held run. See [`crate::scroll::KEY_CURVE`].
+///
+/// Read off the real clock, which is why the curve's tests are in
+/// [`crate::scroll`] rather than here: a unit test pressing `j` once still
+/// moves one row.
+fn held(view: &mut View, dir: isize) -> isize {
+    view.key_scroll.step(&crate::scroll::KEY_CURVE, dir, Instant::now())
 }
 
 fn move_sel(view: &mut View, (agents, procs, changes, all_agents): Counts, delta: isize) {
@@ -13208,6 +13262,65 @@ mod tests {
         );
         assert_eq!(view.booth_sel, 3, "the wheel walked the cursor");
         assert_eq!(view.focus, Focus::AllAgents);
+    }
+
+    /// A wheel notch over text reads three lines, not one — the "make the
+    /// mouse faster" half of the scrolling report. One notch, so the momentum
+    /// (whose curve is tested in `crate::scroll` against a fake clock) is at
+    /// its base and this is the multiplier alone.
+    #[test]
+    fn a_wheel_notch_over_help_scrolls_three_lines() {
+        let (mut cols, mut rows) = (120u16, 40u16);
+        let mut view = View { page: Page::Help, ..Default::default() };
+        let mut help = chrome::Help::default();
+        handle_help_key(key(event::KeyCode::End), &mut view, &mut help, cols, rows);
+        assert!(
+            help.scroll > crate::scroll::WHEEL_LINES as usize,
+            "the topic is too short to test"
+        );
+        help.scroll = 0;
+        handle_input(
+            event::Event::Mouse(event::MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                column: 60,
+                row: 20,
+                modifiers: event::KeyModifiers::NONE,
+            }),
+            &mut view,
+            &[],
+            &[],
+            None,
+            &mut Files::default(),
+            &mut Files::default(),
+            &mut DiffView::default(),
+            &mut Docker::default(),
+            &mut chrome::Git::default(),
+            &mut chrome::Settings::default(),
+            &mut help,
+            &mut chrome::usage::Usage::default(),
+            &Keymap::default(),
+            &mut Drag::default(),
+            false,
+            false,
+            &mut cols,
+            &mut rows,
+        );
+        assert_eq!(help.scroll, crate::scroll::WHEEL_LINES as usize);
+    }
+
+    /// Only BOOTH's fleet, while it has the keyboard, lets the stage wait for
+    /// its cursor. Everywhere else a stage change is something asked for, and
+    /// on the fleet `tab` handing the preview the keys must land them on the
+    /// agent now under the cursor, not the one before it.
+    #[test]
+    fn only_the_fleet_cursor_makes_the_stage_wait() {
+        let booth = |focus| View { page: Page::Booth, focus, ..Default::default() };
+        assert!(stage_follows_cursor(&booth(Focus::AllAgents)));
+        assert!(!stage_follows_cursor(&booth(Focus::Stage)), "the preview has the keys");
+        for page in [Page::Agents, Page::Docker, Page::Git] {
+            let view = View { page, focus: Focus::Agents, ..Default::default() };
+            assert!(!stage_follows_cursor(&view), "{page:?} delayed its stage");
+        }
     }
 
     #[test]

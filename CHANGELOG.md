@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.14: scrolling speeds up, and BOOTH stops loading every agent you
+  pass.** A held `j`/`k` or arrow moves one row a step for the first quarter
+  second of repeat, then one more row every 120ms, up to eight. A pause or a
+  change of direction starts again at one, so tapping is still exact. The wheel
+  moves three lines a notch over text (HELP, a diff, an open file, a commit)
+  instead of one. A fast spin, notches under 80ms apart, ramps to six times that
+  within about a third of a second. This covers the rails, BOOTH's fleet,
+  FILES/DOCS, GIT, DIFF, HELP and Docker. On BOOTH, holding `j` used to open a
+  stream for every agent the cursor passed, and a new connection for each one on
+  another machine. Now the stage waits until the cursor has rested for 120ms and
+  loads only that row. A single step, `enter`, a click or `tab` to the preview
+  still loads at once. `[ui] stage_settle_ms` sets the wait, and `0` turns it
+  off.
 - **1.5.0-dev.13: agents can be forked.** A fork is a new pane that starts on
   a copy of an agent's conversation so far, and the two go their own ways from
   there. BOOTH's fleet lists the copy under the agent it came from, and after

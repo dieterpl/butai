@@ -327,6 +327,7 @@ layout, not one workspace's.
 | `disks` | `"all"`, `"auto"`, or a list | `"all"` | — | Which mounts get a DSK gauge. |
 | `glyphs` | `"unicode"` or `"ascii"` | `"ascii"` on Windows, `"unicode"` elsewhere | — | Display graphical symbols with the original Unicode glyphs or single-column ASCII alternatives for limited terminal fonts. Text encoding and clipboard content are preserved. |
 | `links` | bool | `true` | — | Whether a URL on screen is marked up as an OSC 8 hyperlink for the terminal butai is drawn on, so its pointer can follow one. Off leaves the text alone; the `f` picker works either way, because it never leaves this client. |
+| `stage_settle_ms` | integer | `120` | — | How long BOOTH's fleet cursor rests on a row before the stage loads that agent. Walking the list faster than this loads only the row you stop on; `0` loads every row on the way. See [workbench.md](workbench.md#booth). |
 
 Widths **clamp rather than fall back**, so `left_rail = 900` gives you a
 wide-but-usable rail instead of silently ignoring what you asked for. Heights
