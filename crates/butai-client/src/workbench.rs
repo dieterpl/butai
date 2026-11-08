@@ -551,6 +551,9 @@ pub async fn run(
     view.disks = config.ui.disks.clone();
     view.links = config.ui.links;
     view.glyphs = config.ui.glyphs;
+    // The rest of the layout a drag or a key sets, beside the rails in `[ui]`.
+    chrome::page_widths_from_config(&config.ui).apply(&mut view);
+    view.zen = config.ui.zen;
     if !key_warnings.is_empty() {
         // A mistyped binding used to be a log line on the daemon. It is the
         // user's own config and the reason a key does nothing, so it says so.
@@ -695,6 +698,9 @@ pub async fn run(
     // keeps a page change from being a file rewrite per keystroke. See
     // [`crate::views`].
     let mut views = crate::views::Views::new(&config);
+    // The page widths and zen as `[ui]` last had them, so the loop writes only
+    // what has actually changed since. See [`remember_layout`].
+    let mut saved_layout = SavedLayout::of(&view);
     // Which page the loop last saw, so *arriving* on one can do work. Noticed
     // here for the same reason `showing` is: there are ten ways to reach a page
     // — the spaces menu, `alt-g`, `alt-,`/`alt-.`, a click, a jump from another
@@ -863,6 +869,12 @@ pub async fn run(
         // Cheap on every pass: the write is debounced and the common case is a
         // map lookup that finds the page already there.
         views.note(showing_key.as_deref(), view.page, Instant::now());
+        // The same move for the layout: noticed off the view, not off the
+        // gestures that set it, so the BOOTH borders, the DOCKER and GIT
+        // splits and the three ways to toggle zen all land in one place.
+        if remember_layout(&mut view, &mut saved_layout, &crate::config::Config::path()) {
+            dirty = true;
+        }
         // A question reaches the screen as soon as nothing else is being asked.
         if view.overlay.is_none() {
             if let Some(d) = pending_dialogs.pop_front() {
@@ -2996,8 +3008,62 @@ pub async fn run(
     // that a detach would otherwise fall inside. Nothing to do when the write
     // already landed, which is the ordinary case.
     views.flush();
+    remember_layout(&mut view, &mut saved_layout, &crate::config::Config::path());
     drop(_guard);
     Ok(reason)
+}
+
+/// The layout `[ui]` holds beyond the rails, as it was last written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SavedLayout {
+    widths: chrome::PageWidths,
+    zen: bool,
+}
+
+impl SavedLayout {
+    fn of(view: &View) -> Self {
+        SavedLayout { widths: chrome::PageWidths::of(view), zen: view.zen }
+    }
+}
+
+/// Write whatever of the page widths and zen has changed since `saved`, and
+/// say whether a failure was put on the footer.
+///
+/// **On release, not per frame.** A border mid-drag changes the view on every
+/// motion event, and nothing is written until the button comes up — the same
+/// rule the rails keep by saving when their drag leaves LAYOUT mode. A zen
+/// toggle is a single keypress, so it is written as it happens.
+///
+/// **Each key on its own.** Toggling zen writes `zen` and nothing else, and a
+/// drag writes the four widths and not `zen`: a file that never had a `zen`
+/// line does not grow one because somebody moved a border.
+///
+/// A failed write is reported once and not retried, as the rails' is: it was a
+/// gesture you made, so you hear about it, and the next change tries again.
+fn remember_layout(view: &mut View, saved: &mut SavedLayout, path: &std::path::Path) -> bool {
+    if view.booth_drag.is_some() || view.split_drag.is_some() {
+        return false;
+    }
+    let now = SavedLayout::of(view);
+    let mut failed = None;
+    if now.widths != saved.widths {
+        if let Err(e) = crate::config::Config::save_page_widths_at(path, now.widths) {
+            failed = Some(format!("layout not saved: {e}"));
+        }
+    }
+    if now.zen != saved.zen {
+        if let Err(e) = crate::config::Config::save_zen_at(path, now.zen) {
+            failed = Some(format!("zen not saved: {e}"));
+        }
+    }
+    *saved = now;
+    match failed {
+        Some(msg) => {
+            view.flash = Some(msg);
+            true
+        }
+        None => false,
+    }
 }
 
 /// The box that asks. One builder because three routes open it: the launch
@@ -9913,10 +9979,17 @@ fn handle_input(
                     }
                 }
                 event::MouseEventKind::Up(event::MouseButton::Left) => {
-                    if view.booth_drag.take().is_some()
-                        || view.tab_drag.take().is_some()
-                        || view.split_drag.take().is_some()
-                    {
+                    // A released border is held to the width it was drawn at
+                    // before the loop notices it and writes it to `[ui]`.
+                    if view.booth_drag.take().is_some() {
+                        chrome::settle_booth(view, *cols, *rows);
+                        return Flow::Continue;
+                    }
+                    if view.tab_drag.take().is_some() {
+                        return Flow::Continue;
+                    }
+                    if let Some(page) = view.split_drag.take() {
+                        chrome::settle_split(view, *cols, *rows, page);
                         return Flow::Continue;
                     }
                     if let Some(held) = view.rail_drag.take() {
@@ -17166,6 +17239,114 @@ Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
             if let Some(cell) = buf.cell_mut((x as u16, 0)) {
                 cell.set_char(ch);
             }
+        }
+    }
+
+    fn mouse(view: &mut View, kind: event::MouseEventKind, x: u16, y: u16, cols: u16, rows: u16) {
+        let ev = event::Event::Mouse(event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        });
+        handle_input(
+            ev,
+            view,
+            &[],
+            &[],
+            None,
+            &mut Files::default(),
+            &mut Files::default(),
+            &mut DiffView::default(),
+            &mut Docker::default(),
+            &mut chrome::Git::default(),
+            &mut chrome::Settings::default(),
+            &mut chrome::Help::default(),
+            &mut chrome::usage::Usage::default(),
+            &Keymap::default(),
+            &mut Drag::default(),
+            false,
+            false,
+            &mut { cols },
+            &mut { rows },
+        );
+    }
+
+    /// A dragged BOOTH border is written to `[ui]` when the button comes up and
+    /// not while it is held, the width written is the one on screen, and a
+    /// fresh view read off that file draws the column the same width.
+    #[test]
+    fn a_dragged_booth_border_is_remembered_on_release() {
+        use event::{MouseButton as B, MouseEventKind as M};
+        let dir = std::env::temp_dir().join(format!("butai-remember-booth-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::remove_file(&path).ok();
+
+        let (cols, rows) = (180, 40);
+        let mut view = View { page: Page::Booth, ..Default::default() };
+        let mut saved = SavedLayout::of(&view);
+        let g = chrome::page_geom(cols, rows, &view);
+        let c = chrome::booth_columns_of(cols, &g, &view);
+        let edge = c.fleet_box.x + c.fleet_box.width - 1;
+        let y = c.fleet_box.y + 5;
+
+        mouse(&mut view, M::Down(B::Left), edge, y, cols, rows);
+        assert!(view.booth_drag.is_some(), "the border was not taken");
+        mouse(&mut view, M::Drag(B::Left), edge + 9, y, cols, rows);
+        assert!(!remember_layout(&mut view, &mut saved, &path));
+        assert!(!path.exists(), "written mid-drag");
+
+        mouse(&mut view, M::Up(B::Left), edge + 9, y, cols, rows);
+        let drawn = chrome::booth_columns_of(cols, &g, &view).fleet_box.width;
+        assert_eq!(drawn, c.fleet_box.width + 9);
+        assert_eq!(view.booth_w.fleet, Some(drawn), "not settled to what was drawn");
+        assert_eq!(view.booth_w.compute, None, "the other column was pinned");
+        assert!(!remember_layout(&mut view, &mut saved, &path));
+
+        let (cfg, warnings) = crate::config::Config::load_from(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut back = View { page: Page::Booth, ..Default::default() };
+        chrome::page_widths_from_config(&cfg.ui).apply(&mut back);
+        assert_eq!(chrome::booth_columns_of(cols, &g, &back).fleet_box.width, drawn);
+
+        // Nothing changed, nothing written: the file is not even recreated.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!remember_layout(&mut view, &mut saved, &path));
+        assert!(!path.exists(), "rewritten with nothing to say");
+
+        // Zen is noticed the same way and comes back on its own key.
+        view.zen = true;
+        remember_layout(&mut view, &mut saved, &path);
+        let (cfg, _) = crate::config::Config::load_from(&path);
+        assert!(cfg.ui.zen);
+        assert_eq!(cfg.ui.booth_fleet, None, "zen wrote the widths too");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A DOCKER or GIT split dragged past where it can go is remembered at the
+    /// width it stopped at, not at the pointer's column.
+    #[test]
+    fn an_overshot_page_split_is_remembered_as_drawn() {
+        use event::{MouseButton as B, MouseEventKind as M};
+        let (cols, rows) = (160, 40);
+        for page in [Page::Docker, Page::Git] {
+            let mut view = View { page, ..Default::default() };
+            let band = chrome::page_geom(cols, rows, &view).stage_box;
+            let y = band.y + 3;
+            let at = (band.x..band.x + 80)
+                .find(|&x| chrome::split_at(cols, rows, &view, x, y).is_some())
+                .expect("no split to take");
+            mouse(&mut view, M::Down(B::Left), at, y, cols, rows);
+            mouse(&mut view, M::Drag(B::Left), cols - 1, y, cols, rows);
+            mouse(&mut view, M::Up(B::Left), cols - 1, y, cols, rows);
+            let w = match page {
+                Page::Docker => view.docker_w,
+                _ => view.git_w,
+            }
+            .expect("no width set");
+            assert_eq!(w, band.width - chrome::MIN_STAGE_W, "{page:?} kept the overshoot");
         }
     }
 }

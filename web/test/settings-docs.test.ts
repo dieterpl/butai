@@ -40,6 +40,7 @@ import {
   termColors,
   themeByName,
   themeNames,
+  update,
   type Colors,
   type Facts,
   type SettingsStorage,
@@ -249,11 +250,30 @@ describe("the store", () => {
     // pushed off the screen.
     const absurd = load(store(JSON.stringify({
       theme: "no-such-theme", fontPx: 9000, leftRail: 99999, rightRail: 3, zen: "yes",
-      defaultAgent: 12,
+      defaultAgent: 12, procsHeight: 5, systemHeight: 99999,
     })));
     expect(absurd).toEqual({
       theme: "blueprint-dark", fontPx: 40, leftRail: 640, rightRail: 180, zen: true, defaultAgent: "",
+      procsHeight: 54, systemHeight: 1200,
     });
+  });
+
+  test("settings/update/round-trip", () => {
+    // What alt-z and leaving LAYOUT mode write: only the keys they name, kept
+    // across a reload, and nothing at all when the value is already stored.
+    let raw: string | null = JSON.stringify({ theme: "gruvbox-dark", leftRail: 300 });
+    let writes = 0;
+    const mem: SettingsStorage = {
+      getItem: () => raw,
+      setItem: (_k, v) => { raw = v; writes++; },
+    };
+    update(mem, { zen: true, procsHeight: 140, systemHeight: 0 });
+    const back = load(mem);
+    expect([back.zen, back.procsHeight, back.systemHeight]).toEqual([true, 140, 0]);
+    expect([back.theme, back.leftRail]).toEqual(["gruvbox-dark", 300]);
+    expect(writes).toBe(1);
+    update(mem, { zen: true });
+    expect(writes).toBe(1);
   });
 
   test("settings/load/partial", () => {

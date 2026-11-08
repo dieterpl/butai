@@ -270,6 +270,18 @@ pub struct UiConfig {
     pub procs_height: Option<u16>,
     /// Rows given to the SYSTEM gauges at the foot of the left rail.
     pub system_height: Option<u16>,
+    /// Width of BOOTH's FLEET column, where its border has been dragged.
+    /// Unset is BOOTH's own share of the terminal.
+    pub booth_fleet: Option<u16>,
+    /// Width of BOOTH's COMPUTE column, the same way.
+    pub booth_compute: Option<u16>,
+    /// Width of the DOCKER page's list column, where its split was dragged.
+    pub docker_list: Option<u16>,
+    /// Width of the GIT page's REFS/HISTORY column, the same way.
+    pub git_list: Option<u16>,
+    /// Zen mode: rails down to status strips. Written when it is toggled, so
+    /// a workbench left in zen opens in zen.
+    pub zen: bool,
     /// Which network interfaces the SYSTEM rail draws.
     pub net: NetSelect,
     /// Which mounted filesystems the SYSTEM rail draws.
@@ -304,6 +316,11 @@ impl Default for UiConfig {
             right_rail: None,
             procs_height: None,
             system_height: None,
+            booth_fleet: None,
+            booth_compute: None,
+            docker_list: None,
+            git_list: None,
+            zen: false,
             net: NetSelect::default(),
             disks: DiskSelect::default(),
             links: true,
@@ -532,6 +549,51 @@ impl Config {
                     }
                 }
             }
+        })
+    }
+
+    /// Write the page widths a border drag sets back into `[ui]`:
+    /// `booth_fleet`, `booth_compute`, `docker_list` and `git_list`. The
+    /// counterpart read is [`crate::chrome::page_widths_from_config`].
+    ///
+    /// Unset is the page working its own width out, which is a real state, so
+    /// it removes the key the way a cleared rail height does.
+    pub fn save_page_widths(w: crate::chrome::PageWidths) -> std::io::Result<()> {
+        Self::save_page_widths_at(&Self::path(), w)
+    }
+
+    /// [`save_page_widths`](Self::save_page_widths) against an explicit path
+    /// (tests).
+    pub fn save_page_widths_at(path: &Path, w: crate::chrome::PageWidths) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            let ui = table(doc, "ui");
+            for (key, value) in [
+                ("booth_fleet", w.booth.fleet),
+                ("booth_compute", w.booth.compute),
+                ("docker_list", w.docker),
+                ("git_list", w.git),
+            ] {
+                match value {
+                    Some(n) => ui[key] = toml_edit::value(n as i64),
+                    None => {
+                        if let Some(t) = ui.as_table_like_mut() {
+                            t.remove(key);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Whether the workbench is in zen mode: `[ui] zen`.
+    pub fn save_zen(on: bool) -> std::io::Result<()> {
+        Self::save_zen_at(&Self::path(), on)
+    }
+
+    /// [`save_zen`](Self::save_zen) against an explicit path (tests).
+    pub fn save_zen_at(path: &Path, on: bool) -> std::io::Result<()> {
+        edit_config(path, |doc| {
+            table(doc, "ui")["zen"] = toml_edit::value(on);
         })
     }
 
@@ -1471,6 +1533,55 @@ mod tests {
         Config::save_default_agent_at(&fresh, Some("claude")).unwrap();
         let (cfg4, _) = Config::load_from(&fresh);
         assert_eq!(cfg4.general.default_agent.as_deref(), Some("claude"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The page widths a border drag sets are a round trip through `[ui]`,
+    /// an unset one is a missing key rather than a number, and `zen` is its
+    /// own key that neither writer touches for the other.
+    #[test]
+    fn page_widths_and_zen_round_trip_through_ui() {
+        use crate::chrome::{BoothWidths, PageWidths};
+        let dir = std::env::temp_dir().join(format!("butai-page-widths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# my setup\n[ui]\nleft_rail = 30 # wide\n").unwrap();
+
+        let widths = PageWidths {
+            booth: BoothWidths { fleet: Some(48), compute: None },
+            docker: Some(33),
+            git: Some(61),
+        };
+        Config::save_page_widths_at(&path, widths).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my setup") && text.contains("# wide"), "{text}");
+        assert_eq!(text.matches("[ui]").count(), 1, "{text}");
+        assert!(!text.contains("booth_compute"), "an unset width is no key: {text}");
+        assert!(!text.contains("zen"), "a drag wrote zen: {text}");
+
+        let (cfg, warnings) = Config::load_from(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cfg.ui.left_rail, Some(30));
+        assert_eq!(crate::chrome::page_widths_from_config(&cfg.ui), widths);
+        assert!(!cfg.ui.zen);
+
+        // Zen on its own, and the widths stay where they were.
+        Config::save_zen_at(&path, true).unwrap();
+        let (cfg, _) = Config::load_from(&path);
+        assert!(cfg.ui.zen);
+        assert_eq!(crate::chrome::page_widths_from_config(&cfg.ui), widths);
+
+        // Back to automatic removes the key, and a second save does not
+        // duplicate the ones that stay.
+        let cleared = PageWidths { booth: BoothWidths::default(), ..widths };
+        Config::save_page_widths_at(&path, cleared).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("booth_fleet"), "{text}");
+        assert_eq!(text.matches("git_list").count(), 1, "{text}");
+        let (cfg, _) = Config::load_from(&path);
+        assert_eq!(crate::chrome::page_widths_from_config(&cfg.ui), cleared);
+        assert!(cfg.ui.zen, "clearing a width turned zen off");
 
         std::fs::remove_dir_all(&dir).ok();
     }

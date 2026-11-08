@@ -4182,12 +4182,65 @@ pub fn booth_columns_of(cols: u16, geom: &Geom, view: &View) -> BoothColumns {
 /// Column widths the pointer has chosen for BOOTH, where it has: `None` is the
 /// width BOOTH works out for itself from the terminal's.
 ///
-/// Held on the [`View`] only, so it lasts as long as the client does — a width
-/// picked on one terminal is not a good guess for the next one.
+/// Remembered in `[ui]` as `booth_fleet` and `booth_compute`, beside the rails
+/// — see [`PageWidths`]. It was held on the [`View`] only, on the argument that
+/// a width picked on one terminal is not a good guess for the next one; the
+/// rails had already answered that by being fitted again at draw time, and
+/// [`booth_columns_with`] fits these the same way, so a remembered width on a
+/// smaller terminal is a narrower column rather than a broken page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BoothWidths {
     pub fleet: Option<u16>,
     pub compute: Option<u16>,
+}
+
+/// The list widths the pointer sets on the full-width pages: BOOTH's two side
+/// columns and the DOCKER and GIT list columns. The rails' geometry is
+/// [`RailGeom`]; this is the rest of what a border drag can change.
+///
+/// `None` is the width the page works out for itself, as it is on the
+/// [`View`], and the file says so by not having the key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageWidths {
+    pub booth: BoothWidths,
+    pub docker: Option<u16>,
+    pub git: Option<u16>,
+}
+
+/// The ceiling a remembered page width is held to when it is read. The floor
+/// is each column's own; the real ceiling is the terminal's, and that is
+/// applied again on every frame, so this exists only so a hand-typed
+/// `booth_fleet = 9000` reads as a wide column rather than as a number nothing
+/// downstream was written to expect.
+pub const PAGE_LIST_MAX_W: u16 = 200;
+
+impl PageWidths {
+    /// What the [`View`] has now.
+    pub fn of(view: &View) -> Self {
+        PageWidths { booth: view.booth_w, docker: view.docker_w, git: view.git_w }
+    }
+
+    /// Put these on the [`View`].
+    pub fn apply(self, view: &mut View) {
+        view.booth_w = self.booth;
+        view.docker_w = self.docker;
+        view.git_w = self.git;
+    }
+}
+
+/// The page widths a `[ui]` section asks for, clamped the way
+/// [`geom_from_config`] clamps the rails: to each column's own floor and to
+/// [`PAGE_LIST_MAX_W`], rather than ignored when out of range.
+pub fn page_widths_from_config(ui: &crate::config::UiConfig) -> PageWidths {
+    let fit = |w: Option<u16>, floor: u16| w.map(|w| w.clamp(floor, PAGE_LIST_MAX_W));
+    PageWidths {
+        booth: BoothWidths {
+            fleet: fit(ui.booth_fleet, BOOTH_FLEET_MIN_W),
+            compute: fit(ui.booth_compute, BOOTH_COMPUTE_MIN_W),
+        },
+        docker: fit(ui.docker_list, TREE_MIN_W),
+        git: fit(ui.git_list, GIT_LIST_MIN_W),
+    }
 }
 
 /// [`booth_columns`] given a say in the widths. A chosen width is held to the
@@ -5505,11 +5558,14 @@ pub fn diff_body_rows(cols: u16, rows: u16, view: &View) -> u16 {
 /// where a tree row is one: lane glyphs, a short sha, a ref chip and a summary.
 /// At 40 cells the summary was down to a dozen characters, which is a column of
 /// ellipses.
+/// The narrowest the GIT page's REFS/HISTORY column is drawn.
+const GIT_LIST_MIN_W: u16 = 30;
+
 fn git_list_width(band_w: u16, pref: Option<u16>) -> u16 {
     let room = band_w.saturating_sub(MIN_STAGE_W);
     match pref {
-        Some(w) => w.clamp(30, room.max(30)).min(room),
-        None => (band_w / 3).clamp(30, 52).min(room),
+        Some(w) => w.clamp(GIT_LIST_MIN_W, room.max(GIT_LIST_MIN_W)).min(room),
+        None => (band_w / 3).clamp(GIT_LIST_MIN_W, 52).min(room),
     }
 }
 
@@ -7424,14 +7480,17 @@ fn draw_stage_box(
 /// too while it was one listing; it is the Finder trail now, and that one is
 /// sized by how deep it has been walked — see [`files_cols_shown`].
 fn tree_width(stage_w: u16) -> u16 {
-    (stage_w / 3).clamp(16, 40).min(stage_w.saturating_sub(20))
+    (stage_w / 3).clamp(TREE_MIN_W, 40).min(stage_w.saturating_sub(20))
 }
+
+/// The narrowest a list column beside a body is drawn: DOCKER's tree.
+const TREE_MIN_W: u16 = 16;
 
 /// [`tree_width`] where the pointer has chosen a width: held to the same floor,
 /// and leaving the logs the twenty cells they need.
 fn tree_width_with(stage_w: u16, pref: Option<u16>) -> u16 {
     match pref {
-        Some(w) => w.clamp(16, stage_w.saturating_sub(20).max(16)),
+        Some(w) => w.clamp(TREE_MIN_W, stage_w.saturating_sub(20).max(TREE_MIN_W)),
         None => tree_width(stage_w),
     }
 }
@@ -8732,6 +8791,52 @@ pub fn drag_split(view: &mut View, cols: u16, rows: u16, page: Page, x: u16) {
     match page {
         Page::Docker => view.docker_w = want,
         _ => view.git_w = want,
+    }
+}
+
+/// Hold a released DOCKER or GIT split to the width it was drawn at.
+///
+/// While the button is down the width is the pointer's own column, so a drag
+/// the floors stopped picks up where the pointer comes back to. Once it is up
+/// that number is about to be written to `[ui]`, and the honest one to write is
+/// what was on screen rather than wherever the pointer overshot to.
+pub fn settle_split(view: &mut View, cols: u16, rows: u16, page: Page) {
+    let band = page_geom(cols, rows, view).stage_box;
+    match page {
+        Page::Docker => {
+            if let Some(w) = view.docker_w {
+                let drawn = tree_width_with(band.width, Some(w));
+                if drawn > 0 {
+                    view.docker_w = Some(drawn);
+                }
+            }
+        }
+        _ => {
+            if let Some(w) = view.git_w {
+                let drawn = git_list_width(band.width, Some(w));
+                if drawn > 0 {
+                    view.git_w = Some(drawn);
+                }
+            }
+        }
+    }
+}
+
+/// [`settle_split`] for BOOTH's borders. Only a width that was set is settled:
+/// the column nobody dragged keeps working its width out for itself.
+pub fn settle_booth(view: &mut View, cols: u16, rows: u16) {
+    let g = page_geom(cols, rows, view);
+    let c = booth_columns_of(cols, &g, view);
+    // Both are zero when BOOTH has collapsed to the pane alone, and then the
+    // drawn width says nothing about what was asked for.
+    if c.fleet_box.width == 0 {
+        return;
+    }
+    if view.booth_w.fleet.is_some() {
+        view.booth_w.fleet = Some(c.fleet_box.width);
+    }
+    if view.booth_w.compute.is_some() {
+        view.booth_w.compute = Some(c.compute_box.width);
     }
 }
 
@@ -14572,5 +14677,32 @@ index 1111111..2222222 100644
         // An empty library still has its way in.
         let Overlay::List(empty) = prompts_overlay(&[], 3) else { panic!() };
         assert_eq!((empty.items.len(), empty.sel), (1, 0));
+    }
+
+    /// A remembered page width is clamped when it is read, the way the rails'
+    /// are: to the column's own floor and a sane ceiling, never ignored.
+    #[test]
+    fn remembered_page_widths_clamp_on_load() {
+        use crate::config::UiConfig;
+        assert_eq!(page_widths_from_config(&UiConfig::default()), PageWidths::default());
+        let silly = UiConfig {
+            booth_fleet: Some(1),
+            booth_compute: Some(9000),
+            docker_list: Some(0),
+            git_list: Some(5),
+            ..Default::default()
+        };
+        let w = page_widths_from_config(&silly);
+        assert_eq!(w.booth.fleet, Some(BOOTH_FLEET_MIN_W));
+        assert_eq!(w.booth.compute, Some(PAGE_LIST_MAX_W));
+        assert_eq!(w.docker, Some(TREE_MIN_W));
+        assert_eq!(w.git, Some(GIT_LIST_MIN_W));
+
+        // And a remembered width on a terminal too small for it is still fitted
+        // at draw time: the stage keeps its floor.
+        let view = View { page: Page::Booth, booth_w: w.booth, ..Default::default() };
+        let g = page_geom(100, 30, &view);
+        let c = booth_columns_of(100, &g, &view);
+        assert!(c.stage_box.width >= MIN_STAGE_W, "{:?}", c.stage_box);
     }
 }

@@ -43,6 +43,9 @@ export interface Settings {
   fontPx: number;
   leftRail: number;
   rightRail: number;
+  /// PROCESSES and SYSTEM heights from LAYOUT mode, in px; 0 is automatic.
+  procsHeight: number;
+  systemHeight: number;
   zen: boolean;
   defaultAgent: string;
 }
@@ -64,6 +67,9 @@ export const DEFAULTS: Readonly<Settings> = Object.freeze({
   /// the window. A number pins it, the way `[ui] left_rail` pins cells.
   leftRail: 0,
   rightRail: 0,
+  /// 0 is automatic, the way an unset `[ui] procs_height` is.
+  procsHeight: 0,
+  systemHeight: 0,
   zen: false,
   /// "" is "ask every time". A named constant would be an agent somebody could
   /// actually be called, which is why the terminal has `ASK_EVERY_TIME` for the
@@ -80,6 +86,12 @@ export const AUTO = "auto";
 export const RAIL_MIN = 180;
 export const RAIL_MAX = 640;
 export const RAIL_STEP = 20;
+/// Section heights, in px. The floors are LAYOUT mode's own — the shortest it
+/// will drag a section to — and the ceiling is only there so a hand-edited
+/// number cannot push the rail off the page.
+export const PROCS_MIN = 54;
+export const SYSTEM_MIN = 18;
+export const SECTION_MAX = 1200;
 export const FONT_MIN = 8;
 export const FONT_MAX = 40;
 
@@ -316,6 +328,8 @@ export function sanitize(s: Partial<Settings> | null | undefined): Settings {
   out.fontPx = clampInt(out.fontPx, FONT_MIN, FONT_MAX, DEFAULTS.fontPx);
   out.leftRail = railWidth(out.leftRail);
   out.rightRail = railWidth(out.rightRail);
+  out.procsHeight = sectionHeight(out.procsHeight, PROCS_MIN);
+  out.systemHeight = sectionHeight(out.systemHeight, SYSTEM_MIN);
   out.zen = !!out.zen;
   out.defaultAgent = typeof out.defaultAgent === "string" ? out.defaultAgent : "";
   return out;
@@ -327,6 +341,12 @@ function railWidth(v: unknown): number {
   return Math.max(RAIL_MIN, Math.min(RAIL_MAX, n));
 }
 
+function sectionHeight(v: unknown, floor: number): number {
+  const n = Math.round(Number(v) || 0);
+  if (n <= 0) return 0;
+  return Math.max(floor, Math.min(SECTION_MAX, n));
+}
+
 function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
   const n = Math.round(Number(v));
   if (!isFinite(n)) return dflt;
@@ -336,6 +356,17 @@ function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
 export function save(storage: SettingsStorage | null | undefined, s: Settings): Settings {
   try { storage && storage.setItem(KEY, JSON.stringify(sanitize(s))); } catch { /* full or refused */ }
   return s;
+}
+
+/// Write some settings and leave the rest as stored — what a gesture outside
+/// the SETTINGS page does (`alt-z`, leaving LAYOUT mode), since it knows only
+/// the one thing it changed. Writes nothing when the stored value already
+/// matches, so a re-render that calls this is not a storage write.
+export function update(storage: SettingsStorage | null | undefined, patch: Partial<Settings>): Settings {
+  const was = load(storage);
+  const next = sanitize({ ...was, ...patch });
+  const changed = (Object.keys(patch) as (keyof Settings)[]).some(k => next[k] !== was[k]);
+  return changed ? save(storage, next) : was;
 }
 
 export function readPrefixSpelling(storage: SettingsStorage | null | undefined): string {

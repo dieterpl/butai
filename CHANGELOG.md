@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.17: the workbench remembers its layout.** The borders you drag
+  on BOOTH (FLEET and COMPUTE) and on the DOCKER and GIT pages (the list
+  column) now come back at the same width after a restart or a reattach, as
+  the rails already did. They are saved in `[ui]` as `booth_fleet`,
+  `booth_compute`, `docker_list` and `git_list` when you let go of the border,
+  at the width the column was drawn. Zen mode is saved as `[ui] zen` when you
+  toggle it, so a workbench left in zen opens in zen. The widths are clamped
+  when read and fitted to the terminal on every frame, like the rails, so a
+  width from a wide terminal still leaves the stage room on a small one. In the
+  browser client, `alt-z` now saves zen as the SETTINGS row always did, and the
+  PROCESSES and SYSTEM heights set in LAYOUT mode are saved when you leave it.
+  BOOTH's folds, the `custom` fleet order and the dragged tab order are still
+  not saved, because they name workspaces by ids that change each time a daemon
+  starts.
 - **1.5.0-dev.14: scrolling speeds up, and BOOTH stops loading every agent you
   pass.** A held `j`/`k` or arrow moves one row a step for the first quarter
   second of repeat, then one more row every 120ms, up to eight. A pause or a

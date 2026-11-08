@@ -1671,7 +1671,7 @@ What differs today, and why — `web/README.md` has the full reasoning:
 | the reference | a page of its own (HELP); DOCS is a project's markdown and nothing else | a `reference` folder at the top of the DOCS rail, generated from `verbs.js` |
 | the row menu (`m`) | agent, process and workspace menus | not bound — there is no surface for it |
 | find (`/`, `alt-/`) | the daemon's search, over the workspace | not bound; no search surface |
-| layout (`alt-l`) | rail resizing, saved to `[ui]` | not bound |
+| layout (`alt-l`) | rail resizing, saved to `[ui]`; dragged BOOTH, DOCKER and GIT borders too | rail widths and section heights, saved to `localStorage` |
 | detach (`alt-d`) | leaves the session | not bound — closing the tab is leaving |
 | the monitors (`C-b S`, `C-b Y`) | `htop` and a GPU monitor on the stage | no surface; `C-b S` is spent on SETTINGS instead |
 | adding a machine (`alt-h`) | dials over ssh; its projects join the tab bar | not bound — the bridge reads its daemon list from the environment |
@@ -1681,7 +1681,7 @@ What differs today, and why — `web/README.md` has the full reasoning:
 | the git menu | seven groups | the same, **plus** `Branch > rename…` and `Remote > add a remote…` |
 | theme preview | live, with a swatch grid under the row | live, with a swatch grid **and** a working `<butai-screen>` painted in the palette |
 | themes | eight built-ins plus `~/.butai/themes` | the same plus `web dark` / `web light`, defaulting to the OS |
-| font size, zen | `alt-z` is per session | `alt-=` / `alt--` and `alt-z` survive a reload |
+| font size, zen | `alt-z` is saved as `[ui] zen` | `alt-=` / `alt--` and `alt-z` survive a reload |
 | its own keys | — | `alt-u` (the needs-you list) and `c seen` on the AGENTS rail |
 | Mac Option | read back from the composed character; Option-e and Option-n are dead keys and unrecoverable | read from `e.code`, so both are recoverable |
 

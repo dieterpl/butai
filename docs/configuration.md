@@ -92,7 +92,7 @@ than neither.
 | `[[agents]]` | daemon | what an agent pane launches |
 | `[keys]` | client | the prefix table |
 | `[theme]` | client | the palette |
-| `[ui]` | client | rail geometry |
+| `[ui]` | client | rail geometry, page column widths, zen |
 | `[[remote]]` | client | which daemons join this tab bar |
 | `.butai.toml` (whole file) | daemon | what a workspace brings up |
 
@@ -323,6 +323,11 @@ layout, not one workspace's.
 | `right_rail` | integer | `38` | clamped to 12–60 | Width of the CHANGES rail. |
 | `procs_height` | integer | unset = automatic | floored at 3 | Rows given to PROCESSES; AGENTS takes what is left after this and the gauges. Automatic is two fifths of the list area. |
 | `system_height` | integer | unset = automatic | capped at 19 | Rows for the SYSTEM gauges. Automatic is a separator plus whatever the machine's gauges need, and 0 in zen mode or below 12 rows of rail. |
+| `booth_fleet` | integer | unset = automatic | clamped to 22–200 | Width of BOOTH's FLEET column. Automatic is a quarter of the band, between 22 and 40. |
+| `booth_compute` | integer | unset = automatic | clamped to 20–200 | Width of BOOTH's COMPUTE column. Automatic is a quarter of the band, between 20 and 36. |
+| `docker_list` | integer | unset = automatic | clamped to 16–200 | Width of the DOCKER page's list column. Automatic is a third of the band, between 16 and 40. |
+| `git_list` | integer | unset = automatic | clamped to 30–200 | Width of the GIT page's REFS/HISTORY column. Automatic is a third of the band, between 30 and 52. |
+| `zen` | bool | `false` | — | Zen mode (`alt-z`): the rails drawn as status strips. A workbench left in zen opens in zen. |
 | `net` | `"all"`, `"auto"`, or a list | `"all"` | — | Which interfaces get a NET gauge. |
 | `disks` | `"all"`, `"auto"`, or a list | `"all"` | — | Which mounts get a DSK gauge. |
 | `glyphs` | `"unicode"` or `"ascii"` | `"ascii"` on Windows, `"unicode"` elsewhere | — | Display graphical symbols with the original Unicode glyphs or single-column ASCII alternatives for limited terminal fonts. Text encoding and clipboard content are preserved. |
@@ -346,6 +351,24 @@ page's WORKBENCH group, beside the rail sizes.
 `alt-l` (LAYOUT mode) and the WORKBENCH group on the SETTINGS page write the four
 geometry keys; `0` on a height row clears it back to automatic, which removes the
 key from the file rather than writing a number.
+
+The page widths are the borders you drag with the pointer: BOOTH's two side
+columns and the DOCKER and GIT list columns. Each is written when the button
+comes up, never during the drag, and the number written is the width the
+column was drawn at, so a border dragged past its limit saves the limit. Like
+the rail widths they are clamped when read and fitted again on every frame: a
+width remembered from a wide terminal is a narrower column on a small one, and
+the stage keeps its 20 columns. A column you never dragged has no key and keeps
+working its width out from the terminal's. `zen` is written when you toggle it.
+Moving a border writes only the four width keys, and toggling zen writes only
+`zen`.
+
+Some layout is deliberately not remembered. BOOTH's folds and expanded gauges,
+the `custom` fleet order made with `J`/`K`, and the tab order you drag are all
+keyed by the workspace ids a daemon hands out fresh every time it starts (see
+[`[booth]`](#booth)). Cursors and scroll positions are where you were, not how
+you laid the workbench out. The page you were on is
+[`[views]`](#views), which keeps BOOTH, SETTINGS and HELP out on purpose.
 
 #### `net`
 
@@ -718,6 +741,8 @@ exactly as it was.
 | SETTINGS → ABOUT → check for updates, `space` | `[update] check` |
 | Answering **no** to the update prompt | `[update] declined_version` (that release only; `esc` writes nothing and asks again next launch) |
 | SETTINGS → WORKBENCH size rows (`-`/`+`/`0`), or leaving `alt-l` LAYOUT mode | all four `[ui]` keys; a height cleared to automatic is removed rather than written |
+| Releasing a dragged BOOTH column border or DOCKER/GIT list split | `[ui] booth_fleet`, `booth_compute`, `docker_list`, `git_list`; one never dragged is removed rather than written |
+| Toggling zen (`alt-z`, `C-b z`, `:zoom`) | `[ui] zen` |
 | the machines button (`alt-h`), or SETTINGS → MACHINES → **add a machine**, once the machine answers | a new `[[remote]]` block with `host`, plus `name`/`ssh_args` when they differ from the destination |
 | Disconnecting a machine (`alt-h`, the tab's row menu, or SETTINGS → MACHINES → **disconnect**) | removes that `[[remote]]` block |
 | SETTINGS → MACHINES → **forget**, on a configured machine that is not connected | removes that `[[remote]]` block — the half of a disconnect that is left over when there is no link to drop |
@@ -925,6 +950,9 @@ procs_height = 12              # rows; omit and PROCESSES sizes itself
 system_height = 10             # rows for the gauges; capped at 19
 net = ["enp1s0", "vpn-tunnel"] # or "all" (the default) / "auto"
 disks = ["/", "/media/fast"]   # or "all" (the default) / "auto"
+booth_fleet = 34               # written when you drag BOOTH's border; omit for automatic
+git_list = 44                  # likewise the GIT page's list column
+zen = false                    # written by alt-z
 
 # ── other machines ─────────────────────────────────────────────────────────
 

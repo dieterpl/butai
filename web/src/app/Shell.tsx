@@ -53,7 +53,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Actions, type AskField } from "./actions.ts";
 import { useWorld } from "./world.ts";
 import { storage, storeTheme, useTheme } from "../theme.ts";
-import { load, save, readPrefixSpelling, termColors } from "../logic/settings.ts";
+import { load, save, update, readPrefixSpelling, termColors } from "../logic/settings.ts";
 import { api } from "../logic/api.ts";
 import { daemonOf, type Qid, type QualifiedWorkspace } from "../logic/events.ts";
 import { type GitActionId, type MenuCx, type GroupId, groupsFor, itemsFor } from "../logic/git-menu.ts";
@@ -152,8 +152,8 @@ export function Shell() {
   const [hostsOpen, setHostsOpen] = useState(false);
   const [zen, setZen] = useState(() => load(storage()).zen);
   const [layout, setLayout] = useState(false);
-  const [procsHeight, setProcsHeight] = useState<number | null>(null);
-  const [systemHeight, setSystemHeight] = useState<number | null>(null);
+  const [procsHeight, setProcsHeight] = useState<number | null>(() => load(storage()).procsHeight || null);
+  const [systemHeight, setSystemHeight] = useState<number | null>(() => load(storage()).systemHeight || null);
   const [attached, setAttached] = useState(true);
   const returnPage = useRef<PageName>("work");
   const projectTabs = useRef<HTMLElement>(null);
@@ -203,6 +203,16 @@ export function Shell() {
   const ws: QualifiedWorkspace | null = detailed(
     spaces.find((w) => String(w.id) === wsId) ?? [...spaces].sort((a, b) => weight(b) - weight(a))[0] ?? null,
   );
+
+  // Zen and the section heights are remembered like the rail widths, so a
+  // reload comes back to the layout it left. Zen as it is toggled; the heights
+  // once LAYOUT mode is left, not on every arrow key inside it. `update` writes
+  // nothing when the stored value already matches, so the first render is not
+  // a write.
+  useEffect(() => { update(storage(), { zen }); }, [zen]);
+  useEffect(() => {
+    if (!layout) update(storage(), { procsHeight: procsHeight ?? 0, systemHeight: systemHeight ?? 0 });
+  }, [layout]);
 
   useEffect(() => {
     projectTabs.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
