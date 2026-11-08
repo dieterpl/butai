@@ -2156,6 +2156,22 @@ pub async fn run(
                         }
                         dirty = true;
                     }
+                    Flow::FoldSelected => {
+                        if let Some(ws) = active_workspace(&daemons, &hosts, &view) {
+                            let (id, rows) = (ws.id, rail_rows(ws, &view));
+                            match rows.get(view.agent_sel) {
+                                Some(r) if r.family > 0 => {
+                                    let key = (id, ws.agents[r.idx].pane);
+                                    if !view.agent_folds.remove(&key) {
+                                        view.agent_folds.insert(key);
+                                    }
+                                }
+                                Some(_) => view.flash = Some("no helpers to fold".into()),
+                                None => {}
+                            }
+                        }
+                        dirty = true;
+                    }
                     Flow::ForkSelected => {
                         match selected_route(&daemons, &hosts, &view) {
                             Some(at) => {
@@ -6088,10 +6104,34 @@ async fn fork_pane(daemons: &[Daemon], at: Route) -> Result<PaneId> {
     Ok(PaneId(pane))
 }
 
+/// Close a pane. On an agent the daemon closes the helpers it started with it;
+/// `keep_helpers` leaves them running at the top level instead.
 async fn kill_pane(daemons: &[Daemon], at: Route) -> Result<()> {
+    close_pane(daemons, at, false).await
+}
+
+async fn close_pane(daemons: &[Daemon], at: Route, keep_helpers: bool) -> Result<()> {
     let d = daemons.get(at.daemon).context("that machine has gone")?;
-    d.api.delete(&format!("/v1/workspaces/{}/processes/{}", at.workspace, at.pane)).await?;
+    let keep = if keep_helpers { "?helpers=keep" } else { "" };
+    d.api.delete(&format!("/v1/workspaces/{}/processes/{}{keep}", at.workspace, at.pane)).await?;
     Ok(())
+}
+
+/// `pane` and every agent under it, at any depth.
+fn family(agents: &[butai_protocol::api::AgentDto], pane: PaneId) -> Vec<PaneId> {
+    let mut out = vec![pane];
+    let mut i = 0;
+    while i < out.len() {
+        let p = out[i];
+        out.extend(agents.iter().filter(|a| a.parent == Some(p)).map(|a| a.pane));
+        i += 1;
+    }
+    out
+}
+
+/// The AGENTS rail's rows for `ws`, as the drawing lays them out.
+fn rail_rows(ws: &WorkspaceDetail, view: &View) -> Vec<chrome::RailAgent> {
+    chrome::rail_agents(&ws.agents, ws.id, &view.agent_folds)
 }
 
 /// POST one git route on the active workspace.
@@ -6597,6 +6637,8 @@ enum Flow {
     /// Fork the agent the cursor is on — `F` on AGENTS and on BOOTH's fleet,
     /// and the agent menu's "fork agent".
     ForkSelected,
+    /// Fold or unfold the helpers under the AGENTS rail's selected agent.
+    FoldSelected,
     /// Close the exact chat named by a BOOTH button, even inside a folded project.
     EndAgent(Route),
     /// One framed command on a fresh control connection.
@@ -6980,6 +7022,7 @@ fn handle_rail_key(k: event::KeyEvent, focus: Focus, rows: usize, pinned: bool) 
         crate::verbs::VerbId::Restart if rows > 0 => Flow::RestartProcess,
         crate::verbs::VerbId::Kill if rows > 0 => Flow::KillSelected,
         crate::verbs::VerbId::Fork if rows > 0 => Flow::ForkSelected,
+        crate::verbs::VerbId::Fold if rows > 0 => Flow::FoldSelected,
         // `m` is in the table so that it is bound, documented and out of the
         // other verbs' way — but the menu names the pane the cursor is on, and
         // that needs the workspace, which this function does not take. The loop
@@ -8533,7 +8576,7 @@ fn run_click(
             };
             view.focus = focus;
             let rows = match (focus, ws) {
-                (Focus::Agents, Some(w)) => w.agents.len(),
+                (Focus::Agents, Some(w)) => rail_rows(w, view).len(),
                 (Focus::Processes, Some(w)) => w.processes.len(),
                 _ => 0,
             };
@@ -8610,15 +8653,24 @@ async fn run_menu_row(
         (MenuTarget::Agent { daemon, workspace, pane }, 1) => {
             kill_pane(daemons, Route { daemon, workspace, pane }).await?;
         }
+        (MenuTarget::Agent { daemon, workspace, pane }, 2) => {
+            close_pane(daemons, Route { daemon, workspace, pane }, true).await?;
+        }
         (MenuTarget::Agent { daemon, workspace, pane }, row) => {
-            let keep = (row == 2).then_some(pane);
-            let panes: Vec<PaneId> = daemons
+            // "Close others" keeps the agent and everything under it. Each close
+            // here keeps helpers, because the list already names every agent
+            // that is going: a cascade would only reach into the ones that stay,
+            // or close a row before the loop got to it and fail on the 404.
+            let agents = daemons
                 .get(daemon)
                 .and_then(|d| d.state.workspace(workspace))
-                .map(|w| w.agents.iter().map(|a| a.pane).filter(|p| Some(*p) != keep).collect())
+                .map(|w| w.agents.clone())
                 .unwrap_or_default();
+            let keep = if row == 3 { family(&agents, pane) } else { Vec::new() };
+            let panes: Vec<PaneId> =
+                agents.iter().map(|a| a.pane).filter(|p| !keep.contains(p)).collect();
             for pane in panes {
-                kill_pane(daemons, Route { daemon, workspace, pane }).await?;
+                close_pane(daemons, Route { daemon, workspace, pane }, true).await?;
             }
         }
         (MenuTarget::Process(pane), _) => {
@@ -8659,6 +8711,7 @@ fn menu_for(
     daemons: &[Daemon],
     hosts: &[Option<String>],
     here: usize,
+    folds: &std::collections::BTreeSet<(SessionId, PaneId)>,
 ) -> Option<Overlay> {
     use chrome::MenuTarget;
     let ws = ws?;
@@ -8667,7 +8720,9 @@ fn menu_for(
         // then the close rows the rail used to offer on their own.
         hit::Target::Rail(Focus::Agents, row) => {
             let all = all_agent_rows(daemons, hosts);
-            return Some(tag_menu(here, ws.id, ws.agents.get(row)?, &all));
+            let agent =
+                ws.agents.get(chrome::rail_agents(&ws.agents, ws.id, folds).get(row)?.idx)?;
+            return Some(tag_menu(here, ws.id, agent, &all));
         }
         hit::Target::Rail(Focus::Processes, row) => {
             MenuTarget::Process(ws.processes.get(row)?.pane)
@@ -9773,7 +9828,9 @@ fn handle_input(
                     let here = active_daemon(daemons, hosts, view);
                     // Drawn where the button went down, which is what a context
                     // menu is: `m` opens the same one centred, having no pointer.
-                    if let Some(menu) = menu_for(target, ws, daemons, hosts, here) {
+                    if let Some(menu) =
+                        menu_for(target, ws, daemons, hosts, here, &view.agent_folds)
+                    {
                         view.overlay = Some(menu.at(m.column, m.row));
                     }
                 }
@@ -10406,7 +10463,9 @@ fn handle_input(
                     }
                     let ws = active_workspace(daemons, hosts, view);
                     let here = active_daemon(daemons, hosts, view);
-                    if let Some(menu) = menu_for(menu_target(view), ws, daemons, hosts, here) {
+                    if let Some(menu) =
+                        menu_for(menu_target(view), ws, daemons, hosts, here, &view.agent_folds)
+                    {
                         view.overlay = Some(menu);
                     }
                 }
@@ -10669,7 +10728,7 @@ fn rail_counts(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Cou
     // cursor and Enter index the same list, so anything that can be selected
     // has to be counted here or the two disagree at the bottom of the rail.
     let changes = ws.changes.as_ref().map(|c| chrome::change_rows(c).len()).unwrap_or(0);
-    (ws.agents.len(), ws.processes.len(), changes, all)
+    (rail_rows(ws, view).len(), ws.processes.len(), changes, all)
 }
 
 /// Row counts for each rail: agents, processes, changes, all-agents.
@@ -11164,7 +11223,10 @@ fn browse_daemon(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> u
 fn selected_pane(daemons: &[Daemon], hosts: &[Option<String>], view: &View) -> Option<PaneId> {
     let ws = active_workspace(daemons, hosts, view)?;
     match view.focus {
-        Focus::Agents => ws.agents.get(view.agent_sel).map(|a| a.pane),
+        Focus::Agents => rail_rows(ws, view)
+            .get(view.agent_sel)
+            .and_then(|r| ws.agents.get(r.idx))
+            .map(|a| a.pane),
         Focus::Processes => ws.processes.get(view.proc_sel).map(|p| p.pane),
         Focus::AllAgents => {
             let all = all_agent_rows(daemons, hosts);
@@ -12707,6 +12769,7 @@ mod tests {
             labels: Vec::new(),
             origin: None,
             parent: None,
+            forked: false,
         }
     }
 
@@ -12725,6 +12788,76 @@ mod tests {
             stage: None,
             autostart: Vec::new(),
         }
+    }
+
+    /// The rail's cursor counts the rows the tree draws, not the workspace's
+    /// agents: with a helper nested under the first agent, row 1 is that helper,
+    /// and a fold takes its rows out of the count.
+    #[test]
+    fn the_agents_cursor_counts_tree_rows() {
+        use butai_protocol::api::AgentState;
+        let mut ws = ws_with_agents();
+        let mut helper = agent_dto(12, "helper", AgentState::Idle);
+        helper.parent = Some(PaneId(10));
+        ws.agents.push(helper);
+        let menu = menu_for(
+            hit::Target::Rail(Focus::Agents, 1),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &Default::default(),
+        )
+        .expect("a menu");
+        let Overlay::List(list) = &menu else { panic!("not a list") };
+        let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
+        assert_eq!(tags.pane, PaneId(12), "row 1 is the helper under row 0");
+
+        let mut view = View::default();
+        assert_eq!(rail_rows(&ws, &view).len(), 3);
+        view.agent_folds.insert((ws.id, PaneId(10)));
+        assert_eq!(rail_rows(&ws, &view).len(), 2, "the helper is folded away");
+        let folded = menu_for(
+            hit::Target::Rail(Focus::Agents, 1),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &view.agent_folds,
+        )
+        .expect("a menu");
+        let Overlay::List(list) = &folded else { panic!("not a list") };
+        let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
+        assert_eq!(tags.pane, PaneId(11), "with the helper hidden, row 1 is the next agent");
+    }
+
+    /// `space` folds on the AGENTS rail, and only where there is a row.
+    #[test]
+    fn space_folds_the_agents_rail() {
+        let space = event::KeyEvent::new(event::KeyCode::Char(' '), event::KeyModifiers::NONE);
+        for pinned in [true, false] {
+            assert!(matches!(
+                handle_rail_key(space, Focus::Agents, 2, pinned),
+                Some(Flow::FoldSelected)
+            ));
+            assert!(handle_rail_key(space, Focus::Agents, 0, pinned).is_none());
+        }
+        assert!(handle_rail_key(space, Focus::Processes, 2, false).is_none());
+    }
+
+    /// "Close others" keeps the agent and everything under it, at any depth,
+    /// and nothing else.
+    #[test]
+    fn an_agents_family_is_everything_under_it() {
+        use butai_protocol::api::AgentState;
+        let a = |pane: u64, parent: Option<u64>| {
+            let mut d = agent_dto(pane, "x", AgentState::Idle);
+            d.parent = parent.map(PaneId);
+            d
+        };
+        let agents = [a(1, None), a(2, Some(1)), a(3, Some(2)), a(4, None), a(5, Some(4))];
+        assert_eq!(family(&agents, PaneId(1)), [PaneId(1), PaneId(2), PaneId(3)]);
+        assert_eq!(family(&agents, PaneId(3)), [PaneId(3)]);
     }
 
     fn ws_with_changes(changes: butai_protocol::api::ChangesDto) -> WorkspaceDetail {
@@ -16250,8 +16383,15 @@ name = \"terminal\"
         use chrome::MenuTarget;
         let ws = ws_with_agents();
         let second = ws.agents[1].pane;
-        let menu = menu_for(hit::Target::Rail(Focus::Agents, 1), Some(&ws), &[], &[], 0)
-            .expect("an agent row has a menu");
+        let menu = menu_for(
+            hit::Target::Rail(Focus::Agents, 1),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &Default::default(),
+        )
+        .expect("an agent row has a menu");
         let Overlay::List(list) = &menu else { panic!("not a list") };
         // The same menu BOOTH opens on a chat: the role and labels first.
         let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
@@ -16263,28 +16403,61 @@ name = \"terminal\"
         // Then fork and the close rows, which the rail has no `[x]` to reach
         // otherwise.
         assert_eq!(
-            list.items[list.items.len() - 4..],
-            ["  fork agent", "  close agent", "  close others", "  close all agents"]
+            list.items[list.items.len() - 5..],
+            [
+                "  fork agent",
+                "  close agent",
+                "  close agent, keep helpers",
+                "  close others",
+                "  close all agents"
+            ]
         );
         let rows = tags.rows();
         assert_eq!(
-            rows[rows.len() - 4..],
+            rows[rows.len() - 5..],
             [
                 chrome::TagRow::Close(0),
                 chrome::TagRow::Close(1),
                 chrome::TagRow::Close(2),
-                chrome::TagRow::Close(3)
+                chrome::TagRow::Close(3),
+                chrome::TagRow::Close(4)
             ]
         );
         assert!(tags.pick(rows.len() - 1).is_none(), "a close row is not a tag change");
 
         // A row past the end of the rail has nothing to offer, and neither does
         // empty chrome — a menu there would be a menu about nothing.
-        assert!(menu_for(hit::Target::Rail(Focus::Agents, 9), Some(&ws), &[], &[], 0).is_none());
-        assert!(menu_for(hit::Target::Nothing, Some(&ws), &[], &[], 0).is_none());
-        assert!(menu_for(hit::Target::Footer("[help]"), Some(&ws), &[], &[], 0).is_none());
+        assert!(menu_for(
+            hit::Target::Rail(Focus::Agents, 9),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &Default::default()
+        )
+        .is_none());
+        assert!(
+            menu_for(hit::Target::Nothing, Some(&ws), &[], &[], 0, &Default::default()).is_none()
+        );
+        assert!(menu_for(
+            hit::Target::Footer("[help]"),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &Default::default()
+        )
+        .is_none());
         // The CHANGES rail's rows are files, not panes.
-        assert!(menu_for(hit::Target::Rail(Focus::Changes, 0), Some(&ws), &[], &[], 0).is_none());
+        assert!(menu_for(
+            hit::Target::Rail(Focus::Changes, 0),
+            Some(&ws),
+            &[],
+            &[],
+            0,
+            &Default::default()
+        )
+        .is_none());
     }
 
     /// A menu the right button opened is clicked where it was drawn: beside the
@@ -16333,7 +16506,8 @@ name = \"terminal\"
         // On a rail: the row under the cursor, not the first one.
         let view = View { focus: Focus::Agents, agent_sel: 1, ..Default::default() };
         assert_eq!(menu_target(&view), hit::Target::Rail(Focus::Agents, 1));
-        let menu = menu_for(menu_target(&view), Some(&ws), &[], &[], 0).expect("an agent menu");
+        let menu = menu_for(menu_target(&view), Some(&ws), &[], &[], 0, &Default::default())
+            .expect("an agent menu");
         let Overlay::List(list) = &menu else { panic!("not a list") };
         let ListKind::Tags(tags) = &list.kind else { panic!("{:?}", list.kind) };
         assert_eq!(

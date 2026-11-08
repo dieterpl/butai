@@ -28,6 +28,7 @@ use butai_client::api::Api;
 pub mod agent;
 pub mod pane;
 pub mod process;
+pub mod tree;
 pub mod workspace;
 
 #[derive(Parser)]
@@ -257,11 +258,15 @@ pub fn run(cli: Cli) -> Result<u8> {
 fn whoami(out: &Out, socket: &std::path::Path) -> Result<()> {
     let pane = crate::cli::pane::own_pane();
     let ws = std::env::var("BUTAI_WORKSPACE").ok().filter(|s| !s.trim().is_empty());
+    // The agent that spawned this one, when one did. Read from the environment
+    // like the rest, so it stays a question this command answers offline.
+    let parent = crate::cli::pane::parent_pane();
     let inside = pane.is_some();
     let value = serde_json::json!({
         "inside_butai": inside,
         "pane": pane.map(|p| p.0),
         "workspace": ws,
+        "parent": parent.map(|p| p.0),
         "socket": socket.display().to_string(),
     });
     out.emit_owned(&value, |w| {
@@ -270,6 +275,9 @@ fn whoami(out: &Out, socket: &std::path::Path) -> Result<()> {
                 writeln!(w, "pane {p}")?;
                 if let Some(ws) = &ws {
                     writeln!(w, "workspace {ws}")?;
+                }
+                if let Some(parent) = parent {
+                    writeln!(w, "parent {parent}")?;
                 }
             }
             None => writeln!(w, "not inside a butai pane ($BUTAI_PANE is unset)")?,

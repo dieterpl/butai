@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.5.0-dev.19: the AGENTS rail is a tree, closing a parent closes its
+  helpers, and a lead can address its helpers as a group.** Helpers sit right
+  under the agent that spawned them on the AGENTS rail, with the same `├` `└`
+  `│` branches BOOTH's fleet uses, to three levels of indent. `space` folds a
+  parent: the row reads `+N` for what is hidden and shows the most urgent status
+  in the family, so a helper waiting on you is not folded out of sight. `x` on
+  an agent now closes the helpers it started too, deepest first, and so do the
+  menu's **close agent**, `butai agent kill` and `DELETE .../panes/{pane}`. The
+  new **close agent, keep helpers** row, `--keep-helpers` and `?helpers=keep`
+  close only the agent and move its helpers to the top level. A fork is not a
+  helper: it stays when the agent it was copied from closes. An agent that exits
+  on its own leaves its helpers running. This changes dev.10, where closing a
+  parent left its helpers up. Agent rows gain an optional `forked`. Helper panes
+  get `$BUTAI_PARENT`, and `butai whoami` prints it. `butai pane ls` draws the
+  tree, and `pane ls`, `agent wait` and `agent kill` take `--children [TARGET]`
+  (the caller's own helpers by default) and `--tree`, so a lead can wait on,
+  read and close its helpers without keeping a list of ids. `agent spawn` takes
+  `--parent` and `--no-parent`. `agent kill` now prints the panes it closed.
+  The browser client gets the cascade but not the tree or the keep-helpers row
+  yet.
 - **1.5.0-dev.18: start an agent as something, and roles of your own.** The
   agent picker (`alt-enter`, `a`) now lists role presets under the harnesses.
   Each one starts a harness, tags its role and labels, and pastes a prompt once

@@ -468,7 +468,7 @@ is aborted rather than completed, and no decoder in the list above minds.
 |---|---|---|
 | GET | `/v1/workspaces` | list workspaces + agent/process/change counts |
 | GET | `/v1/workspaces/{id}` | full detail: agents, processes, changes |
-| GET | `/v1/workspaces/{id}/agents` | agent rows (`state`: `waiting`/`working`/`finished`/`idle`/`exited`; `exited` also carries the code; `unread` = reached a your-move state and not looked at since, cleared by staging/input/`ack`; `role` = one of `lead`/`worker`/`loop`/`watch` or `null`, `labels` = free words, both set with `PUT .../tags`; `origin` = who started it, `cli`/`tui`/`web`/`agent`, absent when the spawn did not say) |
+| GET | `/v1/workspaces/{id}/agents` | agent rows (`state`: `waiting`/`working`/`finished`/`idle`/`exited`; `exited` also carries the code; `unread` = reached a your-move state and not looked at since, cleared by staging/input/`ack`; `role` = one of `lead`/`worker`/`loop`/`watch` or `null`, `labels` = free words, both set with `PUT .../tags`; `origin` = who started it, `cli`/`tui`/`web`/`agent`, absent when the spawn did not say; `parent` = the pane of the agent it sits under, absent for a top-level agent and for one whose parent has gone; `forked` = `true` when it is a fork of `parent` rather than a helper `parent` spawned, absent when false) |
 | GET | `/v1/workspaces/{id}/processes` | process rows (`status`: `ok`/`run`/`done`/`FAIL(n)`/`...`) |
 | GET | `/v1/workspaces/{id}/changes` | git branch, staged/unstaged/**conflicted** files, recent commits, upstream + ahead/behind, and `state` (see [Git operations](#git-operations)) |
 | GET | `/v1/workspaces/{id}/tree?path=&filter=` | one directory listing (lazy file tree); `path` relative to cwd, `""`=root. `filter` is `all` (default, and what this route has always answered) or `docs` — markdown, READMEs, and every directory but `target` and `node_modules`. **It decides the rows *and* their `changed` markers**, which is the whole reason it is a parameter and not a client's own filter: a directory's `changed` is "something under here changed", so a client that filtered the reply afterwards kept directories marked for files it had just dropped, and following one down landed on an empty listing. Any other value is a `400` rather than a silently unfiltered listing |
@@ -498,10 +498,10 @@ is aborted rather than completed, and no decoder in the list above minds.
 | POST | `/v1/workspaces` | `{name?,layout?,path?}` create → `201 {"id"}`; an empty body is valid |
 | POST | `/v1/fs/mkdir` | `{path?,name}` create a directory, returns the new listing |
 | DELETE | `/v1/workspaces/{id}` | kill workspace |
-| POST | `/v1/workspaces/{id}/agents` | `{type}` spawn an agent (`name`/`agent` accepted as aliases). `{background:true}` leaves the stage and focus alone, for a helper spawned by another agent. `{origin}` names the asker — `cli`, `tui`, `web`, or `agent` for a spawn from inside a pane — and comes back on the agent row; optional, and any other value is dropped rather than refused |
+| POST | `/v1/workspaces/{id}/agents` | `{type}` spawn an agent (`name`/`agent` accepted as aliases). `{background:true}` leaves the stage and focus alone, for a helper spawned by another agent. `{origin}` names the asker — `cli`, `tui`, `web`, or `agent` for a spawn from inside a pane — and comes back on the agent row; optional, and any other value is dropped rather than refused. `{parent}` is the pane of the agent this one works for; it comes back as the row's `parent` and reaches the new pane as `$BUTAI_PARENT`. Only an agent of the same workspace counts; anything else is dropped and the agent starts top-level |
 | POST | `/v1/workspaces/{id}/processes` | `{name,command}` start a process. An omitted or empty `command` starts the workspace's default shell — what a `[+ term]` button asks for |
 | POST | `/v1/workspaces/{id}/processes/{pane}/restart` | restart a process (**allocates a new pane id**) |
-| DELETE | `/v1/workspaces/{id}/panes/{pane}` | kill any pane — agent, process, editor, tree |
+| DELETE | `/v1/workspaces/{id}/panes/{pane}?helpers=` | kill any pane — agent, process, editor, tree. On an agent this also closes its **helpers**: every agent below it through `parent`, except forks. They close deepest first and the agent last, so an orchestrator never sees its helpers go and replaces them. A fork, and everything under it, stays and moves to the top level. **`?helpers=keep`** closes only the pane and moves its children to the top level. Absent or `kill` is the cascade, and any other value is a `400`. An agent that exits on its own closes nothing else |
 | DELETE | `/v1/workspaces/{id}/processes/{pane}` | legacy alias of the above, kept for older clients |
 | POST | `/v1/workspaces/{id}/panes/{pane}/input` | inject one `InputEvent` (e.g. `{"key":{"code":"enter"}}`) without attaching |
 | POST | `/v1/workspaces/{id}/panes/{pane}/ack` | dismiss a pane's pending bell — without this a non-TUI client can never clear `waiting` |
@@ -757,6 +757,11 @@ so a program running inside one can drive butai without being told where it is:
 | `BUTAI_WORKSPACE` | the workspace it belongs to |
 | `BUTAI_SOCKET` | the socket this daemon is bound to |
 | `BUTAI` | unchanged: the nesting marker a client checks to refuse to run inside itself |
+
+An agent pane started under another agent (a spawn with `parent`, a fork, and
+the same pane respawned or restored) also gets `BUTAI_PARENT`, that agent's pane
+id. A restore sets it only when the parent was restored ahead of the child,
+which is the usual order because a parent is spawned first.
 
 There is deliberately no separate "am I inside butai" flag. `BUTAI_PANE` is always
 set by the spawner and is strictly more informative than a boolean, so **its

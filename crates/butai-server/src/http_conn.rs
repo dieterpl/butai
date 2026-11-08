@@ -341,10 +341,25 @@ async fn route(
         // and left every GUI without a way to kill an agent. This is the honest
         // name; the `processes` spelling below stays as an alias so a client that
         // ships against an older daemon keeps working.
+        //
+        // Killing an agent also kills the helpers it spawned; `?helpers=keep`
+        // keeps them, lifted to the top level. Absent, or `kill`, is the
+        // default. Anything else is refused rather than guessed at, because the
+        // wrong guess either kills work or leaves it running.
         (&Method::DELETE, ["v1", "workspaces", id, "panes", pane])
         | (&Method::DELETE, ["v1", "workspaces", id, "processes", pane]) => {
-            match (sid(id), pid(pane)) {
-                (Some(ws), Some(pane)) => call(&events, ApiRequest::KillPane { ws, pane }).await,
+            let keep_helpers = match query_get(&query, "helpers").as_deref() {
+                None | Some("kill") => Some(false),
+                Some("keep") => Some(true),
+                Some(_) => None,
+            };
+            match (sid(id), pid(pane), keep_helpers) {
+                (Some(ws), Some(pane), Some(keep_helpers)) => {
+                    call(&events, ApiRequest::KillPane { ws, pane, keep_helpers }).await
+                }
+                (Some(_), Some(_), None) => {
+                    ApiReply::BadRequest("?helpers= must be keep or kill".into())
+                }
                 _ => ApiReply::BadRequest("bad workspace or pane id".into()),
             }
         }

@@ -84,6 +84,10 @@ pub struct AgentMeta {
     /// [`AgentDto::parent`](butai_protocol::api::AgentDto::parent). A pane id,
     /// so it is re-pointed when the parent is respawned and saved by dump name.
     pub parent: Option<PaneId>,
+    /// This chat is a fork of [`parent`](Self::parent) rather than a helper it
+    /// spawned — see [`AgentDto::forked`](butai_protocol::api::AgentDto::forked).
+    /// Decides what an explicit kill of the parent takes down with it.
+    pub forked: bool,
 }
 
 pub struct Workspace {

@@ -18,6 +18,9 @@ Every pane the daemon spawns — agent, process, or plain shell — carries:
 | `BUTAI_WORKSPACE` | the workspace it belongs to |
 | `BUTAI_SOCKET` | the socket this daemon is bound to |
 
+An agent pane started under another agent also carries `BUTAI_PARENT`, that
+agent's pane id; see [Helpers and the tree](#helpers-and-the-tree).
+
 There is no separate "am I inside butai" flag: `BUTAI_PANE` is always set by the
 spawner and says more than a boolean would, so its absence is the test.
 
@@ -28,6 +31,7 @@ command run inside a pane already acts on its own workspace, on its own daemon.
 butai whoami
 # pane 7
 # workspace 1
+# parent 3          (only in a helper)
 # socket /Users/you/.butai/butai.sock
 ```
 
@@ -218,6 +222,77 @@ opencode can fork, but they pick their own conversation ids, so butai does not
 know which conversation to copy. For any agent without `fork_args`, and for one
 nobody has typed into yet, `fork` fails with exit 64 and says why. It never
 starts an empty chat in place of a copy. See [`agent fork`](cli.md#agent-fork).
+
+## Helpers and the tree
+
+An agent spawned from inside a pane is recorded as that pane's child, and a fork
+as a child of the agent it copied. `butai agent spawn --parent <TARGET>` names a
+different parent in the same workspace, and `--no-parent` records none, for an
+agent that should stand on its own. The child's pane gets `$BUTAI_PARENT`, so a
+helper can name its lead without being told.
+
+The tree makes a difference between two kinds of child. A **helper** is an agent
+its parent spawned to do part of its work, so it belongs to that parent. A
+**fork** is a copy somebody made of a conversation; it nests under the agent it
+came from but belongs to nobody. Every `--children` flag below means helpers
+only.
+
+```sh
+butai pane ls                       # agents drawn as a tree
+butai pane ls --children            # my helpers
+butai pane ls --children 3 --tree   # pane 3's helpers, and theirs
+butai agent wait --children         # block until all my helpers are done
+butai agent kill --children         # close my helpers, keep me
+```
+
+`pane ls` draws each child right under its parent with `├ ` and `└ ` in front of
+its label. The first column is still the bare pane id, so `cut -f1` still works,
+and `--json` stays a flat list with `parent` and `forked` on each agent row.
+
+`agent wait --children` waits until every helper has reached the state set, and
+treats a helper whose row has gone as done, the way a single wait does. It exits
+3 if any helper is still going at the timeout, 4 if any exited, and 0 otherwise.
+With no helpers it returns 0 straight away and says so on stderr. The helpers it
+waits on are the ones present when it starts; one spawned during the wait is not
+included.
+
+**Killing an agent kills its helpers.** An explicit kill (`agent kill`, the
+DELETE route, closing it in the terminal or the browser, dismissing an exited
+row) closes the agent's helpers first, deepest first, then the agent. The order is deliberate: an orchestrator
+never gets the chance to see its helpers die and start replacements. Its forks
+are not touched. They stay running and move to the top level, along with
+everything under them. `--keep-helpers` closes only the agent and moves its
+children to the top level. An agent that **exits on its own** takes nothing with
+it, because its helpers may still be in the middle of something. Its children
+then show as top-level.
+
+`agent kill --children` closes a lead's helpers and leaves the lead running, so
+an orchestrator can clear up after a round of work without killing itself.
+`agent kill` prints the ids of the panes it closed, one per line. It refuses a
+kill that would close your own pane, including when your pane would go as
+someone else's helper.
+
+### Let the lead pull, rather than helpers push
+
+The tempting way for a helper to report back is `butai agent send $BUTAI_PARENT
+"done: …"`. Don't. The lead is usually in the middle of a turn, and what you
+send arrives as a paste in its input box. Depending on the CLI it then gets
+glued onto the next thing the lead types, sits there unsubmitted, or interrupts
+the turn.
+
+The safer pattern goes the other way. The helper writes its result where the
+lead can read it (its own screen is enough) and finishes its turn. The lead
+waits on its helpers and reads them when it is ready:
+
+```sh
+butai agent spawn claude --background --prompt "summarise ./logs"
+butai agent spawn claude --background --prompt "list the failing tests"
+butai agent wait --children --timeout 600000
+for P in $(butai pane ls --children | cut -f1); do
+  butai pane read $P --lines 40
+done
+butai agent kill --children
+```
 
 ## There is no split
 

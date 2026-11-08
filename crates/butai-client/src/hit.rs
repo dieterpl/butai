@@ -253,7 +253,8 @@ pub fn at(
         // same cursor and the same length — see [`chrome::rail_first`]. A screen
         // row is only the entry while the list fits.
         if geom.agents_rows.contains(x, y) {
-            let len = ws.map(|w| w.agents.len()).unwrap_or(0);
+            let len =
+                ws.map_or(0, |w| chrome::rail_agents(&w.agents, w.id, &view.agent_folds).len());
             let first = chrome::rail_first(view.agent_sel, len, geom.agents_rows.height);
             return Target::Rail(Focus::Agents, first + (y - geom.agents_rows.y) as usize);
         }
@@ -904,6 +905,7 @@ mod tests {
             labels: Vec::new(),
             origin: None,
             parent: None,
+            forked: false,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let fleet = vec![
@@ -1024,6 +1026,7 @@ mod tests {
             labels: Vec::new(),
             origin: None,
             parent: None,
+            forked: false,
         };
         let (a, b) = (agent("claude", 1), agent("codex", 2));
         let row = |ws, id, a| chrome::AllAgentRow {
@@ -1182,6 +1185,7 @@ mod tests {
             labels: Vec::new(),
             origin: None,
             parent: None,
+            forked: false,
         };
         // Sixty agents in one project, the 51st asking: far below the window.
         let agents: Vec<AgentDto> = (0..60)
@@ -1666,6 +1670,7 @@ mod tests {
                     labels: Vec::new(),
                     origin: None,
                     parent: None,
+                    forked: false,
                 })
                 .collect(),
             processes: (0..procs)

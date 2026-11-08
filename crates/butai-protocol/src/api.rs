@@ -132,6 +132,15 @@ pub struct AgentDto {
     /// skipped on the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<PaneId>,
+    /// This chat is a **fork** of its [`parent`](Self::parent) — a copy a person
+    /// made of that conversation — rather than a helper the parent spawned.
+    ///
+    /// Both nest under the agent they came from, but only a helper belongs to
+    /// it: closing an agent closes the helpers it started and leaves its forks
+    /// running, moved to the top level. `false` on the wire is skipped, and is
+    /// the honest default from a daemon that predates forks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forked: bool,
 }
 
 /// Where a chat can have been started from, as [`AgentDto::origin`] names it.
@@ -1771,9 +1780,13 @@ pub enum ApiRequest {
         ws: SessionId,
         pane: PaneId,
     },
+    /// Close a pane. On an agent this also closes the helpers it spawned,
+    /// deepest first, unless `keep_helpers` — then they stay up at the top
+    /// level. Its forks always stay. See [`AgentDto::forked`].
     KillPane {
         ws: SessionId,
         pane: PaneId,
+        keep_helpers: bool,
     },
     /// Inject a single input event (a keystroke or paste) into a pane's PTY
     /// without attaching a streaming client — so a mobile/list UI can approve or

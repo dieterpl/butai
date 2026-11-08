@@ -386,9 +386,10 @@ row so its final output stays one Enter away — `x` is what dismisses it.
 | `a` | spawn the pinned agent, or ask which when nothing is pinned |
 | `A`, `alt-enter` | always ask |
 | `j` `k`, `enter` | move · put it on the stage |
-| `x` | kill the row. It does not ask — an agent's transcript is on disk |
+| `x` | kill the row, and the helpers it started. It does not ask — an agent's transcript is on disk |
+| `space` | fold or unfold the helpers under the row |
 | `F` | fork the row: a new pane on a copy of its conversation, listed under it |
-| `m` | the row's menu: its role and labels, then **fork agent · close agent · close others · close all agents** |
+| `m` | the row's menu: its role and labels, then **fork agent · close agent · close agent, keep helpers · close others · close all agents** |
 
 `m` is the right button's menu opened from the keyboard. It is the chat's tag
 menu, the same one BOOTH opens on a chat (see [BOOTH](#booth)), with **fork
@@ -425,6 +426,41 @@ bar follows each name, scaled to the agent you start most; an agent you never
 start has an empty track. Never a number, and on a smaller terminal never a bar:
 the list is the names alone, in the same order. A list longer than the box
 scrolls with the cursor, and `▲` / `▼` at its edge say there is more.
+
+### Helpers
+
+An agent that runs `butai agent spawn` inside its own pane becomes the parent of
+the agent it starts (see [agents.md](agents.md)). The rail draws each helper
+right under its parent with the same `├` `└` `│` branches BOOTH's fleet uses,
+and a helper's own helpers under it in turn. Siblings keep the rail's order;
+an agent whose parent has gone is back at the top level.
+
+```
+┌ AGENTS ──────────────[+ claude]┐
+│> claude  lead            ⠹ 2:41│
+│  ├ codex  #tests           WAIT│
+│  ├ claude #docs            done│
+│  └ gemini #review        ⠹ 0:12│
+│  +3 codex  lead            WAIT│
+```
+
+`space` folds a parent. The folded row carries `+N`, how many agents are hidden
+under it, and its status is the most urgent of the family in NEEDS YOU's order
+(a question, an unread crash, an unread finished turn, then working), so a
+helper waiting on you is not hidden by the fold. The cursor counts the rows as
+drawn, so `j`/`k`, a click and the menu all land on what you can see. Folds
+live in the client for the session.
+
+Indentation stops at three levels so a name still fits a narrow rail; deeper
+helpers draw at that depth with `…` for their branch.
+
+Closing follows the tree. `x` on a parent closes the helpers it started, deepest
+first, so an orchestrator never watches its helpers die and starts new ones.
+**close agent, keep helpers** closes only the parent and moves its helpers to
+the top level. **close others** keeps the row and everything under it. A fork is
+not a helper: it is listed under the agent it was copied from, but it stays when
+that agent closes and moves to the top level. An agent that exits on its own
+does not take its helpers with it; dismissing its `exit` row with `x` does.
 
 ## PROCESSES
 

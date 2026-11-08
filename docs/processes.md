@@ -250,6 +250,9 @@ Every pane the daemon spawns — process, agent or shell — carries:
 | `BUTAI_PANE` | this pane's id |
 | `BUTAI_WORKSPACE` | the workspace it belongs to |
 
+An agent started under another agent also gets `BUTAI_PARENT`, that agent's
+pane id.
+
 `BUTAI_SOCKET` and `BUTAI_WORKSPACE` are what make `butai` inside a pane act on
 its own daemon and its own workspace without being told. [agents.md](agents.md)
 is the surface built on that.

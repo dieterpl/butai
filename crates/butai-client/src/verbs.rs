@@ -72,6 +72,9 @@ pub enum VerbId {
     /// conversation — `butai agent fork` from the rail. `F`, since `f` is links. AGENTS only: a process
     /// has no conversation to copy.
     Fork,
+    /// Fold or unfold the helpers under the agent the cursor is on. AGENTS
+    /// only, and quiet: it means nothing on a row with no helpers.
+    Fold,
     /// Open the row's context menu — the one the right button opens.
     ///
     /// Answered by the loop rather than by [`crate::workbench`]'s rail
@@ -623,6 +626,7 @@ pub fn agents_verbs(pinned: bool) -> &'static [Verb] {
         verb('A', "new...", VerbId::PickAgent),
         danger('x', "kill", VerbId::Kill),
         quiet('F', "fork", VerbId::Fork),
+        quiet(' ', "fold", VerbId::Fold),
         quiet('m', "menu", VerbId::Menu),
     ];
     // Unpinned, `a` opens the very chooser `A` would, so only one of them is
@@ -633,6 +637,7 @@ pub fn agents_verbs(pinned: bool) -> &'static [Verb] {
         quiet('A', "new...", VerbId::PickAgent),
         danger('x', "kill", VerbId::Kill),
         quiet('F', "fork", VerbId::Fork),
+        quiet(' ', "fold", VerbId::Fold),
         quiet('m', "menu", VerbId::Menu),
     ];
     if pinned {

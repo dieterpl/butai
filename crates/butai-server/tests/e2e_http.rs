@@ -871,6 +871,59 @@ async fn http_api_kills_an_agent_pane() {
     assert_eq!(body.trim(), "[]", "alias route did not kill the agent");
 }
 
+/// Killing an agent over HTTP takes the helpers it spawned with it, unless the
+/// caller says `?helpers=keep`; then the helper stays, at the top level. A value
+/// the daemon does not know is refused rather than guessed at.
+#[tokio::test]
+async fn http_api_kill_cascades_unless_helpers_are_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = start_daemon_with_shell_agent(&tmp).await;
+    let (status, body) = http(&socket, "POST", "/v1/workspaces", Some(r#"{"name":"tree"}"#)).await;
+    assert_eq!(status, 201, "body: {body}");
+
+    let agents = |socket: PathBuf| async move {
+        let (_, body) = http(&socket, "GET", "/v1/workspaces/1/agents", None).await;
+        serde_json::from_str::<Vec<serde_json::Value>>(&body).unwrap()
+    };
+    let spawn = |parent: Option<u64>| {
+        let socket = socket.clone();
+        async move {
+            let body = serde_json::json!({ "type": "sh", "parent": parent }).to_string();
+            let (status, _) = http(&socket, "POST", "/v1/workspaces/1/agents", Some(&body)).await;
+            assert_eq!(status, 200);
+        }
+    };
+
+    for keep in [false, true] {
+        spawn(None).await;
+        let lead = agents(socket.clone()).await.last().unwrap()["pane"].as_u64().unwrap();
+        spawn(Some(lead)).await;
+        let rows = agents(socket.clone()).await;
+        let helper = rows.last().unwrap()["pane"].as_u64().unwrap();
+        assert_eq!(rows.last().unwrap()["parent"], lead, "{rows:?}");
+
+        let route = format!("/v1/workspaces/1/panes/{lead}?helpers=nonsense");
+        let (status, _) = http(&socket, "DELETE", &route, None).await;
+        assert_eq!(status, 400, "an unknown ?helpers= value should be refused");
+
+        let route = match keep {
+            true => format!("/v1/workspaces/1/panes/{lead}?helpers=keep"),
+            false => format!("/v1/workspaces/1/panes/{lead}"),
+        };
+        let (status, body) = http(&socket, "DELETE", &route, None).await;
+        assert_eq!(status, 200, "body: {body}");
+        let rows = agents(socket.clone()).await;
+        let survivor = rows.iter().find(|r| r["pane"] == helper);
+        match keep {
+            false => assert!(survivor.is_none(), "the helper outlived its lead: {rows:?}"),
+            true => {
+                let row = survivor.expect("?helpers=keep killed the helper");
+                assert!(row.get("parent").is_none(), "a kept helper should be top-level: {row}");
+            }
+        }
+    }
+}
+
 /// A dead agent reports `exited`, not `idle`, and is counted apart from the live
 /// buckets. Previously the state was forced to `idle`, so a client that only read
 /// `state` painted a corpse as a quiet live agent.

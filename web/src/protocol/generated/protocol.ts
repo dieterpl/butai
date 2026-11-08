@@ -99,7 +99,17 @@ origin?: string | null,
  * by a daemon that predates it, or whose parent has since gone, and
  * skipped on the wire then.
  */
-parent?: PaneId | null, };
+parent?: PaneId | null, 
+/**
+ * This chat is a **fork** of its [`parent`](Self::parent) — a copy a person
+ * made of that conversation — rather than a helper the parent spawned.
+ *
+ * Both nest under the agent they came from, but only a helper belongs to
+ * it: closing an agent closes the helpers it started and leaves its forks
+ * running, moved to the top level. `false` on the wire is skipped, and is
+ * the honest default from a daemon that predates forks.
+ */
+forked?: boolean, };
 
 /**
  * Attention state of an agent pane (rendered by the apps as

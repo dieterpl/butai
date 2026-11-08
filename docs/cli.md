@@ -173,7 +173,9 @@ guess. The same reasoning refuses a target that is the caller's own pane, for
 `pane send`, `agent send`, `agent wait` and `agent kill`: typing into your own
 pane appends to the prompt you are composing, and waiting on yourself can never
 return, because you are `working` precisely because you are running the wait.
-Both are exit 64.
+Both are exit 64. With the agent tree the same goes for reaching your pane
+indirectly: an `agent wait --children` whose helpers include you, and an `agent
+kill` that would close you as somebody's helper.
 
 Target resolution happens **client-side**. There is no `/v1/resolve` route today
 — the CLI does the lookups itself against `/v1/workspaces` and
@@ -295,7 +297,7 @@ look at git.
 
 | command | signature |
 |---|---|
-| `ls` (alias `list`) | `butai pane ls [TARGET]` |
+| `ls` (alias `list`) | `butai pane ls [TARGET] [--children [TARGET] [--tree]]` |
 | `read` | `butai pane read <TARGET> [-l N] [--source S] [--format F]` |
 | `send` | `butai pane send <TARGET> [TEXT...] [--key KEY] [--no-enter]` |
 
@@ -304,11 +306,18 @@ take a pane target.
 
 ### `pane ls`
 
+| flag | type | default | effect |
+|---|---|---|---|
+| `--children [TARGET]` | pane target, optional | `$BUTAI_PANE` | list only the helpers of this agent |
+| `--tree` | bool | off | with `--children`, the helpers' own helpers too, to any depth |
+
 One tab-separated row per addressable pane — agents first, then processes:
 
 ```
 42	agent	working	⠐ Refactor help button to separate screen
-71	agent	working	⠂ Create comprehensive documentation <- you
+71	agent	working	├ ⠂ Create comprehensive documentation <- you
+73	agent	idle	│ └ ✳ Claude Code	worker (agent)
+75	agent	idle	└ ✳ Claude Code	worker (agent)
 106	agent	idle	✳ Claude Code [stage]	lead #review (cli)
 ```
 
@@ -319,6 +328,22 @@ column: the role bare, each label after a `#`, and who started it in brackets
 (`cli`, `agent`, `tui` or `web`; see [`agent tag`](#agent-tag)). Process rows and
 agents with none of those keep four columns. `no panes in workspace N` when
 there are none.
+
+Agents are listed as a tree, the same shape as BOOTH's fleet. Each child sits
+right under its parent with `├ ` or `└ ` in front of its label, and `│ ` for each
+ancestor that has more children below. Siblings keep the daemon's order. An
+agent whose parent is not in the list is drawn as a root. The glyphs go on the
+label, not the id, so `cut -f1` still gets bare ids. `--json` is a flat list in
+the daemon's order. Each agent row carries `parent` when it has one and
+`forked: true` when it is a fork rather than a helper.
+
+`--children` lists only an agent's **helpers**: its children that are not forks
+(see [agents.md](agents.md#helpers-and-the-tree)). It takes a pane target, and
+on its own means this pane, so a lead runs `butai pane ls --children`. Outside a
+pane and with no target it is exit 64, as it is beside a positional workspace.
+The workspace is the target's. Processes are left out, and an agent with no
+helpers prints `pane N has no helpers`. `--tree` adds the helpers' helpers, drawn
+as a tree under the direct ones, and never descends through a fork.
 
 ### `pane read`
 
@@ -368,14 +393,14 @@ keystroke.
 
 | command | signature |
 |---|---|
-| `ls` (alias `list`) | `butai agent ls [TARGET]` |
-| `spawn` | `butai agent spawn <KIND> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]...` |
+| `ls` (alias `list`) | `butai agent ls [TARGET] [--children [TARGET] [--tree]]` |
+| `spawn` | `butai agent spawn <KIND> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]... [--parent TARGET \| --no-parent]` |
 | `fork` | `butai agent fork <TARGET> [--background] [--prompt TEXT] [--wait] [--timeout MS] [--role ROLE] [--label LABEL]...` |
 | `tag` | `butai agent tag <TARGET> [--role ROLE \| --no-role] [--label LABEL]... [--unlabel LABEL]... [--clear]` |
 | `send` | `butai agent send <TARGET> [TEXT...] [--wait] [--until SET] [--timeout MS]` |
 | `read` | `butai agent read <TARGET> [-l N] [--source S] [--format F]` |
-| `wait` | `butai agent wait <TARGET> [--until SET] [--timeout MS] [--since-seq N]` |
-| `kill` | `butai agent kill <TARGET>` |
+| `wait` | `butai agent wait <TARGET \| --children [TARGET] [--tree]> [--until SET] [--timeout MS] [--since-seq N]` |
+| `kill` | `butai agent kill <TARGET \| --children [TARGET]> [--keep-helpers]` |
 
 `agent ls` and `agent read` are the same code as their `pane` counterparts —
 `agent ls` therefore lists **processes as well as agents**, exactly as `pane ls`
@@ -392,6 +417,8 @@ has no verb for it.
 | `--timeout <MS>` | u64 | `300000` | give up after this many milliseconds when waiting |
 | `--role <ROLE>` | `lead` \| `worker` \| `loop` \| `watch` \| a word of your own | none | give the new agent this role |
 | `--label <LABEL>` | string, repeatable or comma-separated | none | give the new agent these labels |
+| `--parent <TARGET>` | pane target | `$BUTAI_PANE` | record this agent as the new one's parent |
+| `--no-parent` | bool | off | record no parent, even inside a pane |
 
 `<KIND>` is an agent type as configured under `[[agents]]` — see
 [configuration.md](configuration.md). The workspace comes from `--ws` or
@@ -426,7 +453,17 @@ own. Its outcome reaches you through the exit code, plus a stderr line if it
 timed out.
 
 The spawn records who asked for it as the agent's `origin`: `cli`, or `agent`
-when the command runs inside a butai pane (`$BUTAI_PANE` is set). `--role` and
+when the command runs inside a butai pane (`$BUTAI_PANE` is set).
+
+It also records the new agent's parent, which is the pane the command runs in
+unless told otherwise. `--parent` names another agent instead. It is resolved
+like any target and must be an agent in the new agent's workspace, so a process
+or a pane elsewhere is exit 64, and one that does not exist is exit 2.
+`--no-parent` records none, for an agent that should be top-level and nobody's
+helper. The two together are exit 64. The parent decides where BOOTH and
+`pane ls` draw the agent, what `--children` finds, and what a kill of the parent
+takes with it (see [agents.md](agents.md#helpers-and-the-tree)). The new pane
+gets `$BUTAI_PARENT`. `--role` and
 `--label` are checked before the agent starts, so a bad label is exit 64 and no
 agent, and set with the same write [`agent tag`](#agent-tag) makes once it is up.
 
@@ -559,9 +596,69 @@ pane 42 finished
 pane 42 still working after 300000ms
 ```
 
+#### `--children [TARGET]` and `--tree`
+
+| flag | type | default | effect |
+|---|---|---|---|
+| `--children [TARGET]` | pane target, optional | `$BUTAI_PANE` | wait on every helper of this agent instead of on one target |
+| `--tree` | bool | off | with `--children`, the helpers' own helpers too |
+
+Waits until **every** helper of the agent has reached the state set. The
+helpers are the agent's children that are not forks, read once when the wait
+starts, so a helper spawned during the wait is not waited on. Each one is judged
+exactly as a single wait would judge it, `--since-seq` included. Each counts as
+done the first time it qualifies, so a helper that finished and was then handed
+more work still counts. A helper whose row vanishes counts as `exited`, as in a
+single wait. Bare `--children` means this pane. With no target outside a pane,
+or next to a positional target, it is exit 64.
+
+| code | when |
+|---|---|
+| 0 | every helper reached the set |
+| 2 | the agent named does not exist |
+| 3 | the timeout passed with at least one helper still short of the set |
+| 4 | none timed out, but at least one exited |
+| 64 | usage, including a wait that would include your own pane |
+
+A timeout outranks an exit, because "still running" is the answer that says to
+look again. With no helpers at all the wait returns 0 at once, and says
+`pane N has no helpers to wait on` on stderr. A helper running `agent wait
+--children $BUTAI_PARENT` would be waiting on itself, so that is exit 64.
+
+Output is one outcome line per helper, in the order above. Under `--json` it is
+an array of the outcome objects, `[]` when there were none.
+
 ### `agent kill`
 
-Deletes the pane. Refuses your own pane. Prints nothing.
+| flag | type | default | effect |
+|---|---|---|---|
+| `--keep-helpers` | bool | off | close only the panes named; their helpers stay, moved to the top level |
+| `--children [TARGET]` | pane target, optional | `$BUTAI_PANE` | kill this agent's helpers and keep the agent |
+
+Deletes the pane. On an agent the daemon also closes the agent's helpers, its
+children that are not forks, to any depth. They go deepest first and the agent
+last, so an orchestrator never sees its helpers die and starts replacements. The
+agent's forks stay, moved to the top level with everything under them.
+`--keep-helpers` sends `?helpers=keep`. Then only the pane closes, and its
+children move to the top level.
+
+`--children` kills only the helpers and keeps the agent. It sends one kill per
+direct helper and lets the daemon close everything below each. Bare
+`--children` means this pane, so a lead can clear its helpers without dying:
+
+```sh
+butai agent kill --children
+```
+
+Prints the ids of the panes that closed, one per line, in the order they
+closed. Under `--json` this is `{"closed":[…]}`. The list is worked out from the
+agent list read just before the kill, not reported by the daemon. A
+`--children` with nothing to kill prints nothing and says so on stderr.
+
+Refuses your own pane, and refuses any kill that would close your pane as
+someone's helper (exit 64): a helper running `butai agent kill $BUTAI_PARENT`
+would die before it could print the answer. Pass `--keep-helpers` to close
+only the pane named.
 
 ## `butai process` (alias `proc`)
 
@@ -600,8 +697,12 @@ nothing on success.
 butai whoami
 # pane 71
 # workspace 1
+# parent 42
 # socket /home/you/.butai/butai.sock
 ```
+
+`parent` is printed only when `$BUTAI_PARENT` is set, in an agent started under
+another agent.
 
 Answers "where am I?" for a program running inside a pane, and is the first thing
 a caller should run before issuing any control command. Outside a pane:
@@ -841,17 +942,19 @@ shape:
 | command | shape |
 |---|---|
 | `ls` | `SessionInfo[]` — `{id, name, windows, attached_clients, cwd}` |
-| `whoami` | `{inside_butai, pane, workspace, socket}` |
-| `pane ls`, `agent ls` | `{pane, kind, label, status, staged, role?, labels?, origin?}[]` |
+| `whoami` | `{inside_butai, pane, workspace, parent, socket}` |
+| `pane ls`, `agent ls` | `{pane, kind, label, status, staged, role?, labels?, origin?, parent?, forked?}[]` |
 | `agent tag` | `{pane, role, labels, origin}` |
 | `agent spawn` | `{"pane":42}` |
 | `agent wait`, `agent send --wait` | `{pane, state, exited, timed_out, waited_ms}` |
+| `agent wait --children` | an array of the above, one per helper |
+| `agent kill` | `{"closed":[43,42]}` |
 
 The wait outcome is shaped so a future server-side blocking route can return
 exactly this and the `--json` output does not change when it switches over.
 
 Commands that print nothing on success print nothing under `--json` either:
-`pane send`, `agent kill`, `process start`, `kill-session`, `kill-server`.
+`pane send`, `process start`, `kill-session`, `kill-server`.
 
 The DTO field-by-field reference is [protocol.md](protocol.md); a worked client
 is [../web/README.md](../web/README.md).
@@ -893,6 +996,7 @@ process fell over.
 | `BUTAI_SOCKET` | the socket-path helper | which daemon to talk to |
 | `BUTAI_WORKSPACE` | `--ws` default, `whoami` | default workspace scope |
 | `BUTAI_PANE` | target resolution, `whoami` | the caller's own pane; its **absence** is the test for "not inside butai" |
+| `BUTAI_PARENT` | `whoami` | the agent that spawned the caller |
 | `BUTAI` | the nesting guard | socket of the daemon this pane belongs to |
 | `BUTAI_NO_HANDOFF` | bare `butai` | non-empty and not `0` disables the ssh handoff probe |
 | `BUTAI_SESSION_FILE` | the daemon | overrides `~/.butai/session.json`, and moves the per-pane dumps beside it |
@@ -916,6 +1020,7 @@ Agent, process and plain shell alike:
 | `BUTAI_SOCKET` | the same path |
 | `BUTAI_PANE` | this pane's id |
 | `BUTAI_WORKSPACE` | the workspace it belongs to |
+| `BUTAI_PARENT` | agent panes started under another agent only: that agent's pane id |
 | `TERM` | `xterm-256color` |
 | `COLORTERM` | `truecolor` |
 | `PATH` | repaired when the daemon's inherited one is missing the usual directories |

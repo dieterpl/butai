@@ -21,6 +21,7 @@ use clap::Subcommand;
 use serde::Serialize;
 
 use super::pane::{self, ReadFormat, ReadSource, Resolved};
+use super::tree;
 use super::Ctx;
 use crate::exit;
 use butai_client::api::Api;
@@ -45,7 +46,15 @@ pub enum AgentCmd {
     #[command(visible_alias = "list")]
     Ls {
         /// Workspace id or name (defaults to --ws)
+        #[arg(conflicts_with = "children")]
         target: Option<String>,
+        /// List only the helpers of this agent: the agents it spawned, not its
+        /// forks. Defaults to this pane
+        #[arg(long, value_name = "TARGET", num_args = 0..=1, default_missing_value = "")]
+        children: Option<String>,
+        /// With --children, the helpers' own helpers too, to any depth
+        #[arg(long, requires = "children")]
+        tree: bool,
     },
     /// Start an agent, printing its new pane id
     Spawn {
@@ -69,6 +78,14 @@ pub enum AgentCmd {
         /// Give the new agent a label (repeatable, or comma-separated)
         #[arg(long = "label", value_name = "LABEL", value_delimiter = ',')]
         labels: Vec<String>,
+        /// Record this agent as the new one's parent instead of this pane.
+        /// Must be an agent in the same workspace
+        #[arg(long, value_name = "TARGET", conflicts_with = "no_parent")]
+        parent: Option<String>,
+        /// Record no parent, even when run inside a pane: the new agent is
+        /// top-level, and nobody's helper
+        #[arg(long)]
+        no_parent: bool,
     },
     /// Copy a running agent into a new pane, printing its pane id
     ///
@@ -150,7 +167,15 @@ pub enum AgentCmd {
     /// Block until an agent reaches one of a set of states
     Wait {
         /// Pane id, agent name, or `stage`
-        target: String,
+        #[arg(required_unless_present = "children", conflicts_with = "children")]
+        target: Option<String>,
+        /// Wait on every helper of this agent instead: the agents it spawned,
+        /// not its forks. Defaults to this pane
+        #[arg(long, value_name = "TARGET", num_args = 0..=1, default_missing_value = "")]
+        children: Option<String>,
+        /// With --children, the helpers' own helpers too, to any depth
+        #[arg(long, requires = "children")]
+        tree: bool,
         /// States that end the wait (comma-separated, or `done`/`attention`).
         /// Defaults to `finished,exited`
         #[arg(long, value_name = "SET")]
@@ -164,19 +189,48 @@ pub enum AgentCmd {
         #[arg(long, value_name = "N")]
         since_seq: Option<u64>,
     },
-    /// Kill an agent's pane
+    /// Kill an agent's pane, and the helpers it spawned
+    ///
+    /// Prints the ids of the panes that closed. The agent's forks are not its
+    /// helpers: they stay, moved to the top level.
     Kill {
         /// Pane id, agent name, or `stage`
-        target: String,
+        #[arg(required_unless_present = "children", conflicts_with = "children")]
+        target: Option<String>,
+        /// Close only the pane; its helpers stay, moved to the top level
+        #[arg(long)]
+        keep_helpers: bool,
+        /// Kill the helpers of this agent and keep the agent itself. Defaults
+        /// to this pane, so a lead can clear its helpers without dying
+        #[arg(long, value_name = "TARGET", num_args = 0..=1, default_missing_value = "")]
+        children: Option<String>,
     },
 }
 
 pub async fn run(cmd: AgentCmd, ctx: &Ctx) -> Result<u8> {
     match cmd {
-        AgentCmd::Ls { target } => ls(ctx, target).await,
-        AgentCmd::Spawn { kind, background, prompt, wait, timeout, role, labels } => {
+        AgentCmd::Ls { target, children, tree } => {
+            pane::run(pane::PaneCmd::Ls { target, children, tree }, ctx).await
+        }
+        AgentCmd::Spawn {
+            kind,
+            background,
+            prompt,
+            wait,
+            timeout,
+            role,
+            labels,
+            parent,
+            no_parent,
+        } => {
             let tags = TagEdit { role, add: labels, ..TagEdit::default() };
-            spawn(ctx, &kind, background, prompt, wait, timeout, tags).await
+            let parent = match (parent, no_parent) {
+                (Some(_), true) => return exit::usage("pass --parent or --no-parent, not both"),
+                (Some(spec), false) => ParentFlag::Target(spec),
+                (None, true) => ParentFlag::None,
+                (None, false) => ParentFlag::Caller,
+            };
+            spawn(ctx, &kind, background, prompt, wait, timeout, tags, parent).await
         }
         AgentCmd::Fork { target, background, prompt, wait, timeout, role, labels } => {
             let tags = TagEdit { role, add: labels, ..TagEdit::default() };
@@ -191,8 +245,19 @@ pub async fn run(cmd: AgentCmd, ctx: &Ctx) -> Result<u8> {
         AgentCmd::Read { target, lines, source, format } => {
             pane::run(pane::PaneCmd::Read { target, lines, source, format }, ctx).await
         }
-        AgentCmd::Wait { target, until, timeout, since_seq } => {
+        AgentCmd::Wait { target, children, tree, until, timeout, since_seq } => {
+            // Also declared to clap, which does not enforce it once the
+            // positional target is there.
+            if tree && children.is_none() {
+                return exit::usage("--tree only means something with --children");
+            }
             let until = parse_until(until.as_deref())?;
+            if let Some(spec) = children {
+                return wait_children(ctx, &spec, tree, &until, timeout, since_seq).await;
+            }
+            let Some(target) = target else {
+                return exit::usage("agent wait needs a target, or --children");
+            };
             let at = match pane::resolve(&ctx.api, &target, ctx.ws.as_deref()).await {
                 Ok(at) => at,
                 // An agent that has already gone is `exited`, not "no such
@@ -221,11 +286,8 @@ pub async fn run(cmd: AgentCmd, ctx: &Ctx) -> Result<u8> {
             let outcome = wait_for(&ctx.api, at, &until, timeout, since_seq).await?;
             report(ctx, &outcome)
         }
-        AgentCmd::Kill { target } => {
-            let at = pane::resolve(&ctx.api, &target, ctx.ws.as_deref()).await?;
-            pane::refuse_self(at, "kill")?;
-            ctx.api.delete(&at.route()).await?;
-            Ok(exit::OK)
+        AgentCmd::Kill { target, keep_helpers, children } => {
+            kill(ctx, target, children, keep_helpers).await
         }
     }
 }
@@ -340,76 +402,180 @@ async fn wait_for(
     timeout_ms: u64,
     since_seq: Option<u64>,
 ) -> Result<WaitOutcome> {
+    let mut all = wait_all(api, at.ws, &[at.pane], until, timeout_ms, since_seq).await?;
+    Ok(all.remove(0))
+}
+
+/// One pane's progress through [`wait_all`].
+struct Watch {
+    pane: PaneId,
+    /// The state seen on the first poll, which a later state must differ from
+    /// (or be notified past `since_seq`) to count.
+    first: Option<AgentState>,
+    last: (AgentState, Option<u32>),
+    /// Freshness is established once; after that any state in the set counts.
+    fresh: bool,
+    done: Option<WaitOutcome>,
+}
+
+/// [`wait_for`] over several panes of one workspace at once: poll until every
+/// one of them has been seen in a state of `until`, or `timeout_ms` elapses.
+/// Answers one outcome per pane, in the order given.
+///
+/// Each pane is judged exactly as a single wait would judge it, `since_seq`
+/// included, and is done the first time it qualifies: a helper that finished
+/// and was then handed more work still counts as finished. A pane whose row
+/// vanishes is `exited`, as in a single wait.
+async fn wait_all(
+    api: &Api,
+    ws: butai_protocol::SessionId,
+    panes: &[PaneId],
+    until: &[AgentState],
+    timeout_ms: u64,
+    since_seq: Option<u64>,
+) -> Result<Vec<WaitOutcome>> {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(timeout_ms);
-    let agents_path = format!("/v1/workspaces/{}/agents", at.ws);
+    let agents_path = format!("/v1/workspaces/{ws}/agents");
+    let elapsed = || started.elapsed().as_millis() as u64;
 
-    let mut seq = since_seq;
-    let mut first_state: Option<AgentState> = None;
-    let mut last = (AgentState::Idle, None);
+    let mut watches: Vec<Watch> = panes
+        .iter()
+        .map(|&pane| Watch {
+            pane,
+            first: None,
+            last: (AgentState::Idle, None),
+            fresh: since_seq.is_none(),
+            done: None,
+        })
+        .collect();
     let mut backoff = POLL_MIN;
 
     loop {
         let agents: Vec<AgentDto> = api.get_as(&agents_path).await?;
-        match agents.iter().find(|a| a.pane == at.pane) {
-            Some(a) => {
-                last = (a.state, a.exited);
-                let first = *first_state.get_or_insert(a.state);
-                // Without a sequence to beat, any matching state ends the wait.
-                // With one, the state has to be demonstrably new: either the
-                // daemon notified about this pane since, or the state has
-                // changed under us (which covers `idle`, the one state that
-                // never notifies).
-                let fresh = match seq {
-                    None => true,
-                    Some(s) => a.state != first || notified_since(api, at.pane, s).await?,
-                };
-                if fresh && until.contains(&a.state) {
-                    return Ok(WaitOutcome {
-                        pane: at.pane,
-                        state: state_name(a.state),
-                        exited: a.exited,
-                        timed_out: false,
-                        waited_ms: started.elapsed().as_millis() as u64,
-                    });
-                }
-                if fresh {
-                    // Stop re-checking the feed once freshness is established.
-                    seq = None;
-                }
-            }
-            // The row is gone. A *clean* agent exit removes it and notifies
-            // nothing, so this disappearance is the only evidence there is —
-            // and the reason this waits on state rather than on events.
-            None => {
-                return Ok(WaitOutcome {
-                    pane: at.pane,
+        // Read the feed at most once a poll, and only while some pane still
+        // needs it to prove its state is new.
+        let mut notified: Option<Vec<PaneId>> = None;
+        for w in watches.iter_mut().filter(|w| w.done.is_none()) {
+            let Some(a) = agents.iter().find(|a| a.pane == w.pane) else {
+                // The row is gone. A *clean* agent exit removes it and notifies
+                // nothing, so this disappearance is the only evidence there is —
+                // and the reason this waits on state rather than on events.
+                w.done = Some(WaitOutcome {
+                    pane: w.pane,
                     state: "exited",
-                    exited: last.1,
+                    exited: w.last.1,
                     timed_out: false,
-                    waited_ms: started.elapsed().as_millis() as u64,
-                })
+                    waited_ms: elapsed(),
+                });
+                continue;
+            };
+            w.last = (a.state, a.exited);
+            let first = *w.first.get_or_insert(a.state);
+            // Without a sequence to beat, any matching state ends the wait.
+            // With one, the state has to be demonstrably new: either the daemon
+            // notified about this pane since, or the state has changed under us
+            // (which covers `idle`, the one state that never notifies).
+            if !w.fresh {
+                w.fresh = a.state != first || {
+                    if notified.is_none() {
+                        let seq = since_seq.unwrap_or(0);
+                        notified = Some(notified_since(api, seq).await?);
+                    }
+                    notified.as_ref().is_some_and(|n| n.contains(&w.pane))
+                };
+            }
+            if w.fresh && until.contains(&a.state) {
+                w.done = Some(WaitOutcome {
+                    pane: w.pane,
+                    state: state_name(a.state),
+                    exited: a.exited,
+                    timed_out: false,
+                    waited_ms: elapsed(),
+                });
             }
         }
 
-        if Instant::now() >= deadline {
-            return Ok(WaitOutcome {
-                pane: at.pane,
-                state: state_name(last.0),
-                exited: last.1,
-                timed_out: true,
-                waited_ms: started.elapsed().as_millis() as u64,
-            });
+        if watches.iter().all(|w| w.done.is_some()) || Instant::now() >= deadline {
+            return Ok(watches
+                .into_iter()
+                .map(|w| {
+                    w.done.unwrap_or(WaitOutcome {
+                        pane: w.pane,
+                        state: state_name(w.last.0),
+                        exited: w.last.1,
+                        timed_out: true,
+                        waited_ms: elapsed(),
+                    })
+                })
+                .collect());
         }
         tokio::time::sleep(backoff.min(deadline.saturating_duration_since(Instant::now()))).await;
         backoff = (backoff * 2).min(POLL_MAX);
     }
 }
 
-/// Whether the daemon has reported anything about `pane` past sequence `seq`.
-async fn notified_since(api: &Api, pane: PaneId, seq: u64) -> Result<bool> {
+/// `agent wait --children`: block until every helper of an agent has reached
+/// one of `until`.
+///
+/// The helpers are the ones there when the wait starts. One spawned later is
+/// not waited on: the set a caller is told it waited for has to be the set it
+/// actually waited for.
+async fn wait_children(
+    ctx: &Ctx,
+    spec: &str,
+    deep: bool,
+    until: &[AgentState],
+    timeout: u64,
+    since_seq: Option<u64>,
+) -> Result<u8> {
+    let lead = pane::resolve_lead(&ctx.api, spec, ctx.ws.as_deref()).await?;
+    let agents: Vec<AgentDto> =
+        ctx.api.get_as(&format!("/v1/workspaces/{}/agents", lead.ws)).await?;
+    let helpers = tree::helpers(&tree::links(&agents), lead.pane, deep);
+    // A helper waiting on its lead's helpers is waiting on itself, which can
+    // never return — the same trap `refuse_self` stops on a single wait.
+    if let Some(me) = pane::own_pane().filter(|me| helpers.contains(me)) {
+        return exit::usage(format!(
+            "pane {me} is this pane, one of pane {}'s helpers — `wait` on yourself would never return",
+            lead.pane
+        ));
+    }
+    if helpers.is_empty() && !ctx.out.is_quiet() {
+        eprintln!("pane {} has no helpers to wait on", lead.pane);
+    }
+    let outcomes = match helpers.is_empty() {
+        true => Vec::new(),
+        false => wait_all(&ctx.api, lead.ws, &helpers, until, timeout, since_seq).await?,
+    };
+    ctx.out.emit_owned(&outcomes, |w| {
+        for o in &outcomes {
+            write_outcome(w, o)?;
+        }
+        Ok(())
+    })?;
+    Ok(children_code(&outcomes))
+}
+
+/// The exit code for a wait on several panes. A timeout outranks an exit,
+/// because "still running" is the one answer that says to look again; an exit
+/// outranks success for the reason a single wait's does — `wait && deploy`
+/// must not fire because a helper fell over. No panes at all is success: there
+/// was nothing left to wait for.
+fn children_code(outcomes: &[WaitOutcome]) -> u8 {
+    if outcomes.iter().any(|o| o.timed_out) {
+        exit::TIMED_OUT
+    } else if outcomes.iter().any(|o| o.state == "exited") {
+        exit::EXITED
+    } else {
+        exit::OK
+    }
+}
+
+/// The panes the daemon has reported anything about past sequence `seq`.
+async fn notified_since(api: &Api, seq: u64) -> Result<Vec<PaneId>> {
     let feed: NotificationsDto = api.get_as(&format!("/v1/notifications?since={seq}")).await?;
-    Ok(feed.items.iter().any(|n| n.pane == pane))
+    Ok(feed.items.iter().map(|n| n.pane).collect())
 }
 
 /// The feed's current head, so a wait can ignore everything already in it.
@@ -420,29 +586,101 @@ async fn notification_head(api: &Api) -> Result<u64> {
 }
 
 fn report(ctx: &Ctx, outcome: &WaitOutcome) -> Result<u8> {
-    ctx.out.emit_owned(outcome, |w| {
-        if outcome.timed_out {
-            writeln!(
-                w,
-                "pane {} still {} after {}ms",
-                outcome.pane, outcome.state, outcome.waited_ms
-            )?;
-        } else {
-            writeln!(w, "pane {} {}", outcome.pane, outcome.state)?;
+    ctx.out.emit_owned(outcome, |w| write_outcome(w, outcome))?;
+    Ok(outcome.code())
+}
+
+fn write_outcome(w: &mut dyn std::io::Write, outcome: &WaitOutcome) -> Result<()> {
+    if outcome.timed_out {
+        writeln!(w, "pane {} still {} after {}ms", outcome.pane, outcome.state, outcome.waited_ms)?;
+    } else {
+        writeln!(w, "pane {} {}", outcome.pane, outcome.state)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// kill
+// ---------------------------------------------------------------------------
+
+/// `agent kill`: close a pane, or with `--children` every helper of one.
+///
+/// The daemon does the cascade — killing an agent closes its helpers, deepest
+/// first — so this sends one DELETE per pane asked for and works out, from the
+/// agent list read just before, which panes that closed. Those are printed one
+/// id per line. With `--children` each *direct* helper is killed and the
+/// daemon takes the rest; the agent named stays.
+///
+/// A kill that would close the caller's own pane is refused, whether it names
+/// the pane outright or reaches it as somebody's helper: the command would die
+/// half-way through its own answer.
+async fn kill(
+    ctx: &Ctx,
+    target: Option<String>,
+    children: Option<String>,
+    keep_helpers: bool,
+) -> Result<u8> {
+    let (ws, targets, links, lead) = match (children, target) {
+        (Some(spec), _) => {
+            let lead = pane::resolve_lead(&ctx.api, &spec, ctx.ws.as_deref()).await?;
+            let links = workspace_links(&ctx.api, lead.ws).await?;
+            let direct = tree::helpers(&links, lead.pane, false);
+            (lead.ws, direct, links, Some(lead.pane))
+        }
+        (None, Some(target)) => {
+            let at = pane::resolve(&ctx.api, &target, ctx.ws.as_deref()).await?;
+            pane::refuse_self(at, "kill")?;
+            (at.ws, vec![at.pane], workspace_links(&ctx.api, at.ws).await?, None)
+        }
+        (None, None) => return exit::usage("agent kill needs a target, or --children"),
+    };
+    let closed: Vec<PaneId> =
+        targets.iter().flat_map(|t| tree::kill_order(&links, *t, keep_helpers)).collect();
+    if let Some(me) = pane::own_pane().filter(|me| closed.contains(me)) {
+        return exit::usage(format!(
+            "pane {me} is this pane, and this kill would close it as a helper; \
+             pass --keep-helpers to close only the panes named"
+        ));
+    }
+    if let Some(lead) = lead.filter(|_| targets.is_empty()) {
+        if !ctx.out.is_quiet() {
+            eprintln!("pane {lead} has no helpers to kill");
+        }
+    }
+    let query = if keep_helpers { "?helpers=keep" } else { "" };
+    for pane in &targets {
+        let at = Resolved { ws, pane: *pane };
+        ctx.api.delete(&format!("{}{query}", at.route())).await?;
+    }
+    ctx.out.emit_owned(&serde_json::json!({ "closed": closed }), |w| {
+        for pane in &closed {
+            writeln!(w, "{pane}")?;
         }
         Ok(())
     })?;
-    Ok(outcome.code())
+    Ok(exit::OK)
+}
+
+async fn workspace_links(api: &Api, ws: butai_protocol::SessionId) -> Result<Vec<tree::Link>> {
+    let agents: Vec<AgentDto> = api.get_as(&format!("/v1/workspaces/{ws}/agents")).await?;
+    Ok(tree::links(&agents))
 }
 
 // ---------------------------------------------------------------------------
 // The other verbs
 // ---------------------------------------------------------------------------
 
-async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
-    pane::run(pane::PaneCmd::Ls { target }, ctx).await
+/// Who `agent spawn` records as the new agent's parent.
+enum ParentFlag {
+    /// The pane the command runs in, if it runs in one — the default.
+    Caller,
+    /// `--parent <TARGET>`.
+    Target(String),
+    /// `--no-parent`.
+    None,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     ctx: &Ctx,
     kind: &str,
@@ -451,6 +689,7 @@ async fn spawn(
     wait: bool,
     timeout: u64,
     tags: TagEdit,
+    parent: ParentFlag,
 ) -> Result<u8> {
     // Checked before anything starts, so a typo in a label is not a running
     // agent with no tags and an error after it.
@@ -464,12 +703,35 @@ async fn spawn(
     let before: Vec<AgentDto> = ctx.api.get_as(&path).await?;
     let known: Vec<PaneId> = before.iter().map(|a| a.pane).collect();
 
+    // By default the pane this runs in is the new agent's parent, so BOOTH can
+    // nest it. A helper spawning its own helper makes a chain, which is how the
+    // tree gets deep. `--parent` names another agent instead; it has to be one
+    // of this workspace's, which is checked here because the daemon would
+    // otherwise quietly start a top-level agent.
+    let parent: Option<PaneId> = match parent {
+        ParentFlag::Caller => pane::own_pane(),
+        ParentFlag::None => None,
+        ParentFlag::Target(spec) => {
+            let at = pane::resolve(&ctx.api, &spec, Some(&ws.to_string())).await?;
+            if at.ws != ws {
+                return exit::usage(format!(
+                    "--parent: pane {} is in workspace {}, not {ws}; a parent has to be in \
+                     the new agent's workspace",
+                    at.pane, at.ws
+                ));
+            }
+            if !known.contains(&at.pane) {
+                return exit::usage(format!(
+                    "--parent: pane {} is not an agent; only an agent can be a parent",
+                    at.pane
+                ));
+            }
+            Some(at.pane)
+        }
+    };
     let head = if wait { Some(notification_head(&ctx.api).await?) } else { None };
     // Run from inside a butai pane, the asker is the program in that pane.
     let origin = if std::env::var_os("BUTAI_PANE").is_some() { "agent" } else { "cli" };
-    // ...and that pane is the new agent's parent, so BOOTH can nest it. A helper
-    // spawning its own helper makes a chain, which is how the tree gets deep.
-    let parent = std::env::var("BUTAI_PANE").ok().and_then(|p| p.parse::<u64>().ok());
     ctx.api
         .post(
             &path,
@@ -841,6 +1103,58 @@ mod tests {
         };
         assert_eq!(gone.code(), exit::EXITED);
         assert_ne!(gone.code(), exit::NOT_FOUND, "the same situation, the same code");
+    }
+
+    fn outcome(state: &'static str, timed_out: bool) -> WaitOutcome {
+        WaitOutcome { pane: PaneId(7), state, exited: None, timed_out, waited_ms: 0 }
+    }
+
+    /// A wait on helpers answers with the worst of them: still running beats
+    /// fell over beats done, and no helpers at all is nothing left to wait for.
+    #[test]
+    fn a_wait_on_helpers_exits_with_the_worst_outcome() {
+        let done = || outcome("finished", false);
+        assert_eq!(children_code(&[]), exit::OK);
+        assert_eq!(children_code(&[done(), done()]), exit::OK);
+        assert_eq!(children_code(&[done(), outcome("exited", false)]), exit::EXITED);
+        let slow = outcome("working", true);
+        assert_eq!(children_code(&[outcome("exited", false), slow, done()]), exit::TIMED_OUT);
+    }
+
+    fn parse(args: &[&str]) -> Result<crate::cli::Cli, clap::Error> {
+        use clap::Parser;
+        crate::cli::Cli::try_parse_from(std::iter::once("butai").chain(args.iter().copied()))
+    }
+
+    /// The flags that cannot go together are refused by clap, which the binary
+    /// turns into exit 64; a bare `--children` means this pane.
+    #[test]
+    fn the_tree_flags_parse_and_refuse_what_cannot_combine() {
+        assert!(parse(&["agent", "spawn", "claude", "--parent", "7", "--no-parent"]).is_err());
+        assert!(parse(&["agent", "spawn", "claude", "--parent", "7"]).is_ok());
+        assert!(parse(&["agent", "wait", "7", "--children", "8"]).is_err());
+        assert!(parse(&["agent", "wait", "--tree"]).is_err(), "--tree needs --children");
+        assert!(parse(&["agent", "wait"]).is_err(), "a target or --children");
+        assert!(parse(&["agent", "kill"]).is_err(), "a target or --children");
+        assert!(parse(&["pane", "ls", "1", "--children", "7"]).is_err());
+
+        let Ok(cli) = parse(&["agent", "wait", "--children", "--tree"]) else { panic!() };
+        let Some(crate::cli::Cmd::Agent(AgentCmd::Wait { children, tree, target, .. })) =
+            cli.command
+        else {
+            panic!("not an agent wait")
+        };
+        assert_eq!((children.as_deref(), tree, target), (Some(""), true, None));
+
+        let Ok(cli) = parse(&["agent", "kill", "--children", "7", "--keep-helpers"]) else {
+            panic!()
+        };
+        let Some(crate::cli::Cmd::Agent(AgentCmd::Kill { children, keep_helpers, .. })) =
+            cli.command
+        else {
+            panic!("not an agent kill")
+        };
+        assert_eq!((children.as_deref(), keep_helpers), (Some("7"), true));
     }
 
     #[test]

@@ -270,9 +270,11 @@ its screen in the middle.
     alt-enter   the same picker, from a focused pane
     j / k       move the cursor
     enter       put the selected one on the stage
-    x           kill it
+    x           kill it, and the helpers it started
     F           fork it: a new pane on a copy of its conversation
-    m           the row's menu: fork agent, close others, close all agents
+    space       fold or unfold the helpers under it
+    m           the row's menu: fork agent, close agent, close agent but
+                keep helpers, close others, close all agents
 
 `m` is the right-click menu, opened from the keyboard. It is where the two
 verbs that act on the *rest* of the rail live, and it is the only place
@@ -286,6 +288,21 @@ is listed under the agent it came from. Only an agent whose launcher has
 `fork_args` can be forked, which out of the box is `claude`. Any other agent
 says so in the flash line, and so does one nobody has typed into yet. A fork
 is capital `F` because bare `f` opens the links picker.
+
+## Helpers
+
+An agent that runs `butai agent spawn` from inside its own pane is the parent
+of the agent it starts, and the rail draws that helper right under it with
+`├` and `└` branches, its own helpers under it in turn. `space` folds a
+parent's helpers away. The folded row reads `+N` for how many are hidden, and
+its status is whichever of them needs you most, so a helper waiting on a
+question still shows up as `WAIT`.
+
+`x` on a parent closes the helpers it started too, deepest first. **close
+agent, keep helpers** on the menu closes only the parent and moves its
+helpers to the top level. A fork is not a helper: it stays when the agent it
+came from closes. An agent that exits on its own leaves its helpers running,
+and dismissing its `exit` row with `x` is what closes them.
 
 ## The pin
 

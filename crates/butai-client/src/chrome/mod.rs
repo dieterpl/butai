@@ -2569,9 +2569,14 @@ impl MenuTarget {
             //
             // Fork first: it is the one row that makes something rather than
             // ending it, and it should not sit beside "close all agents".
+            //
+            // "Close agent" closes the helpers the agent started with it, the
+            // way `x` does; the row after it is the one way to close an agent
+            // and leave them running. Forks always stay.
             MenuTarget::Agent { .. } => vec![
                 ("Fork agent", false),
                 ("Close agent", false),
+                ("Close agent, keep helpers", false),
                 ("Close others", false),
                 ("Close all agents", true),
             ],
@@ -3060,6 +3065,14 @@ pub struct View {
     pub booth_followed: usize,
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
+    /// Agents on the AGENTS rail whose helpers are folded away, by workspace
+    /// and pane — see [`rail_agents`].
+    ///
+    /// Workspace and pane rather than the pane alone, because a pane id is only
+    /// unique on its own daemon. Two machines can still both have a workspace 1
+    /// holding a pane 5, and folding one would fold the other; that costs a
+    /// keystroke to undo, which is why it is not keyed any harder.
+    pub agent_folds: BTreeSet<(SessionId, PaneId)>,
     /// How the fleet, and the tab bar after it, is ordered.
     pub arrange: Arrange,
     /// The tab bar's chips in the fleet's order, as indices into the tab list.
@@ -3197,6 +3210,7 @@ impl Default for View {
             changes_sel: 0,
             booth_sel: 0,
             folds: Folds::default(),
+            agent_folds: BTreeSet::new(),
             arrange: Arrange::default(),
             tab_order: Vec::new(),
             booth_tab: None,
@@ -4391,15 +4405,30 @@ pub fn booth_rows<'a>(
 /// parent is not in this project (it was closed, or lives elsewhere) is a root,
 /// so nothing is ever left out of the list.
 fn nest_agents(space: &SpaceRow<'_>, idx: &[usize]) -> Vec<(usize, u16, u32, bool)> {
-    let here = |p: PaneId| idx.iter().any(|&i| space.agents[i].agent.pane == p);
-    let parent_of = |i: usize| space.agents[i].agent.parent.filter(|p| here(*p));
+    nest(idx, |i| space.agents[i].agent.pane, |i| space.agents[i].agent.parent)
+}
+
+/// The tree walk behind [`nest_agents`] and [`rail_agents`], over any list:
+/// `pane` names entry `i` and `parent` names the pane it hangs under.
+///
+/// `idx` is the sibling order, and it is kept; only a child's *place* comes
+/// from its parent. An entry whose parent is not in `idx` is a root, so nothing
+/// is ever left out.
+fn nest(
+    idx: &[usize],
+    pane: impl Fn(usize) -> PaneId,
+    parent: impl Fn(usize) -> Option<PaneId>,
+) -> Vec<(usize, u16, u32, bool)> {
+    let here = |p: PaneId| idx.iter().any(|&i| pane(i) == p);
+    let parent_of = |i: usize| parent(i).filter(|p| here(*p));
     let mut out = Vec::with_capacity(idx.len());
     // Depth is capped by the 32 bits of `trail`; a chain deeper than that is
     // drawn flat from there on rather than refused.
+    #[allow(clippy::too_many_arguments)]
     fn walk(
-        space: &SpaceRow<'_>,
         idx: &[usize],
-        parent: Option<PaneId>,
+        under: Option<PaneId>,
+        pane: &dyn Fn(usize) -> PaneId,
         parent_of: &dyn Fn(usize) -> Option<PaneId>,
         depth: u16,
         trail: u32,
@@ -4408,20 +4437,111 @@ fn nest_agents(space: &SpaceRow<'_>, idx: &[usize]) -> Vec<(usize, u16, u32, boo
         let kids: Vec<usize> = idx
             .iter()
             .copied()
-            .filter(|&i| parent_of(i) == parent && !out.iter().any(|r| r.0 == i))
+            .filter(|&i| parent_of(i) == under && !out.iter().any(|r| r.0 == i))
             .collect();
         for (n, &i) in kids.iter().enumerate() {
             let last = n + 1 == kids.len();
             out.push((i, depth, trail, last));
             if depth < 31 {
                 let t = if last { trail | (1 << depth) } else { trail };
-                walk(space, idx, Some(space.agents[i].agent.pane), parent_of, depth + 1, t, out);
+                walk(idx, Some(pane(i)), pane, parent_of, depth + 1, t, out);
             }
         }
     }
-    walk(space, idx, None, &parent_of, 0, 0, &mut out);
+    walk(idx, None, &pane, &parent_of, 0, 0, &mut out);
+    // A parent cycle has no root, so the walk never reaches it. The daemon
+    // sets a parent once, at spawn, so it cannot make one; this is for a list
+    // put together some other way, which must still show every entry.
+    for &i in idx {
+        if !out.iter().any(|r| r.0 == i) {
+            out.push((i, 0, 0, true));
+        }
+    }
     out
 }
+
+/// One row of the AGENTS rail: an agent, in tree order, with what folding has
+/// hidden under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RailAgent {
+    /// Index into the workspace's `agents`.
+    pub idx: usize,
+    /// How many agents it is under; see [`agent_branch`] for `trail` and `last`.
+    pub depth: u16,
+    pub trail: u32,
+    pub last: bool,
+    /// How many agents hang under it, at any depth. Folding hides exactly these.
+    pub family: usize,
+    /// Its helpers are folded away.
+    pub folded: bool,
+    /// Index into `agents` of the agent whose status the row shows. It is the
+    /// agent itself unless the row is folded and something under it needs you
+    /// more: a waiting helper must not disappear into a folded parent.
+    pub shows: usize,
+}
+
+/// The AGENTS rail's rows: each helper right under the agent that started it,
+/// the workspace's own order among siblings, and nothing below a folded agent.
+///
+/// The cursor ([`View::agent_sel`]) counts these rows, not the workspace's
+/// agents, so every caller that turns a row back into an agent goes through
+/// here. That is the one way the drawing, the hit test and the keys can agree.
+pub fn rail_agents(
+    agents: &[AgentDto],
+    ws: SessionId,
+    folds: &BTreeSet<(SessionId, PaneId)>,
+) -> Vec<RailAgent> {
+    let idx: Vec<usize> = (0..agents.len()).collect();
+    let tree = nest(&idx, |i| agents[i].pane, |i| agents[i].parent);
+    let mut out = Vec::with_capacity(tree.len());
+    let mut hide_below: Option<u16> = None;
+    for (n, &(i, depth, trail, last)) in tree.iter().enumerate() {
+        if let Some(d) = hide_below {
+            if depth > d {
+                continue;
+            }
+            hide_below = None;
+        }
+        let under = tree[n + 1..].iter().take_while(|r| r.1 > depth);
+        let family = under.clone().count();
+        let folded = family > 0 && folds.contains(&(ws, agents[i].pane));
+        let shows = if folded {
+            // The earliest of the most urgent, so the parent wins its own ties.
+            let mut best = i;
+            for r in under {
+                if urgency(&agents[r.0]) > urgency(&agents[best]) {
+                    best = r.0;
+                }
+            }
+            best
+        } else {
+            i
+        };
+        if folded {
+            hide_below = Some(depth);
+        }
+        out.push(RailAgent { idx: i, depth, trail, last, family, folded, shows });
+    }
+    out
+}
+
+/// How much an agent needs you, in NEEDS YOU's order: a question, then an
+/// unread crash, then an unread finished turn, then one still working.
+fn urgency(a: &AgentDto) -> u8 {
+    let crashed = a.exited.is_some_and(|c| c != 0);
+    match a.state {
+        AgentState::Waiting => 4,
+        _ if crashed && a.unread => 3,
+        AgentState::Finished if a.unread => 2,
+        AgentState::Working => 1,
+        _ => 0,
+    }
+}
+
+/// How deep the AGENTS rail indents before it stops: three levels is six
+/// columns of a rail that is often 28 wide, and a name still has to fit beside
+/// them. Deeper helpers draw at this depth with `…` in place of their branch.
+pub const RAIL_DEPTH_MAX: u16 = 3;
 
 /// The branch glyphs in front of a subagent's icon: `│ ` for each ancestor that
 /// has more siblings below, blanks where it does not, then `├ ` or `└ `.
@@ -6618,16 +6738,21 @@ fn draw_left_rail(
     // section's height and every agent past it was unreachable — the cursor
     // walked onto rows that were never drawn, so `j` looked like it had stopped
     // working.
-    let first = rail_first(view.agent_sel, agents.len(), rows.height);
-    for (i, a) in agents.iter().skip(first).take(rows.height as usize).enumerate() {
+    let tree = rail_agents(agents, ws.map_or(SessionId(0), |w| w.id), &view.agent_folds);
+    let first = rail_first(view.agent_sel, tree.len(), rows.height);
+    for (i, r) in tree.iter().skip(first).take(rows.height as usize).enumerate() {
+        let a = &agents[r.idx];
+        // A folded row speaks for its whole family: the status is that of the
+        // member that most needs you, the name and tags stay the parent's.
+        let s = &agents[r.shows];
         let y = rows.y + i as u16;
         let cursor = first + i == view.agent_sel && view.focus == Focus::Agents;
         let (status, status_role, name_role, animating) = agent_status(
-            a.state,
-            a.exited,
-            a.working_since_ms.map(secs_since),
+            s.state,
+            s.exited,
+            s.working_since_ms.map(secs_since),
             view.tick,
-            a.unread,
+            s.unread,
         );
         // A working row is a spinner and a running clock, and `agent_status`
         // has always said so in its fourth return value — which this dropped on
@@ -6639,8 +6764,21 @@ fn draw_left_rail(
         // The agent's own spinner is dropped: `status` already says what it
         // would, and the row has no room to say it twice. See `agent_name`.
         let title = agent_name(&a.title);
+        // The branch glyphs, then `+n` on a folded agent: how many are hidden
+        // under it. Drawn as the row's pin, so they hold their columns while a
+        // long name marquees past.
+        let mut pin = agent_branch(r.depth.min(RAIL_DEPTH_MAX), r.trail, r.last);
+        if r.depth > RAIL_DEPTH_MAX {
+            // `├ ` and `└ ` are the same length, so this is the last branch.
+            pin.replace_range(pin.len() - "└ ".len().., "… ");
+        }
+        if r.folded {
+            pin.push_str(&format!("+{}", r.family));
+        }
+        let pin = pin.trim_end().to_string();
+        let pin_w = if pin.is_empty() { 0 } else { pin.width() + 1 };
         let room = (rows.width as usize)
-            .saturating_sub(2 + status.width() + 1)
+            .saturating_sub(2 + pin_w + status.width() + 1)
             .saturating_sub(title.chars().count().min(FLEET_TITLE_KEEP) + 1);
         let tags = fleet_tags(a, room);
         let tags_w: usize = tags.iter().map(|(t, _)| t.chars().count()).sum();
@@ -6655,7 +6793,7 @@ fn draw_left_rail(
             y,
             cursor,
             stage == Some(a.pane),
-            "",
+            &pin,
             title,
             theme.role(name_role),
             &right,
@@ -6663,6 +6801,11 @@ fn draw_left_rail(
             view.tick,
             theme,
         );
+        if !pin.is_empty() {
+            // The pin went down in the name's colour; the tree is furniture.
+            let bound = (rows.x + rows.width).saturating_sub(right.width() as u16);
+            put_str(buf, rows.x + 2, y, &pin, bound, Pen::new(theme.rule, theme.row_bg(cursor)));
+        }
         if !tags.is_empty() {
             let right_edge = rows.x + rows.width;
             let tx = right_edge.saturating_sub(right.width() as u16);
@@ -11765,6 +11908,7 @@ mod tests {
             labels: Vec::new(),
             origin: None,
             parent: None,
+            forked: false,
         }
     }
 
@@ -11845,6 +11989,118 @@ mod tests {
         assert!(joined.contains("claude"), "{joined}");
         assert!(joined.contains("WAIT"), "a waiting agent should say so:\n{joined}");
         assert!(joined.contains("idle"), "{joined}");
+    }
+
+    fn child(pane: u64, title: &str, state: AgentState, parent: u64) -> AgentDto {
+        AgentDto { parent: Some(PaneId(parent)), ..agent(pane, title, state) }
+    }
+
+    /// The AGENTS rail puts each helper right under the agent that started it,
+    /// keeps the workspace's order among siblings, and leaves an agent whose
+    /// parent has gone at the top level rather than dropping it.
+    #[test]
+    fn the_rail_nests_helpers_under_their_parent() {
+        let agents = vec![
+            agent(1, "lead", AgentState::Working),
+            agent(2, "alone", AgentState::Idle),
+            child(3, "tests", AgentState::Waiting, 1),
+            child(4, "deep", AgentState::Idle, 3),
+            child(5, "orphan", AgentState::Idle, 99),
+            child(6, "docs", AgentState::Finished, 1),
+        ];
+        let rows = rail_agents(&agents, SessionId(1), &BTreeSet::new());
+        let got: Vec<(&str, u16, usize)> =
+            rows.iter().map(|r| (agents[r.idx].title.as_str(), r.depth, r.family)).collect();
+        assert_eq!(
+            got,
+            [
+                ("lead", 0, 3),
+                ("tests", 1, 1),
+                ("deep", 2, 0),
+                ("docs", 1, 0),
+                ("alone", 0, 0),
+                ("orphan", 0, 0),
+            ]
+        );
+        assert!(rows.iter().all(|r| !r.folded && r.shows == r.idx));
+    }
+
+    /// Folding hides everything under an agent and nothing else, and the folded
+    /// row shows the status of the family member that most needs you: a helper
+    /// waiting on a question outranks a parent that is merely working.
+    #[test]
+    fn a_folded_parent_hides_its_family_and_shows_its_most_urgent_member() {
+        let agents = vec![
+            agent(1, "lead", AgentState::Working),
+            child(3, "tests", AgentState::Waiting, 1),
+            child(4, "deep", AgentState::Idle, 3),
+            agent(2, "alone", AgentState::Idle),
+        ];
+        let folds: BTreeSet<_> = [(SessionId(1), PaneId(1))].into();
+        let rows = rail_agents(&agents, SessionId(1), &folds);
+        let got: Vec<&str> = rows.iter().map(|r| agents[r.idx].title.as_str()).collect();
+        assert_eq!(got, ["lead", "alone"]);
+        assert!(rows[0].folded);
+        assert_eq!(rows[0].family, 2);
+        assert_eq!(agents[rows[0].shows].title, "tests", "the waiting helper speaks for the row");
+
+        // A fold on another workspace's pane of the same number does nothing here.
+        let elsewhere: BTreeSet<_> = [(SessionId(2), PaneId(1))].into();
+        assert_eq!(rail_agents(&agents, SessionId(1), &elsewhere).len(), 4);
+
+        // Nothing under it more urgent: the parent keeps its own status, and a
+        // tie goes to the parent too.
+        let calm =
+            vec![agent(1, "lead", AgentState::Working), child(3, "t", AgentState::Working, 1)];
+        let rows = rail_agents(&calm, SessionId(1), &folds);
+        assert_eq!(rows[0].shows, 0);
+
+        // A row with nothing under it cannot be folded, whatever the set says.
+        let leaf: BTreeSet<_> = [(SessionId(1), PaneId(2))].into();
+        assert!(rail_agents(&agents, SessionId(1), &leaf).iter().all(|r| !r.folded));
+    }
+
+    /// What the rail draws: branches in front of a helper, and `+N` with the
+    /// family's most urgent status on a folded parent.
+    #[test]
+    fn the_rail_draws_branches_and_a_folded_count() {
+        let ws = detail(
+            vec![
+                agent(1, "lead", AgentState::Idle),
+                child(2, "tests", AgentState::Waiting, 1),
+                child(3, "docs", AgentState::Idle, 1),
+                agent(4, "solo", AgentState::Idle),
+                child(5, "tucked", AgentState::Waiting, 4),
+            ],
+            None,
+        );
+        let mut b = buf(120, 40);
+        let view = View { agent_folds: [(SessionId(1), PaneId(4))].into(), ..View::default() };
+        draw(
+            &mut b,
+            120,
+            40,
+            &scene(&[], Some(&ws), &SysDto::default(), &[]),
+            &view,
+            &Theme::default(),
+        );
+        let screen: Vec<String> = (0..40).map(|y| text_of(&b, y)).collect();
+        let row = |name: &str| {
+            screen.iter().find(|l| l.contains(name)).cloned().unwrap_or_else(|| panic!("{name}"))
+        };
+        assert!(row("tests").contains("├ tests"), "{}", screen.join("\n"));
+        assert!(row("docs").contains("└ docs"), "{}", screen.join("\n"));
+        assert!(row("solo").contains("+1 solo"), "{}", screen.join("\n"));
+        assert!(
+            row("solo").contains("WAIT"),
+            "the hidden helper is waiting:\n{}",
+            screen.join("\n")
+        );
+        assert!(
+            !screen.iter().any(|l| l.contains("tucked")),
+            "folded away:\n{}",
+            screen.join("\n")
+        );
     }
 
     fn tagged(pane: u64, title: &str, state: AgentState) -> AgentDto {

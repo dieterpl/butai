@@ -295,7 +295,9 @@ AgentDto {
   "working_since_ms": null,        // unix ms the current turn began, null when not working
   "unread": false,                 // reached "finished"/"exited" and not looked at since
   "role": null,                    // "lead" | "worker" | "loop" | "watch" | null — the person's note on what it is for
-  "labels": []                     // free words, e.g. ["review"]; set with PUT .../panes/{pane}/tags
+  "labels": [],                    // free words, e.g. ["review"]; set with PUT .../panes/{pane}/tags
+  "parent": 3,                     // absent when top-level: the agent this one sits under
+  "forked": true                   // absent when false: a fork of `parent`, not a helper it spawned
 }
 
 ProcessDto {
@@ -846,8 +848,8 @@ looking at. Everything else in the app is the HTTP API.
 - [ ] `exited` non-null means the agent/process is dead; show the code, don't
       treat it as live.
 - [ ] Stage/commit paths must be the exact repo-relative `path` from the DTO.
-- [ ] `DELETE .../processes/{pane}` is for process panes; there is no agent-kill
-      endpoint yet.
+- [ ] `DELETE .../panes/{pane}` kills any pane. On an agent it also closes the
+      helpers it spawned (not its forks); `?helpers=keep` closes only the pane.
 - [ ] Poll `/v1/workspaces` + `/v1/system` every ~1.5s, or consume
       `/v1/events` (SSE) for `system`, `workspaces`, `notification` and
       `git_op` pushes. **Ignore event tags you do not recognise** — the set

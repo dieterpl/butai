@@ -142,9 +142,9 @@ Replaying the file on top would duplicate the first group and lose the other
 two — so on a restore the file is not consulted for processes or autostart
 agents at all.
 
-**`[[agents]] env` is applied last.** butai sets `BUTAI_SOCKET`, `BUTAI_PANE`
-and `BUTAI_WORKSPACE` before your `env` table, deliberately, so a launcher can
-override any of them.
+**`[[agents]] env` is applied last.** butai sets `BUTAI_SOCKET`, `BUTAI_PANE`,
+`BUTAI_WORKSPACE` and, for a helper, `BUTAI_PARENT` before your `env` table,
+deliberately, so a launcher can override any of them.
 
 **A name is not deduplicated the same way everywhere.** Opening a *directory* —
 bare `butai` in it, or the folder picker — reuses the workspace already on that
@@ -877,6 +877,7 @@ file fell back to defaults, and something said so".
 | `BUTAI_SOCKET` | everything | The daemon socket. It is exported into every pane, and passed to a daemon the client auto-spawns. Precedence: `--socket` beats `BUTAI_HOME` beats this — because this is the one that is routinely *inherited* rather than typed, so a `BUTAI_HOME=… butai` run inside a pane must not be answered with the enclosing daemon's socket. |
 | `BUTAI_WORKSPACE` | the CLI | Default for `--ws`. Exported into every pane, so a command run inside butai acts on its own workspace. |
 | `BUTAI_PANE` | the CLI | Which pane a command is running in. Its *absence* is the test for "not inside butai" — there is no separate marker variable. |
+| `BUTAI_PARENT` | the CLI | Set in an agent pane started under another agent, to that agent's pane id. `butai whoami` prints it. See [agents.md](agents.md#helpers-and-the-tree). |
 | `BUTAI` | the client | Set in every pane to the daemon's socket; the nesting guard compares it against the socket being attached to, so attaching a *different* daemon from inside a pane is still allowed. |
 | `BUTAI_THEME_DIR` | client | Overrides `~/.butai/themes`. |
 | `BUTAI_SESSION_FILE` | daemon | Overrides `~/.butai/session.json`, and takes `panes/` and `scratch/` with it. Deliberately **not** keyed off `BUTAI_SOCKET`: a second daemon on a custom socket shares the real session store unless you set this, or `BUTAI_HOME`, which takes it along. |

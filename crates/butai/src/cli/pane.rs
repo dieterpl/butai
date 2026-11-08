@@ -11,11 +11,12 @@
 //! single round-trip.
 
 use anyhow::{Context, Result};
-use butai_protocol::api::{PaneOutputDto, WorkspaceDetail, WorkspaceSummary};
+use butai_protocol::api::{AgentDto, PaneOutputDto, WorkspaceDetail, WorkspaceSummary};
 use butai_protocol::{PaneId, SessionId};
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
+use super::tree;
 use super::Ctx;
 use crate::exit;
 use crate::target::{Leaf, Target};
@@ -23,11 +24,19 @@ use butai_client::api::Api;
 
 #[derive(Subcommand)]
 pub enum PaneCmd {
-    /// List the panes of a workspace
+    /// List the panes of a workspace, agents drawn as a tree
     #[command(visible_alias = "list")]
     Ls {
         /// Workspace id or name (defaults to --ws)
+        #[arg(conflicts_with = "children")]
         target: Option<String>,
+        /// List only the helpers of this agent: the agents it spawned, not its
+        /// forks. Defaults to this pane
+        #[arg(long, value_name = "TARGET", num_args = 0..=1, default_missing_value = "")]
+        children: Option<String>,
+        /// With --children, the helpers' own helpers too, to any depth
+        #[arg(long, requires = "children")]
+        tree: bool,
     },
     /// Print a pane's output as text
     Read {
@@ -98,7 +107,7 @@ impl ReadFormat {
 
 pub async fn run(cmd: PaneCmd, ctx: &Ctx) -> Result<u8> {
     match cmd {
-        PaneCmd::Ls { target } => ls(ctx, target).await,
+        PaneCmd::Ls { target, children, tree } => ls(ctx, target, children, tree).await,
         PaneCmd::Read { target, lines, source, format } => {
             read(ctx, &target, lines, source, format).await
         }
@@ -267,6 +276,27 @@ pub fn own_pane() -> Option<PaneId> {
     std::env::var("BUTAI_PANE").ok()?.trim().parse().ok().map(PaneId)
 }
 
+/// The agent that spawned the caller, from `$BUTAI_PARENT`, which the daemon
+/// sets in an agent pane started with a known parent.
+pub fn parent_pane() -> Option<PaneId> {
+    std::env::var("BUTAI_PARENT").ok()?.trim().parse().ok().map(PaneId)
+}
+
+/// Resolve the agent a `--children [TARGET]` flag names. Clap hands the bare
+/// flag over as an empty string, which means this pane — the lead asking about
+/// its own helpers, which is what the flag is mostly for.
+pub async fn resolve_lead(api: &Api, spec: &str, default_ws: Option<&str>) -> Result<Resolved> {
+    if !spec.trim().is_empty() {
+        return resolve(api, spec, default_ws).await;
+    }
+    match own_pane() {
+        Some(me) => resolve(api, &me.to_string(), default_ws).await,
+        None => exit::usage(
+            "--children needs a target outside a butai pane: pass one, or run it inside a pane",
+        ),
+    }
+}
+
 /// Refuse a target that is the caller itself.
 ///
 /// Typing into your own pane appends to the prompt you are composing; waiting on
@@ -302,6 +332,16 @@ struct PaneRow {
     labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    /// The agent this one sits under, and whether it is that agent's fork
+    /// rather than its helper. Left out when unset, like the tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<PaneId>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    forked: bool,
+    /// The tree glyphs drawn in front of the label. Text output only: the JSON
+    /// stays a flat list, and `parent` says the same thing to a program.
+    #[serde(skip)]
+    branch: String,
 }
 
 /// An agent's tags as one line of text: `lead #review #bug (cli)`. The role is
@@ -314,13 +354,35 @@ pub fn tag_words(role: Option<&str>, labels: &[String], origin: Option<&str>) ->
     words.join(" ")
 }
 
-async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
-    let spec = target.or_else(|| ctx.ws.clone());
-    let ws = resolve_ws(&ctx.api, spec, "the pane list").await?;
+async fn ls(ctx: &Ctx, target: Option<String>, children: Option<String>, deep: bool) -> Result<u8> {
+    // Declared to clap too, which does not enforce it beside a positional.
+    if deep && children.is_none() {
+        return exit::usage("--tree only means something with --children");
+    }
+    // `--children` names an agent, and the workspace is that agent's.
+    let lead = match &children {
+        Some(spec) => Some(resolve_lead(&ctx.api, spec, ctx.ws.as_deref()).await?),
+        None => None,
+    };
+    let ws = match lead {
+        Some(lead) => lead.ws,
+        None => resolve_ws(&ctx.api, target.or_else(|| ctx.ws.clone()), "the pane list").await?,
+    };
     let detail: WorkspaceDetail = ctx.api.get_as(&format!("/v1/workspaces/{ws}")).await?;
 
+    // Just the helpers, or every agent; either way drawn as a tree, so a
+    // filtered list hangs off its own roots.
+    let agents: Vec<&AgentDto> = match lead {
+        Some(lead) => {
+            let keep = tree::helpers(&tree::links(&detail.agents), lead.pane, deep);
+            detail.agents.iter().filter(|a| keep.contains(&a.pane)).collect()
+        }
+        None => detail.agents.iter().collect(),
+    };
+    let order = tree::tree_order(&tree::links(agents.iter().copied()));
+
     let mut rows: Vec<PaneRow> = Vec::new();
-    for a in &detail.agents {
+    for a in &agents {
         rows.push(PaneRow {
             pane: a.pane,
             kind: "agent",
@@ -330,32 +392,54 @@ async fn ls(ctx: &Ctx, target: Option<String>) -> Result<u8> {
             role: a.role.clone(),
             labels: a.labels.clone(),
             origin: a.origin.clone(),
+            parent: a.parent,
+            forked: a.forked,
+            branch: String::new(),
         });
     }
-    for p in &detail.processes {
-        rows.push(PaneRow {
-            pane: p.pane,
-            kind: "process",
-            label: p.name.clone(),
-            status: p.status.clone(),
-            staged: detail.stage == Some(p.pane),
-            role: None,
-            labels: Vec::new(),
-            origin: None,
-        });
+    for (i, glyphs) in &order {
+        rows[*i].branch = glyphs.clone();
     }
+    // Processes have no tree, and are nobody's helpers.
+    if lead.is_none() {
+        for p in &detail.processes {
+            rows.push(PaneRow {
+                pane: p.pane,
+                kind: "process",
+                label: p.name.clone(),
+                status: p.status.clone(),
+                staged: detail.stage == Some(p.pane),
+                role: None,
+                labels: Vec::new(),
+                origin: None,
+                parent: None,
+                forked: false,
+                branch: String::new(),
+            });
+        }
+    }
+    // Text lists the agents in tree order; the JSON keeps the daemon's order.
+    let shown: Vec<&PaneRow> =
+        order.iter().map(|(i, _)| &rows[*i]).chain(rows[agents.len()..].iter()).collect();
 
     let me = own_pane();
     ctx.out.emit_owned(&rows, |w| {
-        if rows.is_empty() {
-            writeln!(w, "no panes in workspace {ws}")?;
+        match lead {
+            Some(lead) if rows.is_empty() => writeln!(w, "pane {} has no helpers", lead.pane)?,
+            _ if rows.is_empty() => writeln!(w, "no panes in workspace {ws}")?,
+            _ => {}
         }
-        for r in &rows {
+        for r in shown {
             // Mark the caller's own row: the first thing an agent needs to know
             // about a pane list is which one it is looking out of.
             let mark = if me == Some(r.pane) { " <- you" } else { "" };
             let stage = if r.staged { " [stage]" } else { "" };
-            write!(w, "{}\t{}\t{}\t{}{}{}", r.pane, r.kind, r.status, r.label, stage, mark)?;
+            // The glyphs go on the label, not the id: `cut -f1` still gets ids.
+            write!(
+                w,
+                "{}\t{}\t{}\t{}{}{}{}",
+                r.pane, r.kind, r.status, r.branch, r.label, stage, mark
+            )?;
             // A fifth column only when there is something in it, so a process
             // row and an untagged agent are the four columns they always were.
             let tags = tag_words(r.role.as_deref(), &r.labels, r.origin.as_deref());

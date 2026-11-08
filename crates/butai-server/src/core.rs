@@ -542,6 +542,11 @@ struct PersistedAgent {
     /// restart, dump names do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
+    /// Whether this agent is a fork of `parent` rather than its helper (see
+    /// [`AgentMeta::forked`]). Skipped when false, so a session file without
+    /// forks reads the way it always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    forked: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -607,6 +612,74 @@ fn assigns_session(agent: &crate::config::AgentDef) -> bool {
 
 /// What a [`fork_args`](crate::config::AgentDef::fork_args) launcher writes
 /// where the conversation it copies belongs.
+/// Where a new agent pane sits in the agent tree, decided before it starts so
+/// its environment can name the parent (`$BUTAI_PARENT`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Lineage {
+    /// The agent it belongs under — see [`AgentMeta::parent`].
+    parent: Option<PaneId>,
+    /// A fork of `parent` rather than its helper — see [`AgentMeta::forked`].
+    forked: bool,
+}
+
+/// What an explicit kill of one pane does to the agent tree: the panes to
+/// close, in order, and the agents to lift to the top level first.
+#[derive(Debug, Default, PartialEq)]
+struct KillPlan {
+    close: Vec<PaneId>,
+    lift: Vec<PaneId>,
+}
+
+/// Decide what killing `target` takes with it. `agents` is the workspace's
+/// agents in rail order, each as `(pane, parent, forked)`.
+///
+/// Killing an agent kills its helpers: every agent below it through parent
+/// links, except that a fork is not a helper — it is a person's copy of the
+/// conversation — so a fork and everything under it survive, the fork lifted
+/// to the top level. Helpers close deepest first and the target last, so no
+/// orchestrator outlives its helpers long enough to see them go. With
+/// `keep_helpers` only the target closes, and its direct children are lifted.
+///
+/// A pane that is not an agent has no children, so its plan is itself alone.
+/// The walk remembers what it has visited, so a parent loop cannot hang it.
+fn plan_kill(
+    target: PaneId,
+    agents: &[(PaneId, Option<PaneId>, bool)],
+    keep_helpers: bool,
+) -> KillPlan {
+    let children = |of: PaneId| agents.iter().filter(move |(_, parent, _)| *parent == Some(of));
+    if keep_helpers {
+        return KillPlan {
+            close: vec![target],
+            lift: children(target).map(|(c, ..)| *c).collect(),
+        };
+    }
+    let mut seen = HashSet::from([target]);
+    let mut lift = Vec::new();
+    // Breadth first, so the queue is already in depth order.
+    let mut queue = vec![(target, 0usize)];
+    let mut next = 0;
+    while let Some(&(pane, depth)) = queue.get(next) {
+        next += 1;
+        for &(child, _, forked) in children(pane) {
+            if !seen.insert(child) {
+                continue;
+            }
+            match forked {
+                true => lift.push(child),
+                false => queue.push((child, depth + 1)),
+            }
+        }
+    }
+    // Deepest first, ending on the target (depth 0); siblings in rail order.
+    let max = queue.last().map_or(0, |(_, d)| *d);
+    let close = (0..=max)
+        .rev()
+        .flat_map(|depth| queue.iter().filter(move |(_, d)| *d == depth).map(|(p, _)| *p))
+        .collect();
+    KillPlan { close, lift }
+}
+
 const PARENT_SESSION_PLACEHOLDER: &str = "{parent_session_id}";
 
 /// Conversation id and argv for a fork of a pane holding `parent`, or why there
@@ -1616,6 +1689,14 @@ impl ServerCore {
         for a in &saved.agents {
             let raw = read_dump(&dumps.join(&a.dump));
             let replay = raw.as_deref().and_then(decode_dump);
+            // A parent saved ahead of its child — the usual order, since a child
+            // is spawned after its parent — is already back, so the child can be
+            // started knowing it and gets `$BUTAI_PARENT`. One saved later is
+            // linked up after the loop, without the variable.
+            let lineage = Lineage {
+                parent: a.parent.as_deref().and_then(|d| restored.get(d)).copied(),
+                forked: a.forked,
+            };
             match self.spawn_agent_restoring(
                 sid,
                 &a.agent,
@@ -1623,6 +1704,7 @@ impl ServerCore {
                 a.session_id.as_deref(),
                 a.spoke,
                 false,
+                lineage,
             ) {
                 Ok(pane) => {
                     self.set_agent_tags(pane, a.role.clone(), a.labels.clone());
@@ -1805,9 +1887,10 @@ impl ServerCore {
         else {
             return false;
         };
-        let Some((name, role, labels, origin, parent)) =
+        let Some((name, role, labels, origin, lineage)) =
             self.workspaces.get(&sid).and_then(|w| w.agent_meta.get(&pane)).map(|m| {
-                (m.name.clone(), m.role.clone(), m.labels.clone(), m.origin.clone(), m.parent)
+                let lineage = Lineage { parent: m.parent, forked: m.forked };
+                (m.name.clone(), m.role.clone(), m.labels.clone(), m.origin.clone(), lineage)
             })
         else {
             return false;
@@ -1848,19 +1931,20 @@ impl ServerCore {
         // `spoke: false` alongside `session: None` — the fresh conversation this
         // starts has not been written yet either, so a restart before the user
         // types would otherwise fail to reopen it for the same reason.
-        let fresh = match self.spawn_agent_restoring(sid, &name, replay, None, false, false) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("restarting agent {name:?} after a failed resume: {e:#}");
-                return true;
-            }
-        };
+        // Same place in the tree: under the same parent, as a fork if it was one.
+        let fresh =
+            match self.spawn_agent_restoring(sid, &name, replay, None, false, false, lineage) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("restarting agent {name:?} after a failed resume: {e:#}");
+                    return true;
+                }
+            };
         // The restarted pane is the same chat to the person who tagged it.
         self.set_agent_tags(fresh, role, labels);
         self.set_agent_origin(fresh, origin);
-        // Same place in the tree: under the same parent, and still the parent of
-        // its own children, which pointed at the pane that just went away.
-        self.set_agent_parent(fresh, parent);
+        // Still the parent of its own children, which pointed at the pane that
+        // just went away.
         if let Some(ws) = self.workspaces.get_mut(&sid) {
             for m in ws.agent_meta.values_mut().filter(|m| m.parent == Some(pane)) {
                 m.parent = Some(fresh);
@@ -1896,6 +1980,39 @@ impl ServerCore {
         self.persist_session();
         self.dirty = true;
         true
+    }
+
+    /// Close a pane because someone asked to — the API's kill and the framed
+    /// protocol's close-the-stage both land here.
+    ///
+    /// On an agent this is also the end of the helpers it started (see
+    /// [`plan_kill`]): they go first, deepest first, so an orchestrator is
+    /// never left running long enough to notice them die and start
+    /// replacements. Its forks are someone's copy of the conversation, not its
+    /// helpers, and stay up at the top level. `keep_helpers` keeps everything
+    /// below the pane, lifted to the top level the same way.
+    ///
+    /// An agent exiting on its own takes [`drop_pane`](Self::drop_pane)
+    /// directly and closes nothing else: its helpers may still be mid-task.
+    fn close_pane(&mut self, ws_id: SessionId, pane: PaneId, keep_helpers: bool) {
+        let Some(ws) = self.workspaces.get_mut(&ws_id) else { return };
+        let agents: Vec<(PaneId, Option<PaneId>, bool)> = ws
+            .agents
+            .iter()
+            .filter_map(|p| ws.agent_meta.get(p).map(|m| (*p, m.parent, m.forked)))
+            .collect();
+        let plan = plan_kill(pane, &agents, keep_helpers);
+        for lifted in &plan.lift {
+            if let Some(m) = ws.agent_meta.get_mut(lifted) {
+                // Top level, and so a fork of nothing any more.
+                m.parent = None;
+                m.forked = false;
+            }
+        }
+        for doomed in plan.close {
+            self.drop_pane(ws_id, doomed);
+        }
+        self.dirty = true;
     }
 
     fn drop_pane(&mut self, ws_id: SessionId, pane: PaneId) {
@@ -2059,6 +2176,7 @@ impl ServerCore {
                                     .parent
                                     .and_then(|p| w.agents.iter().position(|a| *a == p))
                                     .map(agent_dump),
+                                forked: meta.forked,
                             })
                         })
                         .collect();
@@ -2466,8 +2584,7 @@ impl ServerCore {
                 if let Some(sid) = ws_id {
                     let stage = self.workspaces.get(&sid).and_then(|w| w.stage);
                     if let Some(pane_id) = stage {
-                        self.drop_pane(sid, pane_id);
-                        self.dirty = true;
+                        self.close_pane(sid, pane_id, false);
                     }
                 }
             }
@@ -3064,17 +3181,19 @@ impl ServerCore {
                 if !self.workspaces.contains_key(&ws) {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
                 }
-                match self.spawn_agent_restoring(ws, &name, None, None, false, background) {
+                // Only an agent of this workspace can be a parent. Decided
+                // before the spawn, so the pane starts with `$BUTAI_PARENT`.
+                let parent = parent.filter(|p| {
+                    self.workspaces.get(&ws).is_some_and(|w| w.agent_meta.contains_key(p))
+                });
+                let lineage = Lineage { parent, forked: false };
+                match self.spawn_agent_restoring(ws, &name, None, None, false, background, lineage)
+                {
                     Ok(pane) => {
                         let origin = origin.filter(|o| {
                             butai_protocol::api::AGENT_ORIGINS.contains(&o.as_str())
                         });
                         self.set_agent_origin(pane, origin);
-                        // Only an agent of this workspace can be a parent.
-                        let parent = parent.filter(|p| {
-                            self.workspaces.get(&ws).is_some_and(|w| w.agent_meta.contains_key(p))
-                        });
-                        self.set_agent_parent(pane, parent);
                         // `background` is how a helper an agent starts for
                         // itself says so; that is not a pick.
                         if !background {
@@ -3106,15 +3225,14 @@ impl ServerCore {
                 }
             }
             ApiRequest::RestartProcess { ws, pane } => self.api_restart_process(ws, pane),
-            ApiRequest::KillPane { ws, pane } => {
+            ApiRequest::KillPane { ws, pane, keep_helpers } => {
                 let Some(w) = self.workspaces.get_mut(&ws) else {
                     return ApiReply::NotFound(format!("no workspace {ws}"));
                 };
                 if !w.all_panes().contains(&pane) {
                     return ApiReply::NotFound(format!("no pane {pane} in workspace {ws}"));
                 }
-                self.drop_pane(ws, pane);
-                self.dirty = true;
+                self.close_pane(ws, pane, keep_helpers);
                 ApiReply::Ok
             }
             ApiRequest::PaneOutput { ws, pane, lines, source, format } => {
@@ -3564,6 +3682,10 @@ impl ServerCore {
             // Only a parent that is still an agent: a client drawing a tree
             // wants a root, not a row pointing at nothing.
             parent: meta.and_then(|m| m.parent).filter(|p| self.agent_dto_exists(*p)),
+            // A fork of nothing is just an agent: only claimed alongside a
+            // parent the row actually names.
+            forked: meta
+                .is_some_and(|m| m.forked && m.parent.is_some_and(|p| self.agent_dto_exists(p))),
         })
     }
 
@@ -3591,7 +3713,9 @@ impl ServerCore {
         self.workspaces.values().any(|w| w.agent_meta.contains_key(&pane))
     }
 
-    /// Record which agent started another. Once, at spawn.
+    /// Record which agent started another. A spawn passes it in its
+    /// [`Lineage`]; this is for a restore, linking a child up with a parent
+    /// that was saved after it.
     fn set_agent_parent(&mut self, pane: PaneId, parent: Option<PaneId>) {
         if let Some(meta) = self.workspaces.values_mut().find_map(|w| w.agent_meta.get_mut(&pane)) {
             meta.parent = parent;
@@ -4615,7 +4739,8 @@ impl ServerCore {
     }
 
     fn spawn_agent(&mut self, ws_id: SessionId, name: &str) -> anyhow::Result<()> {
-        self.spawn_agent_restoring(ws_id, name, None, None, false, false).map(|_| ())
+        self.spawn_agent_restoring(ws_id, name, None, None, false, false, Lineage::default())
+            .map(|_| ())
     }
 
     /// [`spawn_agent`](Self::spawn_agent), plus the pane's saved output and the
@@ -4632,6 +4757,9 @@ impl ServerCore {
     /// `spoke` says whether that conversation was ever written — a pane that was
     /// opened and never typed into names one that does not exist, and is started
     /// fresh instead of being asked to reopen nothing.
+    ///
+    /// `lineage` is where the new pane sits in the agent tree; see [`Lineage`].
+    #[allow(clippy::too_many_arguments)]
     fn spawn_agent_restoring(
         &mut self,
         ws_id: SessionId,
@@ -4642,6 +4770,7 @@ impl ServerCore {
         // Leave the stage and focus alone — for a helper spawned by another
         // agent, where taking the view would interrupt whoever is watching.
         background: bool,
+        lineage: Lineage,
     ) -> anyhow::Result<PaneId> {
         let agent = self
             .config
@@ -4685,8 +4814,9 @@ impl ServerCore {
         // A resumed pane is by definition one that had already been spoken to,
         // so it stays resumable across a second restart without waiting for the
         // user to type into it again.
-        let pane =
-            self.start_agent_pane(ws_id, &agent, args, session_id, resumed, replay, background)?;
+        let pane = self.start_agent_pane(
+            ws_id, &agent, args, session_id, resumed, replay, background, lineage,
+        )?;
         // Arm the one-shot fallback: a CLI asked to reopen a conversation that
         // is no longer there exits immediately rather than starting without it
         // (verified: `claude --resume <unknown>` exits 1, gemini exits on a
@@ -4744,12 +4874,12 @@ impl ServerCore {
         };
         let (session_id, args) = fork_launch(&agent, parent_session.as_deref(), spoke)
             .map_err(|why| bad(format!("cannot fork pane {source}: {why}")))?;
+        let lineage = Lineage { parent: Some(source), forked: true };
         let pane = self
-            .start_agent_pane(ws_id, &agent, args, session_id, true, None, background)
+            .start_agent_pane(ws_id, &agent, args, session_id, true, None, background, lineage)
             .map_err(|e| bad(format!("{e:#}")))?;
-        self.set_agent_parent(pane, Some(source));
         self.set_agent_origin(pane, origin);
-        // Both were recorded after `start_agent_pane` saved the roster.
+        // Recorded after `start_agent_pane` saved the roster.
         self.persist_session();
         Ok(pane)
     }
@@ -4766,6 +4896,7 @@ impl ServerCore {
         spoke: bool,
         replay: Option<PaneDump<'_>>,
         background: bool,
+        lineage: Lineage,
     ) -> anyhow::Result<PaneId> {
         let cwd = self
             .workspaces
@@ -4773,8 +4904,16 @@ impl ServerCore {
             .map(|w| w.cwd.clone())
             .ok_or_else(|| anyhow::anyhow!("workspace gone"))?;
         let (rows, cols) = self.stage_size(ws_id);
-        let env: Vec<(String, String)> =
-            agent.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        // `$BUTAI_PARENT` names the agent that started this one, beside the
+        // `$BUTAI_PANE` every pane gets. It goes first so an `[[agents]] env`
+        // entry can still override it, the same rule the identity variables
+        // follow.
+        let env: Vec<(String, String)> = lineage
+            .parent
+            .map(|p| ("BUTAI_PARENT".to_string(), p.to_string()))
+            .into_iter()
+            .chain(agent.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .collect();
         let detect = Detect::compile(
             &agent.name,
             agent.waiting_pattern.as_deref(),
@@ -4801,7 +4940,8 @@ impl ServerCore {
                     role: None,
                     labels: Vec::new(),
                     origin: None,
-                    parent: None,
+                    parent: lineage.parent,
+                    forked: lineage.forked,
                 },
             );
             if !background {
@@ -5515,6 +5655,7 @@ mod tests {
             labels: vec!["review".into(), "bug".into()],
             origin: Some("tui".into()),
             parent: Some("agent-0.bin".into()),
+            forked: true,
         };
         let back: PersistedAgent =
             serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
@@ -5523,6 +5664,12 @@ mod tests {
         // Who started it comes back with it, so a restart does not forget.
         assert_eq!(back.origin.as_deref(), Some("tui"));
         assert_eq!(back.parent.as_deref(), Some("agent-0.bin"));
+        // A fork stays a fork across a restart, so a later kill of its parent
+        // still leaves it alone.
+        assert!(back.forked);
+        let helper = PersistedAgent { forked: false, ..tagged.clone() };
+        let json = serde_json::to_string(&helper).unwrap();
+        assert!(!json.contains("forked"), "a helper should leave the key out: {json}");
 
         let old: PersistedAgent =
             serde_json::from_str(r#"{"agent":"claude","dump":"agent-0.bin"}"#).unwrap();
@@ -5530,6 +5677,193 @@ mod tests {
         assert!(old.labels.is_empty());
         assert_eq!(old.origin, None);
         assert_eq!(old.parent, None);
+        assert!(!old.forked);
+    }
+
+    /// `(pane, parent, forked)` rows for [`plan_kill`].
+    fn row(pane: u64, parent: Option<u64>, forked: bool) -> (PaneId, Option<PaneId>, bool) {
+        (PaneId(pane), parent.map(PaneId), forked)
+    }
+
+    fn ids(panes: &[u64]) -> Vec<PaneId> {
+        panes.iter().copied().map(PaneId).collect()
+    }
+
+    /// A lead (1) with helpers 2 and 3, a helper of a helper (4, under 2), a
+    /// fork (5) of the lead with a helper of its own (6), and an unrelated
+    /// agent (7).
+    fn family() -> Vec<(PaneId, Option<PaneId>, bool)> {
+        vec![
+            row(1, None, false),
+            row(2, Some(1), false),
+            row(3, Some(1), false),
+            row(4, Some(2), false),
+            row(5, Some(1), true),
+            row(6, Some(5), false),
+            row(7, None, false),
+        ]
+    }
+
+    /// Killing a lead takes its helpers with it, deepest first and the lead
+    /// last, and leaves its fork — and the fork's own helper — running.
+    #[test]
+    fn a_kill_takes_the_helpers_deepest_first_and_spares_the_forks() {
+        let plan = plan_kill(PaneId(1), &family(), false);
+        assert_eq!(plan.close, ids(&[4, 2, 3, 1]));
+        assert_eq!(plan.lift, ids(&[5]), "the fork should go top-level, its helper with it");
+    }
+
+    #[test]
+    fn keeping_the_helpers_closes_only_the_pane_and_lifts_its_children() {
+        let plan = plan_kill(PaneId(1), &family(), true);
+        assert_eq!(plan.close, ids(&[1]));
+        assert_eq!(plan.lift, ids(&[2, 3, 5]));
+    }
+
+    #[test]
+    fn killing_a_leaf_or_a_non_agent_closes_only_it() {
+        for target in [4, 7, 99].map(PaneId) {
+            let plan = plan_kill(target, &family(), false);
+            assert_eq!(plan, KillPlan { close: vec![target], lift: vec![] }, "pane {target}");
+        }
+    }
+
+    /// A parent loop is a bug somewhere else; it must not hang the actor here.
+    #[test]
+    fn a_parent_loop_does_not_hang_a_kill() {
+        let looped = [row(1, Some(2), false), row(2, Some(1), false)];
+        assert_eq!(plan_kill(PaneId(1), &looped, false).close, ids(&[2, 1]));
+    }
+
+    fn spawn_child(core: &mut ServerCore, sid: SessionId, parent: Option<PaneId>) -> PaneId {
+        let req = ApiRequest::SpawnAgent {
+            ws: sid,
+            name: "fakeagent".into(),
+            background: true,
+            origin: None,
+            parent,
+        };
+        assert!(matches!(core.handle_api(req), ApiReply::Ok));
+        *core.workspaces[&sid].agents.last().unwrap()
+    }
+
+    /// The same shape as [`family`], built in a real workspace: a lead, two
+    /// helpers, a helper's helper, and a fork of the lead with a helper.
+    fn spawn_family(core: &mut ServerCore, sid: SessionId) -> [PaneId; 6] {
+        let lead = spawn_child(core, sid, None);
+        let a = spawn_child(core, sid, Some(lead));
+        let b = spawn_child(core, sid, Some(lead));
+        let aa = spawn_child(core, sid, Some(a));
+        let fork = spawn_child(core, sid, Some(lead));
+        core.workspaces.get_mut(&sid).unwrap().agent_meta.get_mut(&fork).unwrap().forked = true;
+        let fork_helper = spawn_child(core, sid, Some(fork));
+        [lead, a, b, aa, fork, fork_helper]
+    }
+
+    fn test_core(dir: &tempfile::TempDir) -> (ServerCore, SessionId) {
+        let (etx, _erx) = unbounded_channel();
+        let (otx, _orx) = tokio::sync::mpsc::channel(OUTPUT_CHANNEL_CAP);
+        let mut core = ServerCore::new(test_config(), etx, otx, CoreMode::Standalone);
+        let sid = core.create_workspace("t".into(), dir.path().to_path_buf()).unwrap();
+        (core, sid)
+    }
+
+    /// End to end through the API: the kill closes the lead and its helpers,
+    /// and the fork survives at the top level with its own helper under it.
+    #[test]
+    fn killing_an_agent_closes_its_helpers_and_lifts_its_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, sid) = test_core(&dir);
+        let [lead, _, _, _, fork, fork_helper] = spawn_family(&mut core, sid);
+        let dto = core.agent_dto(fork).unwrap();
+        assert_eq!((dto.parent, dto.forked), (Some(lead), true));
+
+        let req = ApiRequest::KillPane { ws: sid, pane: lead, keep_helpers: false };
+        assert!(matches!(core.handle_api(req), ApiReply::Ok));
+        assert_eq!(core.workspaces[&sid].agents, [fork, fork_helper]);
+        let dto = core.agent_dto(fork).unwrap();
+        assert_eq!((dto.parent, dto.forked), (None, false), "the fork should be top-level now");
+        assert_eq!(core.agent_dto(fork_helper).unwrap().parent, Some(fork));
+    }
+
+    #[test]
+    fn keep_helpers_closes_the_agent_alone_and_lifts_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, sid) = test_core(&dir);
+        let [lead, a, b, aa, fork, fork_helper] = spawn_family(&mut core, sid);
+
+        let req = ApiRequest::KillPane { ws: sid, pane: lead, keep_helpers: true };
+        assert!(matches!(core.handle_api(req), ApiReply::Ok));
+        assert_eq!(core.workspaces[&sid].agents, [a, b, aa, fork, fork_helper]);
+        for top in [a, b, fork] {
+            assert_eq!(core.agent_dto(top).unwrap().parent, None, "pane {top}");
+        }
+        assert_eq!(core.agent_dto(aa).unwrap().parent, Some(a), "grandchildren stay put");
+    }
+
+    /// The framed protocol's close-the-stage cascades like the API's kill.
+    #[test]
+    fn closing_the_staged_agent_closes_its_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, sid) = test_core(&dir);
+        let [lead, a, ..] = spawn_family(&mut core, sid);
+        core.workspaces.get_mut(&sid).unwrap().stage = Some(a);
+        let (ctx, _crx) = unbounded_channel();
+        let cid: ClientId = 1;
+        core.handle(Event::ClientConnected(cid, ctx));
+        core.clients.get_mut(&cid).unwrap().session = Some(sid);
+        core.exec_command(cid, Command::ClosePane);
+        let left = &core.workspaces[&sid].agents;
+        assert!(left.contains(&lead) && !left.contains(&a), "{left:?}");
+        assert_eq!(left.len(), 4, "the helper's own helper should have gone too: {left:?}");
+    }
+
+    /// An agent that exits on its own takes nothing with it: its helpers may be
+    /// mid-task, and only someone asking to close it decides otherwise.
+    #[test]
+    fn an_agent_exiting_on_its_own_leaves_its_helpers_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, sid) = test_core(&dir);
+        let [lead, a, ..] = spawn_family(&mut core, sid);
+        core.on_pane_exited(lead, 0);
+        let left = &core.workspaces[&sid].agents;
+        assert_eq!(left.len(), 5, "{left:?}");
+        assert_eq!(core.agent_dto(a).unwrap().parent, None, "an orphan reads as top-level");
+    }
+
+    /// A helper's pane is told who its parent is, beside its own `$BUTAI_PANE`.
+    #[test]
+    fn a_helper_is_told_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("parent.txt");
+        let mut cfg = test_config();
+        cfg.agents[0].args = vec![
+            "-c".into(),
+            // Each pane writes its own temp file and only a pane that has a
+            // parent moves it into place, so the lead cannot clobber the answer.
+            format!(
+                "p=$(printenv BUTAI_PARENT) && echo $p > {0}.$BUTAI_PANE && mv {0}.$BUTAI_PANE {0}; sleep 30",
+                out.display()
+            ),
+        ];
+        let (etx, _erx) = unbounded_channel();
+        let (otx, _orx) = tokio::sync::mpsc::channel(OUTPUT_CHANNEL_CAP);
+        let mut core = ServerCore::new(cfg, etx, otx, CoreMode::Standalone);
+        let sid = core.create_workspace("t".into(), dir.path().to_path_buf()).unwrap();
+        let lead = spawn_child(&mut core, sid, None);
+        // The lead has no parent, so it writes nothing.
+        spawn_child(&mut core, sid, Some(lead));
+        let mut text = String::new();
+        for _ in 0..300 {
+            if let Ok(s) = std::fs::read_to_string(&out) {
+                if !s.is_empty() {
+                    text = s;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(text.trim(), lead.to_string(), "BUTAI_PARENT should name the lead");
     }
 
     /// A buffer whose rows are the given lines, left-aligned and space-padded.
