@@ -382,6 +382,12 @@ impl Keymap {
         self.bindings.is_empty()
     }
 
+    /// Every key the table binds, and what to. Read by the HELP page's
+    /// keyboard, so a `[keys]` override is drawn where it was put.
+    pub fn bindings(&self) -> impl Iterator<Item = (&KeyEvent, &Action)> {
+        self.bindings.iter()
+    }
+
     pub fn resolve(&self, key: &KeyEvent) -> Option<&Action> {
         self.bindings.get(&normalize(key))
     }

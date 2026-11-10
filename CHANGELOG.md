@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.6.0-dev.2: HELP's Keys page is a keyboard.** The Keys topic opens on a
+  full keyboard (function row, letters, modifiers, space bar, and the
+  navigation keys when there is room). Each key says what it does and is
+  coloured by kind, the shifted meaning sits above the plain one, and the held
+  modifier is lit. `[` and `]`, or a click on a tab, switch between the Alt
+  layer, the prefix, the vim-style workbench keys from the `?` card, BOOTH, the
+  AGENTS and PROCESSES rails, CHANGES, the diff and the GIT page. Under the
+  board, every binding on the layer is listed with what it does, and the
+  topic's text follows as before. Nothing on it is written out by hand: the
+  prefix layer is the keymap you are running, so a key you bind in `[keys]` is
+  on it. The Alt layer is read off the Alt dispatcher, and the other layers
+  come from the tables their surfaces dispatch and draw footers from. Below 60
+  columns the board is left out and the list remains. The browser client's
+  HELP gets the same keyboard as a Keys topic. It is built from the browser's
+  own key tables and adds a search that lights up matching keys, a panel saying
+  what the key does on every layer, and your own key presses looked up as you
+  type. Holding alt there shows the Alt layer. `alt-space` (the views menu) and
+  `g` on CHANGES moved from code into the browser's key tables, so the
+  reference now lists them.
 - **1.6.0-dev.1: vim keys on the workbench, and `?` is one card of them.**
   With the keyboard on a rail, `h` and `l` move between the left rail and
   CHANGES, `gg` and `G` go to the first and last row (on BOOTH's fleet too),

@@ -40,7 +40,7 @@
 
 import {
   VerbId, GLOBAL, TARGETS, altVerb, prefixVerb, altKeyName, keyName, isPrefix,
-  DEFAULT_PREFIX, PREFIX_STORAGE_KEY, ALT_MUST_FALL_THROUGH,
+  DEFAULT_PREFIX, PREFIX_STORAGE_KEY, ALT_MUST_FALL_THROUGH, ARROW_ALIASES,
   agentsVerbs, procsVerbs, changesFooter, ChangesRow, filesVerbs, dockerVerbs, DockerRow,
   gitFooter, GitRow, overlayVerbs, OverlayKind, homeVerbs, settingsVerbs, SettingRow,
   type Verb, type KeyEventLike, type Prefix,
@@ -602,14 +602,9 @@ export class Keys {
     // `←`/`→` join `↑`/`↓` here for the same reason and on the same terms: they
     // are `h` and `l` under the names a keyboard gives them, and the horizontal
     // pair only means anything on a surface whose table binds them — which is
-    // the Finder trail on FILES and nothing else.
-    const arrows: Record<string, VerbId> = {
-      arrowdown: VerbId.Down,
-      arrowup: VerbId.Up,
-      arrowleft: VerbId.TreeUp,
-      arrowright: VerbId.TreeInto,
-    };
-    const arrow = arrows[keyName(e)];
+    // the Finder trail on FILES and nothing else. The map is `verbs.ts`'s, so
+    // the HELP keyboard draws the arrows from the same four lines.
+    const arrow = ARROW_ALIASES[keyName(e)];
     // `C-s` is spelled with the control flag rather than as a character.
     const spelled = e.ctrlKey ? "C-" + keyName(e) : keyName(e);
     // An arrow still has to be *in the table* to do anything. Without that check

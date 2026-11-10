@@ -20,6 +20,7 @@
 //! opens with no daemon in the loop at all, which is why it reads the same over
 //! ssh as it does locally, and why there is no path, no save and no editor.
 
+use super::keyboard::{self, Keys};
 use super::{ellipsize, put_str, Geom, LRect, Page, Pen, Theme, View};
 use crate::reference::{Topic, TOPICS};
 use ratatui::buffer::Buffer;
@@ -42,6 +43,12 @@ pub struct Help {
     /// The page this one was entered from, so `esc` puts it back rather than
     /// dropping you somewhere you never were.
     pub ret: Page,
+    /// The keyboard the Keys topic opens with, built from the client's own
+    /// binding tables. The workbench rebuilds it once its keymap is read, so
+    /// `[keys]` overrides and a changed prefix are on it.
+    pub keys: Keys,
+    /// Which of [`Keys::layers`] the keyboard shows.
+    pub layer: usize,
 }
 
 impl Default for Help {
@@ -53,6 +60,8 @@ impl Default for Help {
             topic: crate::reference::index_of(crate::reference::HELP_SLUG),
             scroll: 0,
             ret: Page::Agents,
+            keys: Keys::build(&crate::keymap::Keymap::default(), Vec::new()),
+            layer: 0,
         }
     }
 }
@@ -67,6 +76,57 @@ impl Help {
         self.topic = topic.min(TOPICS.len() - 1);
         self.scroll = 0;
     }
+
+    /// Whether the open topic is the one the keyboard heads.
+    pub fn on_keys(&self) -> bool {
+        TOPICS.get(self.topic).is_some_and(|t| t.slug == KEYBOARD_SLUG)
+    }
+
+    /// The keyboard's next layer, or the one before, wrapping. The reading
+    /// position stays: the board is at the top and so, nearly always, are you.
+    pub fn step_layer(&mut self, forward: bool) {
+        let n = self.keys.layers.len().max(1);
+        self.layer = if forward { (self.layer + 1) % n } else { (self.layer + n - 1) % n };
+    }
+}
+
+/// The topic the keyboard is drawn at the head of.
+pub const KEYBOARD_SLUG: &str = "keys";
+
+/// Rows the keyboard takes at the head of the open topic, in a body column
+/// `body_width` wide; none on any other topic.
+///
+/// Counted with the prose by [`page_rows`], so the scroll, the wheel and "more
+/// below" treat the board as the first lines of the page, which is what it
+/// looks like.
+pub fn lead_rows(state: &Help, body_width: u16) -> usize {
+    if !state.on_keys() {
+        return 0;
+    }
+    keyboard::height(&state.keys, state.layer, keyboard_width(body_width)) as usize
+}
+
+/// The keyboard takes the whole body column, not the reading measure the
+/// prose is held to: it is a picture, and a picture squeezed to 82 columns
+/// loses its labels first.
+fn keyboard_width(body_width: u16) -> u16 {
+    body_width.saturating_sub(GUTTER + 1)
+}
+
+/// How many rows the open topic is, the keyboard included.
+pub fn page_rows(state: &Help, prefix: &str, body: LRect) -> usize {
+    let topic = &TOPICS[state.topic.min(TOPICS.len() - 1)];
+    lead_rows(state, body.width) + read(topic, prefix, text_width(body)).len()
+}
+
+/// Which keyboard layer a press on the body at `(x, y)` lands on: one of the
+/// tabs on the keyboard's first row, while that row is on screen.
+pub fn layer_at(state: &Help, body: LRect, x: u16, y: u16) -> Option<usize> {
+    if !state.on_keys() || state.scroll != 0 || y != body.y {
+        return None;
+    }
+    let col = x.checked_sub(body.x + GUTTER)?;
+    keyboard::tab_spans(&state.keys).iter().position(|(a, b)| col >= *a && col < *b)
 }
 
 /// Columns the contents list takes. The longest row is `Mouse and clipboard` at
@@ -131,8 +191,15 @@ pub fn topic_at(list: LRect, y: u16) -> Option<usize> {
 ///
 /// Every one of them is also a key the rest of the workbench uses for the same
 /// thing — the same rule the rail verbs follow.
-pub fn verbs() -> [(&'static str, &'static str); 4] {
-    [("j/k", "scroll"), ("tab", "next page"), ("home/end", "top · bottom"), ("esc", "close")]
+pub fn verbs(on_keys: bool) -> Vec<(&'static str, &'static str)> {
+    let mut v = vec![("j/k", "scroll"), ("tab", "next page")];
+    // `[`/`]` are the client's previous/next pair (tabs, hunks); here they
+    // walk the keyboard's layers, and only where there is a keyboard.
+    if on_keys {
+        v.push(("[ ]", "layer"));
+    }
+    v.extend([("home/end", "top · bottom"), ("esc", "close")]);
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -419,10 +486,39 @@ fn draw_body(
     let x = area.x + GUTTER;
     let lines = read(topic, &view.prefix, text_width(area));
     let height = text_height(area);
-    let scroll = state.scroll.min(max_scroll(lines.len(), height));
+    let lead = lead_rows(state, area.width);
+    let total = lead + lines.len();
+    let scroll = state.scroll.min(max_scroll(total, height));
 
-    for (row, line) in lines.iter().skip(scroll).take(height as usize).enumerate() {
-        let y = area.y + row as u16;
+    // The keyboard, as the topic's first `lead` rows: drawn whole off screen
+    // and the rows the scroll leaves showing copied in, so a half-scrolled
+    // board is cut where the page is rather than redrawn to fit.
+    if scroll < lead {
+        let kw = keyboard_width(area.width);
+        let rect = ratatui::layout::Rect::new(0, 0, kw, lead as u16);
+        let mut board = Buffer::empty(rect);
+        keyboard::draw(
+            &mut board,
+            LRect::new(0, 0, kw, lead as u16),
+            &state.keys,
+            state.layer,
+            theme,
+        );
+        for row in scroll..lead.min(scroll + height as usize) {
+            let y = area.y + (row - scroll) as u16;
+            for col in 0..kw {
+                if let (Some(src), Some(dst)) =
+                    (board.cell((col, row as u16)), buf.cell_mut((x + col, y)))
+                {
+                    *dst = src.clone();
+                }
+            }
+        }
+    }
+    let top = lead.saturating_sub(scroll);
+    let room = (height as usize).saturating_sub(top);
+    for (row, line) in lines.iter().skip(scroll.saturating_sub(lead)).take(room).enumerate() {
+        let y = area.y + (top + row) as u16;
         let mut cx = x;
         for span in line {
             if cx >= bound {
@@ -447,7 +543,7 @@ fn draw_body(
     // without saying so.
     let vy = area.y + area.height.saturating_sub(1);
     let mut vx = x;
-    for (key, label) in verbs() {
+    for (key, label) in verbs(state.on_keys()) {
         let w = key.len() as u16 + label.len() as u16 + 3;
         if vx + w >= bound {
             break;
@@ -457,7 +553,7 @@ fn draw_body(
         put_str(buf, vx, vy, label, bound, Pen::new(theme.faint, theme.ground));
         vx += label.len() as u16 + 3;
     }
-    if scroll < max_scroll(lines.len(), height) {
+    if scroll < max_scroll(total, height) {
         let more = "more below";
         let mx = bound.saturating_sub(more.len() as u16 + 2);
         if mx > vx {
@@ -530,7 +626,7 @@ mod tests {
     #[test]
     fn every_topic_draws_something() {
         for (i, t) in TOPICS.iter().enumerate() {
-            let out = screen(&Help { topic: i, scroll: 0, ret: Page::Agents }).join("\n");
+            let out = screen(&Help { topic: i, ..Help::default() }).join("\n");
             let title = t.body.lines().next().unwrap().trim_start_matches("# ");
             assert!(out.contains(title), "`{}` drew no title:\n{out}", t.slug);
         }
@@ -548,12 +644,12 @@ mod tests {
                 read(t, "^B", text_width(area.body)).len() > text_height(area.body) as usize
             })
             .expect("some topic is longer than the screen");
-        let top = screen(&Help { topic: long, scroll: 0, ret: Page::Agents }).join("\n");
+        let top = screen(&Help { topic: long, ..Help::default() }).join("\n");
         assert!(top.contains("more below"), "a page with more to read did not say so:\n{top}");
 
         let lines = read(&TOPICS[long], "^B", text_width(area.body));
         let end = max_scroll(lines.len(), text_height(area.body));
-        let bottom = screen(&Help { topic: long, scroll: end, ret: Page::Agents }).join("\n");
+        let bottom = screen(&Help { topic: long, scroll: end, ..Help::default() }).join("\n");
         assert!(!bottom.contains("more below"), "the end of the page still promised more");
         // The last line of the topic is on screen at the end, and not one row
         // past it — the clamp and the paint count the same lines.

@@ -45,6 +45,10 @@
 export const VerbId = Object.freeze(ids([
   // Spaces, projects, machines — the workbench layer.
   "SpaceWork", "SpaceFiles", "SpaceDocker", "SpaceGit", "SpaceDocs", "SpaceNext", "SpacePrev",
+  // The chooser over the spaces above, by name. A verb rather than a special
+  // case in the shell's key handler, because a key the shell answers and no
+  // table lists is a key `?` and the HELP keyboard cannot name.
+  "Views",
   // SETTINGS is a page and is deliberately *not* one of the spaces above, for
   // the reason `Page::Settings` gives: that list is the views of one workspace,
   // and this is about the client. It is entered and left rather than cycled.
@@ -273,6 +277,7 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.SpaceWork, "agents", { prefix: "w" }, "the stage, the rails, the terminal"),
   g(VerbId.SpaceNext, "next space", { alt: ".", prefix: "." }),
   g(VerbId.SpacePrev, "prev space", { alt: ",", prefix: "," }),
+  g(VerbId.Views, "views menu", { alt: " ", prefix: " " }, "every view by name, with the key that reaches it"),
   // -- the one page that spans machines ------------------------------------
   // Beside the numbered projects because that is where its chip is: HOME is a
   // peer of the workspaces, not a view of one, so `alt-,` / `alt-.` walk the
@@ -323,6 +328,19 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   g(VerbId.FontSmaller, "smaller", { alt: "-", prefix: "-" }),
   g(VerbId.Help, "this reference", { prefix: "?" }, "bare ? off the stage"),
 ]);
+
+/// The arrow keys, as the names a keyboard gives keys the tables already bind.
+///
+/// Not a second row in any table: `↓`/`↑` are `j`/`k`, and `←`/`→` are `h`/`l`
+/// on the one surface that binds those (the Finder trail). An arrow does
+/// something only where its verb is in the surface's table — which is the
+/// check `keys.ts` makes, and the rule the HELP keyboard draws them by.
+export const ARROW_ALIASES: Readonly<Record<string, VerbId>> = Object.freeze({
+  arrowdown: VerbId.Down,
+  arrowup: VerbId.Up,
+  arrowleft: VerbId.TreeUp,
+  arrowright: VerbId.TreeInto,
+});
 
 /// Alt keys the workbench must **never** bind, and why.
 ///
@@ -641,6 +659,9 @@ export function changesAlwaysVerbs(opts?: ChangesOpts | null): Verb[] {
   if (ahead > 0) v.push(verb("p", "push", VerbId.Push));
   v.push(verb("c", "commit", VerbId.Commit));
   v.push(verb("b", "branch", VerbId.Branch));
+  // The `g` menu, which the rail has always opened and no table listed. Quiet,
+  // so the footer lines are the ones they were; listed, so `?` names it.
+  v.push(quiet("g", "git", VerbId.GitMenu));
   // Bound, documented, and not worth a column.
   v.push(quiet("C", "stage all + commit", VerbId.CommitAll));
   v.push(quiet("f", "fetch", VerbId.Fetch));
@@ -1432,7 +1453,8 @@ button, ? off the stage, or C-b ? from anywhere.`,
       "when something above us has taken Alt: the browser, the OS, or a terminal in between. " +
       "Press C-b twice to send a literal one to the pane.",
     rows: GLOBAL.map((v) => ({
-      keys: [v.alt ? "alt-" + v.alt : "", v.prefix ? "C-b " + v.prefix : ""].filter(Boolean).join("  ·  "),
+      keys: [v.alt ? "alt-" + keyText(v.alt) : "", v.prefix ? "C-b " + keyText(v.prefix) : ""]
+        .filter(Boolean).join("  ·  "),
       label: v.label,
       note: v.claim ? "⚠ " + v.claim : v.note,
     })),

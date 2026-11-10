@@ -635,7 +635,13 @@ pub async fn run(
     // The HELP page's topic and reading position. Nothing to seed and nothing to
     // load: its text is compiled into the binary, which is why the page opens
     // with no daemon in the loop and reads the same over ssh.
-    let mut help = chrome::Help::default();
+    //
+    // Its keyboard is built here, from the keymap this client is actually
+    // using and from what its Alt layer actually does.
+    let mut help = chrome::Help {
+        keys: chrome::keyboard::Keys::build(&keymap, alt_layer()),
+        ..Default::default()
+    };
     // The USAGE page's roster. Loaded on arrival and on `r`, and kept when the
     // page is left so the rail badge survives — the badge is the reason the
     // page can be machine-scoped and still live in a rail of workspace views.
@@ -7650,16 +7656,15 @@ fn handle_settings_key(
 /// One function because three things need the same two numbers and must agree:
 /// the key handler clamping a scroll, the wheel doing the same, and the page
 /// itself deciding whether to say there is more below. They come from
-/// [`chrome::help::read`], so what is counted is what is drawn — a topic laid
+/// [`chrome::help::page_rows`], so what is counted is what is drawn — a topic laid
 /// out for a narrow terminal is *longer*, and a clamp computed from the source
 /// would strand the last lines of it off the bottom.
 fn help_metrics(view: &View, st: &chrome::Help, cols: u16, rows: u16) -> (usize, u16) {
-    let topics = crate::reference::TOPICS;
     let geom = chrome::page_geom(cols, rows, view);
     let area = chrome::help::columns(geom.stage_box);
-    let topic = &topics[st.topic.min(topics.len() - 1)];
-    let lines = chrome::help::read(topic, &view.prefix, chrome::help::text_width(area.body));
-    (lines.len(), chrome::help::text_height(area.body))
+    // The prose and, on the Keys topic, the keyboard drawn at its head.
+    let lines = chrome::help::page_rows(st, &view.prefix, area.body);
+    (lines, chrome::help::text_height(area.body))
 }
 
 /// Keys on the HELP page. `None` means "not mine, carry on".
@@ -7706,6 +7711,13 @@ fn handle_help_key(
         // the client: leaving a page you opened to read something must never be
         // the same key as leaving the client.
         K::Esc | K::Char('q') => return Some(Flow::CloseHelp),
+        // The keyboard's layers, on the topic that has one. The scroll is
+        // clamped again because a layer's list can be shorter than the last.
+        K::Char(c @ ('[' | ']')) if st.on_keys() => {
+            st.step_layer(c == ']');
+            let (lines, height) = help_metrics(view, st, cols, rows);
+            st.scroll = st.scroll.min(chrome::help::max_scroll(lines, height));
+        }
         _ => return None,
     }
     Some(Flow::Continue)
@@ -7725,6 +7737,10 @@ fn help_click(
 ) -> Option<Flow> {
     let geom = chrome::page_geom(cols, rows, view);
     let area = chrome::help::columns(geom.stage_box);
+    if let Some(layer) = chrome::help::layer_at(st, area.body, x, y) {
+        st.layer = layer;
+        return Some(Flow::Continue);
+    }
     if !area.list.contains(x, y) {
         return None;
     }
@@ -10828,6 +10844,55 @@ fn alt_binding(code: event::KeyCode, view: &mut View) -> Option<Flow> {
         // Not ours: let the pane have it.
         _ => None,
     }
+}
+
+/// What the Alt layer does with each key on the board, for the HELP keyboard.
+///
+/// Asked of the dispatcher itself rather than written down beside it: a view
+/// verb from [`alt_verb`], and anything else by running [`alt_binding`] on a
+/// scratch view and looking at what it did. So the keyboard shows the Alt
+/// layer the client has, and a key that moves or goes away there moves or goes
+/// away on the board without anyone remembering to tell it.
+pub(crate) fn alt_layer() -> Vec<((chrome::keyboard::Cap, bool), chrome::keyboard::Does)> {
+    use chrome::keyboard::{cap_of_char, Cap, Does};
+    use event::KeyCode as K;
+    let mut codes: Vec<(K, (Cap, bool))> =
+        (' '..='~').filter_map(|c| Some((K::Char(c), cap_of_char(c)?))).collect();
+    codes.extend([
+        (K::Esc, (Cap::Esc, false)),
+        (K::Enter, (Cap::Enter, false)),
+        (K::Tab, (Cap::Tab, false)),
+        (K::Backspace, (Cap::Bksp, false)),
+        (K::Up, (Cap::Up, false)),
+        (K::Down, (Cap::Down, false)),
+        (K::Left, (Cap::Left, false)),
+        (K::Right, (Cap::Right, false)),
+        (K::Home, (Cap::Home, false)),
+        (K::End, (Cap::End, false)),
+        (K::PageUp, (Cap::PgUp, false)),
+        (K::PageDown, (Cap::PgDn, false)),
+    ]);
+    let mut out = Vec::new();
+    for (code, key) in codes {
+        if let Some(verb) = alt_verb(code) {
+            out.push((key, Does::View(verb)));
+            continue;
+        }
+        let before = View::default();
+        let mut after = before.clone();
+        let Some(flow) = alt_binding(code, &mut after) else { continue };
+        let does = match flow {
+            Flow::Detach => Does::Detach,
+            Flow::OpenSettings => Does::Settings,
+            Flow::PasteImage => Does::PasteImage,
+            Flow::PickAgent => Does::PickAgent,
+            _ if after.zen != before.zen => Does::Zen,
+            _ if after.page != before.page => Does::Page(after.page),
+            _ => Does::Unknown,
+        };
+        out.push((key, does));
+    }
+    out
 }
 
 /// The Alt keys that are a view verb, and which one.
@@ -16558,6 +16623,48 @@ name = \"terminal\"
             assert_eq!((files.dir(), files.sel()), ("src", 3), "{what} moved the file tree");
             assert!(docs.open.is_none() && files.open.is_none(), "{what} opened a buffer");
         }
+    }
+
+    /// The HELP keyboard's Alt layer is what the Alt dispatcher does: every
+    /// key it takes is on the board, in words, and the keys it leaves to the
+    /// pane are not.
+    ///
+    /// Mutation check: give `alt_binding` a new arm the probe cannot name and
+    /// the first assertion names the key.
+    #[test]
+    fn the_help_keyboard_reads_the_alt_layer_off_the_dispatcher() {
+        use chrome::keyboard::{Cap, Does};
+        let alt = alt_layer();
+        for (key, does) in &alt {
+            assert_ne!(*does, Does::Unknown, "alt-{key:?} does something the keyboard cannot name");
+        }
+        let at = |c: char| alt.iter().find(|(k, _)| *k == (Cap::Char(c), false)).map(|(_, d)| d);
+        assert_eq!(at('0'), Some(&Does::Page(Page::Booth)));
+        assert_eq!(at('d'), Some(&Does::Detach));
+        assert_eq!(at('z'), Some(&Does::Zen));
+        assert_eq!(at('o'), Some(&Does::View(ViewVerb::Space(Page::Files))));
+        for free in ['b', 'f', 'y'] {
+            assert_eq!(at(free), None, "alt-{free} is left to the shell");
+        }
+    }
+
+    /// `[` and `]` walk the keyboard's layers on the Keys topic, and mean
+    /// nothing on any other.
+    #[test]
+    fn brackets_walk_the_keyboards_layers_on_the_keys_topic_only() {
+        let mut view = View { page: Page::Help, ..Default::default() };
+        let mut help = chrome::Help::default();
+        assert!(help.on_keys(), "help opens on the keys");
+        let n = help.keys.layers.len();
+        assert!(n > 2, "{n} layers");
+        let bracket = |c| key(event::KeyCode::Char(c));
+        handle_help_key(bracket(']'), &mut view, &mut help, 140, 50);
+        assert_eq!(help.layer, 1);
+        handle_help_key(bracket('['), &mut view, &mut help, 140, 50);
+        handle_help_key(bracket('['), &mut view, &mut help, 140, 50);
+        assert_eq!(help.layer, n - 1, "it wraps");
+        help.go(0);
+        assert!(handle_help_key(bracket(']'), &mut view, &mut help, 140, 50).is_none());
     }
 
     /// It is entered and left, like SETTINGS: the second press goes back where

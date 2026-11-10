@@ -26,6 +26,7 @@ pub mod dialog;
 pub use dialog::DialogOverlay;
 
 pub mod help;
+pub mod keyboard;
 pub use help::Help;
 
 pub mod minimap;

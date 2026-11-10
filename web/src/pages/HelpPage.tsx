@@ -31,6 +31,16 @@
 // `readMarkdown` returns blocks rather than markup and `Prose` builds elements
 // from text nodes, so there is no `innerHTML` anywhere on this path.
 //
+// ## Keys: the one topic that is a drawing
+//
+// `Keys` is the same tables laid on a keyboard rather than in a table —
+// `logic/keyboard.ts` reads `GLOBAL` and `allSurfaces()` exactly as
+// `reference()` does, and `HelpKeys.tsx` draws the result. It is a row in the
+// contents like any other, placed after the section it is the picture of; it is
+// not one of `topics()` because that list is also the DOCS rail's, and a
+// keyboard is not a markdown file. Its slug is `keyboard`, because `keys` is
+// already where `?` lands.
+//
 // ## The one place this leaves the terminal's key table
 //
 // `help.rs`'s footer offers `tab next page`. This page does not bind `tab`: in
@@ -41,7 +51,7 @@
 
 import * as React from "react";
 
-import { HintBar } from "@/components/HintBar";
+import { HintBar, type HintLike } from "@/components/HintBar";
 import { Prose } from "@/components/Prose";
 import { Row } from "@/components/Row";
 import { SectionTitle } from "@/components/SectionTitle";
@@ -49,6 +59,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { HELP_TOPIC, readMarkdown, slugFor, topicFor, topics, type Topic } from "@/logic/docs.ts";
 import { reference } from "@/logic/verbs.ts";
+import { KeysTopic } from "./HelpKeys.tsx";
 
 // The contents column. `help.rs` gives it 24 columns for a longest row of 19;
 // this is the same column in pixels, sized to the widest title the generator
@@ -64,7 +75,19 @@ const LINE = 21;
 interface Entry {
   topic: Topic;
   title: string;
+  /** Drawn as the keyboard rather than as prose. */
+  keyboard?: boolean;
 }
+
+/** The Keys topic's slug — not `keys`, which is `HELP_TOPIC`'s. */
+export const KEYBOARD_TOPIC = "keyboard";
+
+/** The Keys topic: a row in the contents with no markdown behind it. */
+const KEYBOARD: Entry = {
+  topic: { slug: KEYBOARD_TOPIC, name: KEYBOARD_TOPIC, path: "butai://" + KEYBOARD_TOPIC, title: "Keys", body: "" },
+  title: "Keys",
+  keyboard: true,
+};
 
 /**
  * The contents, in the generator's order.
@@ -76,7 +99,11 @@ interface Entry {
 function useEntries(prefix: string | undefined): Entry[] {
   return React.useMemo(() => {
     const titles = new Map(reference().map((sec) => [slugFor(sec.title), sec.title]));
-    return topics(prefix).map((topic) => ({ topic, title: titles.get(topic.slug) ?? topic.slug }));
+    const out: Entry[] = topics(prefix).map((topic) => ({ topic, title: titles.get(topic.slug) ?? topic.slug }));
+    // After the two layers, which it draws; at the end if that section is gone.
+    const at = out.findIndex((e) => `butai://${e.topic.slug}` === HELP_TOPIC);
+    out.splice(at < 0 ? out.length : at + 1, 0, KEYBOARD);
+    return out;
   }, [prefix]);
 }
 
@@ -115,7 +142,10 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
   const root = React.useRef<HTMLDivElement>(null);
   const body = React.useRef<HTMLDivElement>(null);
 
-  const blocks = React.useMemo(() => readMarkdown(current?.topic.body), [current]);
+  const blocks = React.useMemo(
+    () => (current?.keyboard ? [] : readMarkdown(current?.topic.body)),
+    [current],
+  );
 
   // Entered deliberately — by `?`, or by a menu — so it takes the keyboard on
   // arrival rather than waiting for a click that a keyboard user has no way to
@@ -139,6 +169,8 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    // The Keys topic's search box: `j` is a letter there, not a scroll.
+    if (isField(e.target)) return;
     if (e.key === "Escape") {
       if (!onClose) return;
       e.preventDefault();
@@ -215,7 +247,7 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
           {/* `Prose` draws the topic's own `# ` heading, so there is no title
               here to say the same thing twice. */}
           <div ref={body} className="min-h-0 flex-1 overflow-y-auto">
-            <Prose blocks={blocks} />
+            {current?.keyboard ? <KeysTopic prefix={prefix} /> : <Prose blocks={blocks} />}
           </div>
         </section>
       </div>
@@ -224,6 +256,7 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
           list's — which is exactly what `HintBar`'s position claims. */}
       <HintBar
         keys={[
+          ...(current?.keyboard ? KEYBOARD_HINTS : []),
           ["j/k", "scroll"],
           ["home/end", "top · bottom"],
           { key: "esc", label: "close", onSelect: onClose },
@@ -231,6 +264,19 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
       />
     </div>
   );
+}
+
+/** What the Keys topic adds to the page's own keys. */
+const KEYBOARD_HINTS: readonly HintLike[] = [
+  ["/", "find"],
+  ["alt", "hold for the alt layer"],
+];
+
+function isField(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  if (!el?.tagName) return false;
+  const tag = el.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
 }
 
 export default HelpPage;

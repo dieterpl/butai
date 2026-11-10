@@ -627,6 +627,10 @@ Two layers reach the workbench, and they are the same set on the same
 letters. The Alt layer works from anywhere, a focused pane included. The
 prefix layer is for terminals that eat Alt, or fingers that prefer it.
 
+The keyboard above draws them, and the keys each list and page answers,
+from the tables the client runs on: a key you bind in `[keys]` is on it.
+`[` and `]` switch what it shows, and so does a click on a tab.
+
 ## The Alt layer
 
     alt-o m c       files · docs · docker

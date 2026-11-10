@@ -397,12 +397,10 @@ export function Shell() {
       if (prefix && prefixPending.current) { prefixPending.current = false; return; }
       const pending = prefixPending.current;
       prefixPending.current = false;
-      if (key === " " && (pending || e.altKey)) {
-        e.preventDefault(); e.stopImmediatePropagation(); setViewsOpen(true); return;
-      }
       const verb = pending ? prefixVerb(key) : e.altKey ? altVerb(key) : null;
       let handled = true;
       switch (verb?.id) {
+        case VerbId.Views: setViewsOpen(true); break;
         case VerbId.SpaceNext: setPage(cycleView(page, 1)); break;
         case VerbId.SpacePrev: setPage(cycleView(page, -1)); break;
         case VerbId.SpaceWork: setPage("work"); break;
