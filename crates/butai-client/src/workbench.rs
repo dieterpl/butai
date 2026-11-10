@@ -956,6 +956,7 @@ pub async fn run(
             // actually on screen.
             sync_gauges(&mut view, &daemons, &hosts);
             sync_fleet_first(&mut view, &daemons, &hosts, cols, rows);
+            sync_rail_cursor(&mut view, &daemons, &hosts);
             sync_tab_order(&mut view, &daemons, &hosts);
             (screen_links, last_frame) = paint(
                 &mut painted,
@@ -10901,6 +10902,45 @@ fn booth_selected_agent(
     )
 }
 
+/// Puts the rail cursor on the pane the stage has just moved to.
+///
+/// The rails have two marks: the cursor (the highlighted row, what `x` and the
+/// other row verbs act on) and `>` (the pane on the stage). They used to be
+/// independent, and the stage follows every new agent while the cursor did
+/// not — so after starting a second chat the screen showed it, marked it `>`,
+/// and `x` killed the *first* one, which was still under the highlight. To the
+/// person pressing it, `x` "did not remove the chat".
+///
+/// Only on a change of stage, so `j`/`k` still move the cursor freely without
+/// being snapped back: the cursor follows the stage, never the other way.
+fn sync_rail_cursor(view: &mut View, daemons: &[Daemon], hosts: &[Option<String>]) {
+    if view.page != Page::Agents {
+        return;
+    }
+    let Some(ws) = active_workspace(daemons, hosts, view) else { return };
+    let Some(pane) = chrome::staged_pane(Some(ws), view) else { return };
+    let now = Some((ws.id, pane));
+    if view.stage_followed == now {
+        return;
+    }
+    view.stage_followed = now;
+    follow_stage(view, ws, pane);
+}
+
+/// The cursor half of [`sync_rail_cursor`], over one workspace: put whichever
+/// rail holds `pane` on its row. A pane folded away under its parent has no
+/// row, and leaves the cursor where it was.
+fn follow_stage(view: &mut View, ws: &WorkspaceDetail, pane: PaneId) {
+    if let Some(row) = rail_rows(ws, view)
+        .iter()
+        .position(|r| ws.agents.get(r.idx).is_some_and(|a| a.pane == pane))
+    {
+        view.agent_sel = row;
+    } else if let Some(row) = ws.processes.iter().position(|p| p.pane == pane) {
+        view.proc_sel = row;
+    }
+}
+
 /// Moves BOOTH's kept top row just far enough to show the cursor once it has
 /// moved, before the frame that draws it — so the drawing and the pointer, which resolve against
 /// [`View::booth_first`] between frames, both see where the list now starts.
@@ -12817,6 +12857,29 @@ mod tests {
             stage: None,
             autostart: Vec::new(),
         }
+    }
+
+    /// A new chat takes the stage, and the cursor must go with it: `x` acts on
+    /// the cursor, and a cursor left on the first chat while the second one is
+    /// shown is how `x` "did not remove the chat" — it removed a different one.
+    #[test]
+    fn the_rail_cursor_follows_the_stage_to_a_new_chat() {
+        use butai_protocol::api::AgentState;
+        let mut ws = ws_with_agents();
+        let mut helper = agent_dto(12, "helper", AgentState::Idle);
+        helper.parent = Some(PaneId(10));
+        ws.agents.push(helper);
+        let mut view = View::default();
+        // Rail order is claude, helper (nested under it), codex.
+        follow_stage(&mut view, &ws, PaneId(11));
+        assert_eq!(view.agent_sel, 2, "codex is drawn on the third row");
+        follow_stage(&mut view, &ws, PaneId(12));
+        assert_eq!(view.agent_sel, 1, "the helper is drawn under its parent");
+        // Folded away it has no row, and the cursor stays where it was.
+        view.agent_folds.insert((ws.id, PaneId(10)));
+        view.agent_sel = 0;
+        follow_stage(&mut view, &ws, PaneId(12));
+        assert_eq!(view.agent_sel, 0);
     }
 
     /// The rail's cursor counts the rows the tree draws, not the workspace's

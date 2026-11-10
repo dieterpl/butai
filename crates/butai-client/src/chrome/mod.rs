@@ -3063,6 +3063,12 @@ pub struct View {
     /// only once it has moved, so a wheel that scrolled the cursor out of view
     /// is not undone by the next frame.
     pub booth_followed: usize,
+    /// The pane the rails' cursor last followed onto the stage, by workspace.
+    /// When the stage moves to a different pane — a new agent, a pane chosen
+    /// from somewhere other than the rail — the cursor moves to its row, so
+    /// `x` acts on the chat you are looking at rather than on a row the cursor
+    /// was left on. See `sync_rail_cursor`.
+    pub stage_followed: Option<(SessionId, PaneId)>,
     /// What BOOTH has folded away, and which machines are showing their gauges.
     pub folds: Folds,
     /// Agents on the AGENTS rail whose helpers are folded away, by workspace
@@ -3234,6 +3240,7 @@ impl Default for View {
             booth_compute_scroll: 0,
             booth_first: 0,
             booth_followed: 0,
+            stage_followed: None,
             pending_menu_action: None,
             confirmed_menu_action: None,
             layout: None,

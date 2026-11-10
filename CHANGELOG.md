@@ -253,6 +253,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.21: `x` on the AGENTS rail closes the chat you are looking
+  at.** The rail has two marks: the highlighted row is the cursor, which `x`
+  and the other row keys act on, and `>` is the chat on the stage. A new chat
+  took the stage and the `>` but left the cursor where it was, so after starting
+  a second chat, `x` closed the first one and the chat on screen stayed. Now the
+  cursor moves to whichever pane the stage changes to, on the AGENTS or
+  PROCESSES rail. `j` and `k` still move the cursor without changing the stage,
+  and `x` closes the row they leave it on.
 - **1.5.0-dev.20: renaming a chat no longer puts another chat on BOOTH's
   stage.** BOOTH's cursor was a row number. In the `a-z` order, a chat that
   renamed itself (claude's `/rename`, or a new task title) sorted to another
