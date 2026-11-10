@@ -456,6 +456,9 @@ pub(crate) fn default_bindings() -> HashMap<KeyEvent, Action> {
         ("7", "workspace 7"),
         ("8", "workspace 8"),
         ("9", "workspace 9"),
+        // BOOTH, as `alt-0` and the chip beside the numbers reach it. The
+        // reference listed `C-b 0` long before the table bound it.
+        ("0", "space booth"),
         ("X", "workspace close"),
         ("H", "host"),
         // The rails.

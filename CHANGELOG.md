@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.6.0-dev.1: vim keys on the workbench, and `?` is one card of them.**
+  With the keyboard on a rail, `h` and `l` move between the left rail and
+  CHANGES, `gg` and `G` go to the first and last row (on BOOTH's fleet too),
+  and `gt` / `gT` go to the next and previous workspace tab. `i` hands the
+  keyboard to the pane on the stage, the way vim's insert does, and
+  `ctrl-\ ctrl-n` takes it back, as in a neovim terminal; `alt-esc` and the
+  prefix still do too. A `ctrl-\` followed by any other key is passed on to the
+  pane. `g` alone still opens the git menu: a `g`, `t` or `T` straight after it
+  closes the menu and moves instead. On the workbench `?` now opens a one-screen
+  KEYS card (move, rows, workspaces, tools); `?` again opens the full reference,
+  and `esc` or a click puts it away. Every Alt key and every `C-b` binding works
+  as before. `C-b 0` now opens BOOTH, which the reference already listed. The
+  card's keys live in one table, `keycard.rs`, for the HELP page to read. The
+  browser client's keys are unchanged.
+
 - **1.5.0-dev.19: the AGENTS rail is a tree, closing a parent closes its
   helpers, and a lead can address its helpers as a group.** Helpers sit right
   under the agent that spawned them on the AGENTS rail, with the same `├` `└`

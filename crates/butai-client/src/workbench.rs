@@ -8010,6 +8010,18 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
     if matches!(view.overlay, Some(Overlay::Search(_))) {
         return handle_search_key(k, view);
     }
+    // The second half of `gg`, `gt` or `gT`: the `g` opened the git menu, and
+    // this key says it was a motion after all. None of the three means anything
+    // to the menu itself, so nothing it does is lost.
+    if std::mem::take(&mut view.g_chord)
+        && matches!(&view.overlay, Some(Overlay::List(l)) if l.kind == ListKind::GitGroups)
+        && k.modifiers.difference(event::KeyModifiers::SHIFT).is_empty()
+    {
+        if let event::KeyCode::Char(c @ ('g' | 't' | 'T')) = k.code {
+            view.overlay = None;
+            return g_motion(c, view);
+        }
+    }
     let Some(overlay) = view.overlay.as_mut() else { return Flow::Continue };
     match (&mut *overlay, k.code) {
         (_, event::KeyCode::Esc) | (_, event::KeyCode::Char('q')) => view.overlay = None,
@@ -8096,6 +8108,61 @@ fn handle_overlay_key(k: event::KeyEvent, view: &mut View) -> Flow {
         _ => {}
     }
     Flow::Continue
+}
+
+/// Vim's `gg` (first row), `gt` (next tab) and `gT` (previous tab), once the
+/// `g` has been read. `gg` is the cursor's own list: the rail, or BOOTH's fleet.
+fn g_motion(c: char, view: &mut View) -> Flow {
+    match c {
+        't' => run_view(ViewVerb::TabNext, view),
+        'T' => run_view(ViewVerb::TabPrev, view),
+        _ => {
+            set_selection(view, view.focus, 0);
+            Flow::Continue
+        }
+    }
+}
+
+/// Whether `k` is `ctrl-\`. Legacy terminals send it as byte 0x1C, which
+/// crossterm reports as `ctrl-4`; the kitty protocol reports it as itself.
+fn is_ctrl_backslash(k: &event::KeyEvent) -> bool {
+    k.modifiers.contains(event::KeyModifiers::CONTROL)
+        && matches!(k.code, event::KeyCode::Char('\\' | '4'))
+}
+
+/// `ctrl-\ ctrl-n` while the stage has the keyboard: neovim's way out of a
+/// terminal buffer, and so the vim way off the stage. `None` means the key is
+/// not part of it and carries on as usual.
+///
+/// The `ctrl-\` is held back until the next key says what it was. If that is
+/// `ctrl-n` the pair never reaches the pane; if it is anything else the
+/// `ctrl-\` is sent on first, so a program that wanted it (a shell's SIGQUIT)
+/// still gets it, one key late.
+fn handle_term_escape(k: &event::KeyEvent, view: &mut View, stage: Option<&Stage>) -> Option<Flow> {
+    if view.focus != Focus::Stage || !view.page.draws_stage() {
+        view.term_escape = false;
+        return None;
+    }
+    if std::mem::take(&mut view.term_escape) {
+        let ctrl_n = k.modifiers.contains(event::KeyModifiers::CONTROL)
+            && k.code == event::KeyCode::Char('n');
+        if ctrl_n {
+            return Some(run_view(ViewVerb::Focus(Focus::Agents), view));
+        }
+        if let Some(s) = stage {
+            let held = KeyEvent {
+                code: butai_protocol::KeyCode::Char('\\'),
+                mods: butai_protocol::KeyMods { ctrl: true, ..Default::default() },
+            };
+            s.transport.to_server.send(ClientMsg::Input(InputEvent::Key(held))).ok();
+        }
+        return None;
+    }
+    if is_ctrl_backslash(k) {
+        view.term_escape = true;
+        return Some(Flow::Continue);
+    }
+    None
 }
 
 /// Keys while a dialog is up. The dialog interprets them; this closes it when
@@ -9726,8 +9793,64 @@ fn handle_prefix(
 /// Navigation resolves here and never reaches the daemon — that is the whole
 /// point of the client owning its selection, and it is why an arrow key costs
 /// nothing over ssh. Only keys aimed at the staged pane are forwarded.
+/// Route one terminal event, and remember whether it was the `g` that opened
+/// the git menu — the first half of vim's `gg`, `gt` and `gT`. See
+/// [`g_motion`]. Any other event ends the chord, so a `g` that arrives later
+/// is the menu's again.
 #[allow(clippy::too_many_arguments)]
 fn handle_input(
+    ev: event::Event,
+    view: &mut View,
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    stage: Option<&Stage>,
+    files: &mut Files,
+    docs: &mut Files,
+    diff: &mut DiffView,
+    docker: &mut Docker,
+    git: &mut chrome::Git,
+    settings: &mut chrome::Settings,
+    help: &mut chrome::Help,
+    usage: &mut chrome::usage::Usage,
+    keymap: &Keymap,
+    drag: &mut Drag,
+    option_as_alt: bool,
+    pane_wants_mouse: bool,
+    cols: &mut u16,
+    rows: &mut u16,
+) -> Flow {
+    let key = matches!(ev, event::Event::Key(_));
+    // A press anywhere puts the key card away; it is a glance, not a mode.
+    if matches!(&ev, event::Event::Mouse(m) if matches!(m.kind, event::MouseEventKind::Down(_))) {
+        view.keys_card = false;
+    }
+    let flow = route_input(
+        ev,
+        view,
+        daemons,
+        hosts,
+        stage,
+        files,
+        docs,
+        diff,
+        docker,
+        git,
+        settings,
+        help,
+        usage,
+        keymap,
+        drag,
+        option_as_alt,
+        pane_wants_mouse,
+        cols,
+        rows,
+    );
+    view.g_chord = key && matches!(flow, Flow::GitMenu);
+    flow
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_input(
     ev: event::Event,
     view: &mut View,
     daemons: &[Daemon],
@@ -10278,6 +10401,11 @@ fn handle_input(
             if let Some(flow) = handle_prefix(k, view, keymap, stage) {
                 return flow;
             }
+            if !alt {
+                if let Some(flow) = handle_term_escape(&k, view, stage) {
+                    return flow;
+                }
+            }
             // Layout mode: the arrows resize the focused rail (←/→) or the
             // section within it (↑/↓) rather than reaching a pane. Alt-focus
             // keys still work, so you can retarget without leaving.
@@ -10433,7 +10561,48 @@ fn handle_input(
                     nudge_fleet(view, daemons, hosts, if c == 'J' { 1 } else { -1 });
                     return Flow::Continue;
                 }
+                // On the workbench `?` is the key card, one screen of the keys
+                // that matter; `?` again is the whole reference behind it.
+                (event::KeyCode::Char('?'), false) if view.page == Page::Agents => {
+                    if std::mem::take(&mut view.keys_card) {
+                        return run_view(ViewVerb::Help, view);
+                    }
+                    view.keys_card = true;
+                    return Flow::Continue;
+                }
+                (event::KeyCode::Esc, false) if view.keys_card => {
+                    view.keys_card = false;
+                    return Flow::Continue;
+                }
                 (event::KeyCode::Char('?'), false) => return run_view(ViewVerb::Help, view),
+                // Vim's `h` and `l`: the column to the left (the AGENTS rail,
+                // or PROCESSES if the cursor is already in that column) and
+                // the one to the right (CHANGES). The stage between them is
+                // `i`, because arriving there hands every key to the pane.
+                (event::KeyCode::Char('h'), false) if view.page == Page::Agents => {
+                    if !matches!(view.focus, Focus::Agents | Focus::Processes) {
+                        view.focus = Focus::Agents;
+                    }
+                    return Flow::Continue;
+                }
+                (event::KeyCode::Char('l'), false) if view.page == Page::Agents => {
+                    view.focus = Focus::Changes;
+                    return Flow::Continue;
+                }
+                // Vim's insert: the keyboard goes to the pane on the stage.
+                // `ctrl-\ ctrl-n` (or `alt-esc`) brings it back.
+                (event::KeyCode::Char('i'), false) if view.page.draws_stage() => {
+                    view.focus = Focus::Stage;
+                    view.keys_card = false;
+                    return Flow::Continue;
+                }
+                // Vim's `G`: the last row of the list the cursor is in. `gg`,
+                // its other end, goes through the git menu's `g` — see
+                // [`g_motion`].
+                (event::KeyCode::Char('G'), false) => {
+                    move_sel(view, counts, isize::MAX / 2);
+                    return Flow::Continue;
+                }
                 // `a` spawns what the rail's `+` advertises — the pinned agent
                 // when there is one. `A` is the deliberate "let me choose",
                 // which is also what `:agent` and `C-b a` do.
@@ -12857,6 +13026,84 @@ mod tests {
             stage: None,
             autostart: Vec::new(),
         }
+    }
+
+    /// The vim layer on the workbench: `?` is the card and `esc` puts it away,
+    /// `h`/`l` move between the left rail and CHANGES, `G` is the last row,
+    /// `i` hands the keyboard to the stage — and none of it works from the
+    /// stage, where every key is the pane's.
+    #[test]
+    fn the_vim_keys_move_around_the_workbench() {
+        let km = Keymap::default();
+        let ch = |c: char| key(event::KeyCode::Char(c));
+        let mut view = View { focus: Focus::Agents, ..Default::default() };
+        press(&mut view, ch('?'), &km);
+        assert!(view.keys_card, "`?` did not open the card");
+        press(&mut view, key(event::KeyCode::Esc), &km);
+        assert!(!view.keys_card, "esc left the card up");
+
+        press(&mut view, ch('l'), &km);
+        assert_eq!(view.focus, Focus::Changes);
+        press(&mut view, ch('h'), &km);
+        assert_eq!(view.focus, Focus::Agents);
+        view.focus = Focus::Processes;
+        press(&mut view, ch('h'), &km);
+        assert_eq!(view.focus, Focus::Processes, "`h` keeps a cursor already in the left column");
+
+        press(&mut view, ch('i'), &km);
+        assert_eq!(view.focus, Focus::Stage);
+        // On the stage `l` is the pane's, not a move to CHANGES.
+        press(&mut view, ch('l'), &km);
+        assert_eq!(view.focus, Focus::Stage);
+    }
+
+    /// `gg` and `gt`: the `g` opens the git menu, as it always has, and the
+    /// key after it decides whether that was a motion.
+    #[test]
+    fn g_then_a_motion_key_is_vim_and_not_the_git_menu() {
+        let km = Keymap::default();
+        let ch = |c: char| key(event::KeyCode::Char(c));
+        let mut view = View { focus: Focus::Agents, agent_sel: 3, ..Default::default() };
+        assert!(matches!(press(&mut view, ch('g'), &km), Flow::GitMenu));
+        assert!(view.g_chord);
+        // What the loop does with `Flow::GitMenu`.
+        view.overlay = Some(git_menu_overlay(None, None));
+        assert!(matches!(press(&mut view, ch('g'), &km), Flow::Continue));
+        assert!(view.overlay.is_none(), "`gg` left the git menu open");
+        assert_eq!(view.agent_sel, 0, "`gg` is the first row");
+
+        press(&mut view, ch('g'), &km);
+        view.overlay = Some(git_menu_overlay(None, None));
+        assert!(matches!(press(&mut view, ch('T'), &km), Flow::GoTab(TabMove::Prev)));
+
+        // A menu that was opened some other way is the menu's: `g` there is
+        // not half of anything.
+        view.overlay = Some(git_menu_overlay(None, None));
+        view.agent_sel = 2;
+        press(&mut view, ch('g'), &km);
+        assert!(view.overlay.is_some());
+        assert_eq!(view.agent_sel, 2);
+    }
+
+    /// `ctrl-\ ctrl-n` takes the keyboard off the stage, as it does in a
+    /// neovim terminal; a `ctrl-\` followed by anything else leaves it there.
+    #[test]
+    fn ctrl_backslash_ctrl_n_leaves_the_stage() {
+        let km = Keymap::default();
+        let ctrl =
+            |c: char| event::KeyEvent::new(event::KeyCode::Char(c), event::KeyModifiers::CONTROL);
+        let mut view = View { focus: Focus::Stage, ..Default::default() };
+        press(&mut view, ctrl('\\'), &km);
+        assert!(view.term_escape);
+        press(&mut view, ctrl('n'), &km);
+        assert_eq!(view.focus, Focus::Agents);
+
+        view.focus = Focus::Stage;
+        // Legacy terminals report it as ctrl-4.
+        press(&mut view, ctrl('4'), &km);
+        press(&mut view, key(event::KeyCode::Char('x')), &km);
+        assert_eq!(view.focus, Focus::Stage);
+        assert!(!view.term_escape);
     }
 
     /// A new chat takes the stage, and the cursor must go with it: `x` acts on
@@ -16750,7 +16997,13 @@ name = \"terminal\"
                             "{label} has no key on the Alt layer"
                         );
                     }
-                    assert!(matches!(bare('?'), Flow::OpenHelp));
+                    // `[help]` is the reference. On the workbench a bare `?` is
+                    // the key card first, and the second `?` is the reference.
+                    let mut view = View { focus: Focus::Agents, ..Default::default() };
+                    let q = key(event::KeyCode::Char('?'));
+                    assert!(matches!(press(&mut view, q, &Keymap::default()), Flow::Continue));
+                    assert!(view.keys_card);
+                    assert!(matches!(press(&mut view, q, &Keymap::default()), Flow::OpenHelp));
                 }
                 // A row: the cursor walks to it and Enter stages it, which is
                 // what a second click on it does.

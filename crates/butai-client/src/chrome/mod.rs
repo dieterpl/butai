@@ -3096,6 +3096,17 @@ pub struct View {
     pub(crate) wheel_scroll: crate::scroll::Momentum,
     /// BOOTH's key card is up: [`FLEET_KEYS_LABEL`] or `?` on the fleet.
     pub booth_keys: bool,
+    /// The workbench's key card is up: `?` on the workbench. One screen of
+    /// the keys that matter; `?` again opens the full reference. See
+    /// [`crate::keycard::KEY_CARD`].
+    pub keys_card: bool,
+    /// The last key was the `g` that opened the git menu, so a `g`, `t` or
+    /// `T` straight after it is vim's `gg` / `gt` / `gT` rather than a key
+    /// for the menu.
+    pub g_chord: bool,
+    /// `ctrl-\` went to the stage's keyboard and is being held, in case the
+    /// next key is `ctrl-n` — neovim's way out of a terminal, and this one.
+    pub term_escape: bool,
     pub zen: bool,
     pub geom: RailGeom,
     /// Which interfaces the SYSTEM rail draws. Read from `[ui] net` and held
@@ -3224,6 +3235,9 @@ impl Default for View {
             key_scroll: crate::scroll::Momentum::default(),
             wheel_scroll: crate::scroll::Momentum::default(),
             booth_keys: false,
+            keys_card: false,
+            g_chord: false,
+            term_escape: false,
             zen: false,
 
             net: NetSelect::default(),
@@ -3786,6 +3800,7 @@ pub fn draw(
 /// goes on last — chrome, then pane, then this.
 pub fn draw_overlay_layer(buf: &mut Buffer, cols: u16, rows: u16, view: &View, theme: &Theme) {
     draw_booth_keys(buf, cols, rows, view, theme);
+    draw_keys_card(buf, cols, rows, view, theme);
     match &view.overlay {
         Some(Overlay::Dialog(d)) => dialog::draw(buf, cols, rows, d, theme),
         Some(overlay) => draw_overlay(buf, cols, rows, overlay, theme),
@@ -9415,6 +9430,70 @@ pub fn draw_booth_keys(buf: &mut Buffer, cols: u16, rows: u16, view: &View, them
         y += 1;
     }
 }
+/// Columns one group of the card takes: the key column, then the words.
+const KEY_CARD_KEY_W: u16 = 11;
+const KEY_CARD_COL_W: u16 = 40;
+
+/// Where the key card is drawn, centred on the screen. Two groups side by side
+/// when there is room, one column otherwise; `None` when it is closed, off the
+/// workbench, or the terminal is too small to hold it whole.
+pub fn keys_card_rect(cols: u16, rows: u16, view: &View) -> Option<LRect> {
+    if !view.keys_card || view.page != Page::Agents {
+        return None;
+    }
+    let lines = |groups: &[(&str, &[(&str, &str)])]| -> u16 {
+        groups.iter().map(|(_, r)| r.len() as u16 + 2).sum::<u16>()
+    };
+    let foot = crate::keycard::KEY_CARD_FOOT.chars().count() as u16 + 4;
+    let (w, body) = if cols >= 2 * KEY_CARD_COL_W + 4 {
+        let left = lines(&crate::keycard::KEY_CARD[..2]);
+        let right = lines(&crate::keycard::KEY_CARD[2..]);
+        ((2 * KEY_CARD_COL_W + 4).max(foot), left.max(right))
+    } else {
+        (KEY_CARD_COL_W + 4, lines(&crate::keycard::KEY_CARD))
+    };
+    let h = body + 3;
+    if cols < w.min(KEY_CARD_COL_W + 4) || rows < h + 2 {
+        return None;
+    }
+    let w = w.min(cols);
+    Some(LRect::new((cols - w) / 2, (rows - h) / 2, w, h))
+}
+
+/// Paint the key card, with the modals, so a pane cannot draw over it.
+pub fn draw_keys_card(buf: &mut Buffer, cols: u16, rows: u16, view: &View, theme: &Theme) {
+    let Some(r) = keys_card_rect(cols, rows, view) else { return };
+    let bg = theme.surface;
+    for y in r.y..r.y + r.height {
+        fill_row(buf, r.x, y, r.right(), bg);
+    }
+    draw_box(buf, r, " KEYS ", theme.accent, bg);
+    let bound = r.right() - 1;
+    put_str(buf, bound - 6, r.y, " esc ", bound, Pen::new(theme.faint, bg));
+    let two = r.width >= 2 * KEY_CARD_COL_W + 4;
+    let mut draw_groups = |groups: &[(&str, &[(&str, &str)])], x: u16| {
+        let mut y = r.y + 1;
+        for (head, keys) in groups {
+            put_str(buf, x, y, head, bound, Pen { fg: theme.muted, bg, bold: true });
+            y += 1;
+            for (key, what) in keys.iter() {
+                put_str(buf, x + 1, y, key, bound, Pen { fg: theme.accent, bg, bold: true });
+                put_str(buf, x + 1 + KEY_CARD_KEY_W, y, what, bound, Pen::new(theme.ink, bg));
+                y += 1;
+            }
+            y += 1;
+        }
+    };
+    if two {
+        draw_groups(&crate::keycard::KEY_CARD[..2], r.x + 2);
+        draw_groups(&crate::keycard::KEY_CARD[2..], r.x + 2 + KEY_CARD_COL_W);
+    } else {
+        draw_groups(&crate::keycard::KEY_CARD, r.x + 2);
+    }
+    let y = r.y + r.height - 2;
+    put_str(buf, r.x + 2, y, crate::keycard::KEY_CARD_FOOT, bound, Pen::new(theme.faint, bg));
+}
+
 pub const AGENTS_ADD_LABEL: &str = "[+ agent]";
 
 /// The `[+ agent]` label, naming the pinned agent when there is one.

@@ -13,6 +13,7 @@ pub mod git_menu;
 pub mod glyphs;
 pub mod graph;
 pub mod hit;
+pub mod keycard;
 pub mod keymap;
 pub mod keys;
 pub mod layout;
