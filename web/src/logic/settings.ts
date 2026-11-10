@@ -27,8 +27,8 @@ import { PREFIX_STORAGE_KEY } from "./verbs.ts";
 
 const KEY = "butai.settings";
 
-/// The prefix lives in its own key, because `keys.ts` has read it from there
-/// since stage 6 and moving it would silently reset every browser that had one
+/// The prefix lives in its own key, because the old dispatcher read it from
+/// there since stage 6 and moving it would silently reset every browser that had one
 /// set. Imported rather than repeated: the settings row and the dispatcher have
 /// to be reading the same string, and two constants spelling one key is the
 /// kind of thing that agrees until somebody changes one.

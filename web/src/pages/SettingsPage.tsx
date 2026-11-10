@@ -385,7 +385,7 @@ export function SettingsPage({ world, actions, on, facts: told }: SettingsPagePr
       } else if (current.id === RowId.DefaultAgent) {
         write({ defaultAgent: value === ASK_EVERY_TIME ? "" : value });
       } else if (current.id === RowId.Prefix) {
-        // Its own key, because `keys.ts` has read it from there since stage 6
+        // Its own key, because the old dispatcher read it from there since stage 6
         // and moving it would silently reset every browser that had one set.
         writePrefixSpelling(storage(), value);
         setPrefix(value);
@@ -477,8 +477,8 @@ export function SettingsPage({ world, actions, on, facts: told }: SettingsPagePr
       // In a field every key is the field's. The page this was ported from had
       // no text input on it and so did not need this; MACHINES has two, and
       // without the guard typing a socket path walks the list, steps the font
-      // and toggles the rails on the way through. `keys.ts` reads the composed
-      // path for the same reason and this is the same test.
+      // and toggles the rails on the way through. The shell's keydown and
+      // the rails' make the same test for the same reason.
       if (isTyping(e)) return;
       const name = keyName(e);
       const verb = verbs.find((v) => v.key === name);

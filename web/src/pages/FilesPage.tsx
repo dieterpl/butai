@@ -193,9 +193,8 @@ function message(e: unknown): string {
  * `h()`'s spelling (`onclick`, which React drops with a warning), so the
  * assertion is what is kept and the props are rewritten.
  *
- * `data-verb` is not decoration: `keys.ts` dispatches a verb by finding the
- * element carrying its target and clicking it, so an element without one is a
- * verb the keyboard cannot reach.
+ * `data-verb` names the verb an element is. The keys themselves are this
+ * page's own keydown, through `filesVerb` and the same `runs` a click calls.
  */
 function verbClick(target: TargetId, run: () => void) {
   click(target, run);
@@ -206,9 +205,7 @@ function verbClick(target: TargetId, run: () => void) {
  * The same assertion for a `Row`, which already owns its activation.
  *
  * A `Row` composes a caller's `onClick` with its own `onSelect`, so handing it
- * both is two calls per click — and `keys.ts` reaches the row by clicking the
- * element, which goes through `onSelect` either way. So the row takes the
- * target and nothing else.
+ * both is two calls per click. So the row takes the target and nothing else.
  */
 function verbTarget(target: TargetId, run: () => void) {
   click(target, run);
@@ -231,9 +228,8 @@ export function columnLabel(dir: string, docs: boolean): string {
  * The keyboard, resolved against the page's own verb table.
  *
  * Not one key letter: the table says which letter means what, and the arrows are
- * `j`/`k`/`h`/`l` under the names a keyboard gives them — which is exactly the
- * rule `logic/keys.ts` follows, written here because that dispatcher is the
- * vanilla client's and this page owns its own keydown.
+ * `j`/`k`/`h`/`l` under the names a keyboard gives them — `ARROW_ALIASES`'s
+ * rule, written here because this page owns its own keydown.
  */
 export function filesVerb(e: { key: string; ctrlKey?: boolean }, editing: boolean): VerbId | null {
   const arrows: Record<string, VerbId> = {

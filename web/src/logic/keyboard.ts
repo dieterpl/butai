@@ -28,7 +28,9 @@ import {
   ALT_MUST_FALL_THROUGH,
   ARROW_ALIASES,
   GLOBAL,
+  LAYOUT_ARROWS,
   VerbId,
+  type Verb,
   allSurfaces,
   keyText,
   reference,
@@ -234,8 +236,10 @@ const CATEGORY: Readonly<Record<VerbId, Category>> = {
   Revert: "git", CherryPick: "git", GitMenu: "git", CancelOp: "danger",
   SettingChange: "tool", SettingChoose: "tool", SettingKeep: "tool", SettingToggle: "tool",
   SettingBigger: "tool", SettingSmaller: "tool", SettingAuto: "tool", CloseSettings: "tool",
-  Accept: "tool", Cancel: "tool", Clear: "tool", ClearAll: "tool", NewFolder: "tool",
-  Layout: "tool", Zen: "tool", Help: "view", Alerts: "tool", PasteImage: "tool",
+  Accept: "tool", Cancel: "tool", Palette: "tool",
+  Narrower: "tool", Wider: "tool", BorderUp: "tool", BorderDown: "tool",
+  PageDown: "view", PageUp: "view", Top: "view", Bottom: "view", CloseHelp: "view",
+  Layout: "tool", Zen: "tool", Help: "view", PasteImage: "tool",
   FontBigger: "tool", FontSmaller: "tool",
 };
 
@@ -393,8 +397,7 @@ export function layers(prefix = "C-b"): Layer[] {
         });
       }
     }
-    for (const [arrow, verbId] of Object.entries(ARROW_ALIASES)) {
-      const v = verbs.find((x) => x.id === verbId);
+    for (const [arrow, v] of arrowsOn(title, verbs)) {
       if (!v) continue;
       for (const p of placeKey(arrow) ?? []) {
         bindings.push({
@@ -409,6 +412,18 @@ export function layers(prefix = "C-b"): Layer[] {
     });
   }
   return out;
+}
+
+/**
+ * Each arrow and the row it stands for on one surface: `ARROW_ALIASES` by verb
+ * everywhere but LAYOUT, whose arrows move borders and alias its letters by
+ * key (`LAYOUT_ARROWS`). Exported so the test can say the same thing without
+ * this file.
+ */
+export function arrowsOn(title: string, verbs: readonly Verb[]): [string, Verb | undefined][] {
+  return title === "LAYOUT"
+    ? Object.entries(LAYOUT_ARROWS).map(([arrow, key]) => [arrow, verbs.find((x) => x.key === key)])
+    : Object.entries(ARROW_ALIASES).map(([arrow, id]) => [arrow, verbs.find((x) => x.id === id)]);
 }
 
 /** The bindings on one cap in one layer, unshifted first. */

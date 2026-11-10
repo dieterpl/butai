@@ -481,16 +481,39 @@ describe("the reference is generated, so it cannot omit a key", () => {
     expect(allKeys.filter((k) => !ref.includes(JSON.stringify(k).slice(1, -1)))).toEqual([]);
   });
 
-  // Every verb a surface offers has somewhere for the dispatcher to send it. A
-  // verb in a table with no entry in `keys.ts`'s map is a key that is drawn in a
-  // footer, listed in `?`, and does nothing — the mirror of a key in no table.
+  // Every verb a table offers has somewhere for a dispatcher to send it. A
+  // verb in a table that no handler names is a key that is drawn in a footer,
+  // listed in `?`, laid on HELP's keyboard, and does nothing — the mirror of a
+  // key in no table.
   //
-  // Read out of the source rather than imported, exactly as `check.py` reads
-  // `keys.js`: what is being asserted is that the dispatcher *mentions* the id,
-  // and only the text can say that.
-  test("verbs/dispatchable — keys.ts sends every offered verb somewhere", async () => {
-    const kts = await Bun.file(new URL("../src/logic/keys.ts", import.meta.url)).text();
-    expect(offered.filter((v) => !kts.includes("VerbId." + v))).toEqual([]);
+  // The dispatchers are the handlers the app runs: the shell's keydown, each
+  // page's, the rails' in `pages.tsx`, and the overlays' in `Window`. Read out
+  // of the source rather than imported, as `check.py` reads the vanilla
+  // client: what is being asserted is that a handler *mentions* the id, and
+  // only the text can say that. The list is the files, not a glob, so a
+  // handler moving somewhere new is a decision this test hears about.
+  const DISPATCHERS = [
+    "../src/app/Shell.tsx",
+    "../src/app/pages.tsx",
+    "../src/components/Window.tsx",
+    "../src/pages/DockerPage.tsx",
+    "../src/pages/FilesPage.tsx",
+    "../src/pages/GitPage.tsx",
+    "../src/pages/HelpPage.tsx",
+    "../src/pages/SettingsPage.tsx",
+  ];
+  const dispatched = async () => {
+    let text = "";
+    for (const f of DISPATCHERS) text += await Bun.file(new URL(f, import.meta.url)).text();
+    return text;
+  };
+  test("verbs/dispatchable — a live handler sends every offered verb somewhere", async () => {
+    const text = await dispatched();
+    expect(offered.filter((v) => !text.includes("VerbId." + v))).toEqual([]);
+  });
+  test("verbs/dispatchable-global — every alt and prefix verb has a case in the shell", async () => {
+    const shell = await Bun.file(new URL("../src/app/Shell.tsx", import.meta.url)).text();
+    expect(GLOBAL.map((g) => g.id).filter((v) => !shell.includes("case VerbId." + v))).toEqual([]);
   });
 
   // Every surface has a section, from a list written *here* rather than from the

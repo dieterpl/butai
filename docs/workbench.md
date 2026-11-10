@@ -1727,7 +1727,7 @@ What differs today, and why — `web/README.md` has the full reasoning:
 | theme preview | live, with a swatch grid under the row | live, with a swatch grid **and** a working `<butai-screen>` painted in the palette |
 | themes | eight built-ins plus `~/.butai/themes` | the same plus `web dark` / `web light`, defaulting to the OS |
 | font size, zen | `alt-z` is saved as `[ui] zen` | `alt-=` / `alt--` and `alt-z` survive a reload |
-| its own keys | — | `alt-u` (the needs-you list) and `c seen` on the AGENTS rail |
+| its own keys | — | `c seen` on the AGENTS rail |
 | Mac Option | read back from the composed character; Option-e and Option-n are dead keys and unrecoverable | read from `e.code`, so both are recoverable |
 
 Both agree on the placement rules that matter: HOME/BOOTH is not a space, SETTINGS

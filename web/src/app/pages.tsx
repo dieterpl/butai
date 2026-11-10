@@ -40,6 +40,7 @@ import {
 } from "../logic/fleet.ts";
 import { daemonOf, qid, type Qid, type QualifiedWorkspace } from "../logic/events.ts";
 import {
+  ARROW_ALIASES,
   ChangesRow,
   VerbId,
   agentsVerbs,
@@ -123,7 +124,9 @@ function verbFor(surface: string, key: string, pin: string | null): Verb | null 
     : surface === "changes" ? changesHelpVerbs()
     : surface === "home" ? homeVerbs()
     : [];
-  return table.find((v) => v.key === key) ?? null;
+  // An arrow is the row its alias names, and only where the table has that row.
+  const alias = ARROW_ALIASES[key];
+  return table.find((v) => (alias ? v.id === alias : v.key === key)) ?? null;
 }
 
 /**
@@ -134,10 +137,10 @@ function verbFor(surface: string, key: string, pin: string | null): Verb | null 
  * unambiguous — and `view.path` for CHANGES, whose kind decides whether `s`
  * stages or `u` unstages.
  *
- * **Navigation is not dispatched.** `j`, `k`, `tab`, `esc` and `enter` are
- * `quiet` in every table, so no footer draws them and nothing here can be
- * reached by clicking one; the keyboard that will send them is `logic/keys.ts`'s
- * and it moves a cursor rather than running a verb. Saying so is the same answer
+ * **Navigation is not dispatched.** `j`, `k`, `tab` and `enter` are `quiet` in
+ * every table, so no footer draws them and nothing here can be reached by
+ * clicking one; the keyboard that sends them is `useRailKeys`, and it moves a
+ * cursor rather than running a verb. Saying so is the same answer
  * `web/ui/actions.js` gave, and for the same reason: acting on the wrong row is
  * worse than not acting.
  */
@@ -250,9 +253,11 @@ function Work(p: PageProps) {
       p.on.setFocus(surfaces[(surfaces.indexOf(surface) + 1) % surfaces.length]!);
       return true;
     }
-    if (key === "esc") { p.on.setFocus("agents"); return true; }
-    if (key === "j" || key === "k" || key === "arrowdown" || key === "arrowup") {
-      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+    // No bare `esc`: the terminal binds none on a rail, and `alt-esc` is the
+    // way off the stage to them.
+    const walk = verbFor(surface, key, p.view.pin)?.id;
+    if (walk === VerbId.Down || walk === VerbId.Up) {
+      const delta = walk === VerbId.Down ? 1 : -1;
       if (surface === "agents" || surface === "procs") {
         const rows = surface === "agents" ? p.ws?.agents ?? [] : (p.ws?.processes ?? []).filter(x => !x.name.startsWith("logs:"));
         const at = rows.findIndex(x => x.pane === p.view.pane);
@@ -264,7 +269,7 @@ function Work(p: PageProps) {
         const at = rows.findIndex(x => x.path === p.view.path);
         const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
         if (next) p.on.setPath(next.path);
-      } else return false;
+      }
       return true;
     }
     if (key === "enter" && (surface === "agents" || surface === "procs" || surface === "stage")) {
@@ -391,7 +396,9 @@ function Home(p: PageProps) {
       // `enter` reads the row: an agent goes to that agent, a project goes to
       // that workspace, a machine folds — one key, and the row says which.
       if (verb?.id === VerbId.OpenAgent) {
-        if (row?.kind === HomeRowKind.Space) on.go(row.space.ws);
+        if (row?.kind === HomeRowKind.Machine) {
+          on.fold({ ...p.view.folds, machines: toggleFold(p.view.folds.machines, row.label ?? "") });
+        } else if (row?.kind === HomeRowKind.Space) on.go(row.space.ws);
         else if (cursor && row?.kind === HomeRowKind.Agent) on.open({ ws: cursor.ws, pane: cursor.pane });
         else p.actions.toast("nothing to open here");
         return;
@@ -444,17 +451,14 @@ function Home(p: PageProps) {
   };
 
   useRailKeys(key => {
-    if (["j", "k", "arrowdown", "arrowup"].includes(key)) {
-      const delta = key === "j" || key === "arrowdown" ? 1 : -1;
+    const walk = verbFor("home", key, p.view.pin)?.id;
+    if (walk === VerbId.Down || walk === VerbId.Up) {
+      const delta = walk === VerbId.Down ? 1 : -1;
       p.on.setSel(Math.max(0, Math.min(list.length - 1, at + delta)));
       return true;
     }
     if (key === "tab") { focusTerminal(); return true; }
-    if (key === "enter" && row?.kind === HomeRowKind.Machine) {
-      on.fold({ ...p.view.folds, machines: toggleFold(p.view.folds.machines, row.label ?? "") });
-      return true;
-    }
-    if (!verbFor("home", key, p.view.pin)) return false;
+    if (!walk) return false;
     act.press("home", key); return true;
   });
 
@@ -585,6 +589,7 @@ function Docker(p: PageProps) {
     logs: (req) =>
       withWs(p, (w) => p.actions.dockerLogs(w, req, followers(p.ws).filter((pane) => !isNamed(p.ws, pane, req.name)))),
     run: (req) => withWs(p, (w) => p.actions.dockerRun(w, req)),
+    leave: () => p.on.setPage("work"),
   };
 
   // Reap on the way out. A `docker logs -f` follower is a live process with a

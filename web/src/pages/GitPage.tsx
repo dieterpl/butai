@@ -51,10 +51,9 @@
 //
 // ## Keys
 //
-// The bare keys arrive with the shell: `keys.ts` dispatches a verb by finding the
-// element that carries its target and clicking it, which is why every verb on
-// this page is a real element with its `data-verb` on it. Until then the
-// `HintBar` and the row buttons are the same verbs, reachable by pointer.
+// The bare keys are this page's own keydown (below `hintKeys`), resolved against
+// the same footer table and the same runs the `HintBar` and the row buttons
+// call, so a key and a click are one verb.
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
@@ -99,8 +98,8 @@ const PAGE = 120;
 /// it spans the page.
 const FOOTER_ROWS = 2;
 
-// The click target each verb is declared under in `verbs.ts`'s registry — the
-// same pairs `keys.ts`'s `SURFACES.git.verbs` dispatches through. A verb that
+// The click target each verb is declared under in `verbs.ts`'s registry — which is
+// how a button names its verb. A verb that
 // reaches this table with no target throws inside `vtarget`, which is the point:
 // a button that no key can reach must not be drawable.
 const TARGET: Partial<Record<VerbId, TargetId>> = {
@@ -322,9 +321,8 @@ function leaf(path: string): string {
 /// caller's `onClick` with its `onSelect`, so a row given both would run its verb
 /// twice — once opening a worktree, once opening it again.
 ///
-/// Keeping `data-verb` is not decoration either: `keys.ts` dispatches a verb by
-/// finding the element carrying its target and clicking it, so an element without
-/// one is a verb the keyboard cannot reach once the shell lands.
+/// Keeping `data-verb` is not decoration either: it is what says which verb an
+/// element is, and `click()` refuses one the registry does not declare.
 function vtarget(target: TargetId | undefined): { "data-verb": string } {
   click(String(target), () => {});
   return { "data-verb": String(target) };
@@ -404,9 +402,8 @@ export interface GitActions {
 export interface GitPageCallbacks {
   /// Which of the three boxes the keyboard is on, after a click moved it.
   ///
-  /// Clicking a row *is* walking to it — `keys.ts` makes the same claim from the
-  /// other side, moving its cursor on any click that lands on a declared row —
-  /// so the two never disagree about which list is live.
+  /// Clicking a row *is* walking to it, so the click and the keyboard never
+  /// disagree about which list is live.
   focus(where: GitColumn): void;
 }
 
@@ -472,9 +469,9 @@ export function GitPage(props: GitPageProps) {
   // The *column* is the shell's, arriving as `focus`; the two indexes are this
   // page's, which is the one place it departs from `WorkPage`'s `view` prop and
   // is worth the sentence. GIT is **one surface with two lists**, and the shell's
-  // cursor is one number per surface — `keys.ts` handles that by making the row
-  // target a function of the live column, so `cursor.git` means a REFS row or a
-  // commit depending on where the keyboard is. Two indexes held here and one
+  // cursor is one number per surface — the old dispatcher handled that by making
+  // the row target a function of the live column, so `cursor.git` meant a REFS
+  // row or a commit depending on where the keyboard was. Two indexes held here and one
   // column held there is that same arrangement without the ambiguity; if the
   // shell wants them, they lift to a `view` prop unchanged.
   const [sel, setSel] = useState<{ refs: number; history: number }>({ refs: 0, history: 0 });

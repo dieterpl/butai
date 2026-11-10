@@ -52,7 +52,7 @@ import type { World } from "@/app/world.ts";
 import type { Qid, QualifiedWorkspace } from "@/logic/events.ts";
 import type { TermTheme } from "@/logic/palette.ts";
 import { RAIL_COLS } from "@/logic/dom.ts";
-import { DockerRow, MAX_ROWS, VerbId, click, dockerVerbs, keyName, type TargetId } from "@/logic/verbs.ts";
+import { ARROW_ALIASES, DockerRow, MAX_ROWS, VerbId, click, dockerVerbs, keyName, type TargetId } from "@/logic/verbs.ts";
 import { hints } from "@/pages/parts.ts";
 import type { ContainerDto, StackDto } from "@/protocol/generated/protocol.ts";
 import { Stage, type StageEvents } from "@/stage/Stage";
@@ -80,6 +80,8 @@ export interface DockerActions {
   logs(req: DockerRun): void;
   /** A one-off pane: a shell in a container, a restart, a stack stopping. */
   run(req: DockerRun): void;
+  /** `esc`: back to the agents page, as the terminal's DOCKER does. */
+  leave?(): void;
 }
 
 export interface DockerPageProps {
@@ -142,13 +144,6 @@ export function stacksFor(world: World, ws: QualifiedWorkspace | null): readonly
   return system?.stacks ?? [];
 }
 
-// The arrows are the same verbs `j` and `k` are, spelled the way the browser
-// spells them. `verbs.ts` holds the pair once; this is the second spelling and
-// the only place it exists.
-const ARROW: Readonly<Record<string, VerbId | undefined>> = {
-  arrowdown: VerbId.Down,
-  arrowup: VerbId.Up,
-};
 
 /**
  * True when `path` is `base` or lives inside it. The boundary matters: a bare
@@ -232,9 +227,9 @@ function isTyping(t: EventTarget | null): boolean {
  *
  * `verbs.ts`'s `click()` throws for a target that is not declared in `TARGETS`,
  * which is what stops a button existing with no key that reaches it; its own
- * return is `h()`'s spelling, so the assertion is what is kept. `data-verb` is
- * how `keys.ts` finds the thing a verb clicks — the vanilla page carried none on
- * this surface, which is why its rows could not be reached that way at all.
+ * return is `h()`'s spelling, so the assertion is what is kept. `data-verb` names
+ * the verb an element is; the keys themselves are this page's own keydown below,
+ * through the same `run` the footer's buttons call.
  */
 function verbClick(target: TargetId, run: () => void) {
   click(target, run);
@@ -339,6 +334,10 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
    */
   const run = useCallback(
     (id: VerbId): boolean => {
+      if (id === VerbId.SpaceWork && actions.leave) {
+        actions.leave();
+        return true;
+      }
       if (id === VerbId.Down) {
         walked.current = true;
         const next = rows[Math.min(rows.length - 1, at + 1)];
@@ -371,16 +370,16 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
       }
       return false;
     },
-    [rows, at, target, follow, contAct, composeAct],
+    [rows, at, target, follow, contAct, composeAct, actions],
   );
 
   // No dependency array: the listener closes over the cursor, and one registered
   // on mount would go on acting on row 0 forever.
   //
   // This is the half of the page the shell is expected to take over — every row
-  // and every button below carries its `data-verb`, which is how `keys.ts`
-  // reaches them — and until there is a shell, a page that advertises `r
-  // restart` in its own footer has to answer for it.
+  // and every button below carries its `data-verb` — and until there is a
+  // shell, a page that advertises `r restart` in its own footer has to answer
+  // for it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
@@ -391,7 +390,7 @@ export function DockerPage({ world, ws, pane, theme, fontPx, stage, actions }: D
       if (isTyping(e.target)) return;
       const name = keyName(e);
       const verb = verbs.find((v) => v.key === name);
-      const id = verb ? verb.id : ARROW[name];
+      const id = verb ? verb.id : ARROW_ALIASES[name];
       if (id && run(id)) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);

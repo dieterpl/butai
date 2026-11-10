@@ -84,7 +84,18 @@ export interface StageProps extends StageEvents {
   ref?: Ref<StageHandle>;
 }
 
-/** The imperative surface `keys.ts` drives the stage through. */
+/**
+ * The event `alt-v` / `C-b v` sends a stage: read this machine's clipboard
+ * image and hand it to the pane as `put_file`, as the terminal's `alt-v` does.
+ *
+ * An event rather than a [`StageHandle`] call because the shell that owns the
+ * key does not hold the stage — the page that draws it does — and it has to be
+ * dispatched inside the keydown: a browser reads the clipboard only during a
+ * user gesture.
+ */
+export const PASTE_IMAGE_EVENT = "butai:paste-image";
+
+/** The imperative surface a caller that holds the stage drives it through. */
 export interface StageHandle {
   focusTerminal(): void;
   blurTerminal(): void;
@@ -94,7 +105,7 @@ export interface StageHandle {
    * program after all, which is exactly what tmux's doubled prefix means.
    *
    * `null` is in the signature because `keyMsg` can answer with one and the
-   * caller hands its answer straight over — see `keys.ts`'s `StageEl`.
+   * caller hands its answer straight over.
    */
   send(msg: ClientMsg | null): void;
   /**
@@ -482,6 +493,7 @@ export function Stage({ pane, theme, fontPx, className, ref, autoFocus = true, .
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const screenRef = useRef<Screen | null>(null);
   const connRef = useRef<StageConn | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<StageStatus | null>(null);
 
   // The renderer and the connection outlive every render; the props they need
@@ -540,6 +552,22 @@ export function Stage({ pane, theme, fontPx, className, ref, autoFocus = true, .
     if (fontPx != null) screenRef.current?.setFontPx(fontPx);
   }, [fontPx]);
 
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return undefined;
+    const paste = () => {
+      const conn = connRef.current;
+      // The sender only picks a stage with a pane; one that has lost it since
+      // has nowhere to put the file.
+      if (conn?.pane == null) return;
+      void screenRef.current?.readClipboardImage().then((problem) => {
+        if (problem) conn.flash(problem, true, 8000);
+      });
+    };
+    el.addEventListener(PASTE_IMAGE_EVENT, paste);
+    return () => el.removeEventListener(PASTE_IMAGE_EVENT, paste);
+  }, []);
+
   useImperativeHandle(ref, (): StageHandle => ({
     focusTerminal() {
       if (connRef.current?.pane != null) screenRef.current?.focus();
@@ -561,6 +589,7 @@ export function Stage({ pane, theme, fontPx, className, ref, autoFocus = true, .
 
   return (
     <div
+      ref={rootRef}
       data-slot="stage"
       className={
         "relative h-full bg-term-bg " +

@@ -108,10 +108,14 @@ export const VerbId = Object.freeze(ids([
   // there is no Save: a change applies and is written when you make it.
   "SettingChange", "SettingChoose", "SettingKeep", "SettingToggle",
   "SettingBigger", "SettingSmaller", "SettingAuto", "CloseSettings",
-  // Overlays.
-  "Accept", "Cancel", "Clear", "ClearAll", "NewFolder",
+  // Overlays, and the command palette over everything.
+  "Accept", "Cancel", "Palette",
+  // LAYOUT mode: the border under the focused rail, moved a step at a time.
+  "Narrower", "Wider", "BorderUp", "BorderDown",
+  // HELP's own reading keys, past the `j`/`k` every list has.
+  "PageDown", "PageUp", "Top", "Bottom", "CloseHelp",
   // The rest of the workbench.
-  "Layout", "Zen", "Help", "Alerts", "PasteImage", "FontBigger", "FontSmaller",
+  "Layout", "Zen", "Help", "PasteImage", "FontBigger", "FontSmaller",
 ]));
 
 /// One verb's name. The union of [`VerbId`]'s values, read off the table so the
@@ -320,10 +324,12 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
   // -- the rest ------------------------------------------------------------
   g(VerbId.Layout, "resize the rails", { alt: "l", prefix: "l" }),
   g(VerbId.Zen, "collapse the rails", { alt: "z", prefix: "z" }),
-  g(VerbId.Alerts, "who needs you", { alt: "u", prefix: "u" },
-    "This shortcut is currently unavailable in the web client; use NEEDS YOU in BOOTH (alt-0)."),
-  g(VerbId.PasteImage, "paste an image", { alt: "v", prefix: "v" }, "",
-    "This shortcut is currently unavailable in the web client; paste into the pane with Ctrl+V or Cmd+V instead."),
+  // No `alt-u`: the terminal has none, because the USAGE view it once reached
+  // is kept out of navigation and key bindings until it is reliable (its
+  // `chrome/mod.rs` says so), and a key here that the terminal does not have
+  // is two clients teaching two keyboards.
+  g(VerbId.PasteImage, "paste an image", { alt: "v", prefix: "v" },
+    "the image on this machine's clipboard, written beside the project and its path typed into the pane on the stage"),
   g(VerbId.FontBigger, "bigger", { alt: "=", prefix: "+" }, "the terminal's font, not the browser's zoom"),
   g(VerbId.FontSmaller, "smaller", { alt: "-", prefix: "-" }),
   g(VerbId.Help, "this reference", { prefix: "?" }, "bare ? off the stage"),
@@ -334,7 +340,7 @@ export const GLOBAL: readonly GlobalVerb[] = Object.freeze([
 /// Not a second row in any table: `↓`/`↑` are `j`/`k`, and `←`/`→` are `h`/`l`
 /// on the one surface that binds those (the Finder trail). An arrow does
 /// something only where its verb is in the surface's table — which is the
-/// check `keys.ts` makes, and the rule the HELP keyboard draws them by.
+/// check every dispatcher makes, and the rule the HELP keyboard draws them by.
 export const ARROW_ALIASES: Readonly<Record<string, VerbId>> = Object.freeze({
   arrowdown: VerbId.Down,
   arrowup: VerbId.Up,
@@ -567,7 +573,6 @@ const AGENTS_TAIL: Verb[] = [
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
   quiet("tab", "next rail", VerbId.FocusCycle),
-  quiet("esc", "the stage", VerbId.FocusStage),
   quiet("?", "keys", VerbId.Help),
 ];
 const AGENTS: readonly Verb[] = Object.freeze([
@@ -598,7 +603,6 @@ const PROCS: readonly Verb[] = Object.freeze([
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
   quiet("tab", "next rail", VerbId.FocusCycle),
-  quiet("esc", "the stage", VerbId.FocusStage),
   quiet("?", "keys", VerbId.Help),
 ]);
 
@@ -673,7 +677,6 @@ export function changesAlwaysVerbs(opts?: ChangesOpts | null): Verb[] {
   v.push(quiet("j", "down", VerbId.Down));
   v.push(quiet("k", "up", VerbId.Up));
   v.push(quiet("tab", "next rail", VerbId.FocusCycle));
-  v.push(quiet("esc", "the stage", VerbId.FocusStage));
   return v;
 }
 
@@ -722,7 +725,6 @@ const FILES: readonly Verb[] = Object.freeze([
   quiet("k", "up", VerbId.Up),
   quiet("h", "up a level", VerbId.TreeUp),
   quiet("l", "into", VerbId.TreeInto),
-  quiet("tab", "next rail", VerbId.FocusCycle),
   quiet("?", "keys", VerbId.Help),
 ]);
 // `C-s` is the one key here that is not a bare letter: it is what every editor
@@ -746,17 +748,22 @@ export function dockerVerbs(row: DockerRow): readonly Verb[] {
   switch (row) {
     case DockerRow.Stack: return DOCKER_STACK;
     case DockerRow.Container: return DOCKER_CONTAINER;
-    default: return EMPTY;
+    // Nothing under the cursor still has a way out: the terminal's `esc`
+    // leaves DOCKER whatever the list holds.
+    default: return DOCKER_NONE;
   }
 }
+const DOCKER_NONE: readonly Verb[] = Object.freeze([
+  quiet("esc", "agents", VerbId.SpaceWork),
+  quiet("?", "keys", VerbId.Help),
+]);
 const DOCKER_STACK: readonly Verb[] = Object.freeze([
   verb("r", "restart", VerbId.DockerRestart),
   danger("x", "stop", VerbId.DockerStop),
   quiet("enter", "logs", VerbId.DockerLogs),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
-  quiet("tab", "next rail", VerbId.FocusCycle),
-  quiet("esc", "the stage", VerbId.FocusStage),
+  quiet("esc", "agents", VerbId.SpaceWork),
   quiet("?", "keys", VerbId.Help),
 ]);
 const DOCKER_CONTAINER: readonly Verb[] = Object.freeze([
@@ -765,8 +772,7 @@ const DOCKER_CONTAINER: readonly Verb[] = Object.freeze([
   verb("r", "restart", VerbId.DockerRestart),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
-  quiet("tab", "next rail", VerbId.FocusCycle),
-  quiet("esc", "the stage", VerbId.FocusStage),
+  quiet("esc", "agents", VerbId.SpaceWork),
   quiet("?", "keys", VerbId.Help),
 ]);
 
@@ -1006,30 +1012,80 @@ export function overlayVerbs(kind: OverlayKind): readonly Verb[] {
     default: return OVERLAY_PICKER;
   }
 }
+///
+/// The terminal's picker has `n new folder` and its needs-you list has `c`/`C`
+/// to dismiss; this client has neither overlay, so neither row is here. A key
+/// for a thing that is not there is the half of the rule that leaves it free.
 const OVERLAY_BASE: Verb[] = [
   verb("enter", "choose", VerbId.Accept),
   verb("esc", "dismiss", VerbId.Cancel),
   quiet("j", "down", VerbId.Down),
   quiet("k", "up", VerbId.Up),
 ];
+/// A confirmation answers `y` and `n` as the terminal's does. Only the shell's
+/// own "are you sure" is one: a window that asks to trust a host key is not,
+/// so a trust is never one stray keystroke.
 const OVERLAY_ASK: readonly Verb[] = Object.freeze(OVERLAY_BASE.concat([
   quiet("y", "yes", VerbId.Accept),
   quiet("n", "no", VerbId.Cancel),
 ]));
-const OVERLAY_PICKER: readonly Verb[] = Object.freeze(OVERLAY_BASE.concat([
-  quiet("n", "new folder", VerbId.NewFolder),
-]));
-const OVERLAY_LIST: readonly Verb[] = Object.freeze(OVERLAY_BASE.concat([
-  quiet("c", "dismiss one", VerbId.Clear),
-  quiet("C", "dismiss all", VerbId.ClearAll),
-]));
+const OVERLAY_PICKER: readonly Verb[] = Object.freeze(OVERLAY_BASE);
+const OVERLAY_LIST: readonly Verb[] = Object.freeze(OVERLAY_BASE);
+
+/// The command palette: `C-k` (⌘K on a Mac) from anywhere off the stage, and
+/// the two keys every modal answers once it is open. Typing filters, so `j`
+/// and `k` are letters here and the arrows walk the list.
+export function paletteVerbs(): readonly Verb[] {
+  return PALETTE;
+}
+const PALETTE: readonly Verb[] = Object.freeze([
+  verb("C-k", "commands", VerbId.Palette),
+  quiet("enter", "run", VerbId.Accept),
+  quiet("esc", "close", VerbId.Cancel),
+]);
+
+/// LAYOUT mode (`alt-l`): every bare key moves a border instead of a cursor.
+/// `h`/`l` move the focused rail's edge, `j`/`k` the border between the
+/// AGENTS, PROCESSES and SYSTEM sections, and `tab` picks which rail.
+export function layoutVerbs(): readonly Verb[] {
+  return LAYOUT;
+}
+const LAYOUT: readonly Verb[] = Object.freeze([
+  verb("h", "narrower", VerbId.Narrower),
+  verb("l", "wider", VerbId.Wider),
+  verb("j", "border down", VerbId.BorderDown),
+  verb("k", "border up", VerbId.BorderUp),
+  verb("tab", "next rail", VerbId.FocusCycle),
+  verb("enter", "done", VerbId.Layout),
+  quiet("esc", "done", VerbId.Layout),
+]);
+
+/// What the arrows are in LAYOUT. Not [`ARROW_ALIASES`]: there `←`/`→` walk a
+/// tree, and here they move a border, so they alias the letters by key.
+export const LAYOUT_ARROWS: Readonly<Record<string, string>> = Object.freeze({
+  arrowleft: "h", arrowright: "l", arrowdown: "j", arrowup: "k",
+});
+
+/// HELP's own keys: it is a page to read, so they scroll.
+export function helpVerbs(): readonly Verb[] {
+  return HELP;
+}
+const HELP: readonly Verb[] = Object.freeze([
+  quiet("j", "down", VerbId.Down),
+  quiet("k", "up", VerbId.Up),
+  verb("pagedown", "page down", VerbId.PageDown),
+  verb("pageup", "page up", VerbId.PageUp),
+  quiet("home", "top", VerbId.Top),
+  quiet("end", "bottom", VerbId.Bottom),
+  verb("esc", "close", VerbId.CloseHelp),
+]);
 
 /// What each surface's section of the reference says about itself.
 const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
   HOME:
     "bare keys in the fleet list (alt-0 for the page, alt-w for the list). The list spans every " +
     "connected machine and each row says which one it is on; enter goes to that agent's project, " +
-    "on its own machine, and puts it on the stage. The middle column is a real pane — click it or " +
+    "on its own machine, and puts it on the stage; on a machine row it folds the machine, as z does. The middle column is a real pane — click it or " +
     "tab to it and every key is the agent's, which is why alt-w and alt-esc are the way back out. " +
     "Clicking a project selects its preview; its chevron folds the chats and [open] goes to the project. " +
     "NEEDS YOU gathers chats needing attention even inside folded projects. Clicking a chat there " +
@@ -1050,7 +1106,14 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "cursor inside an open theme list applies that palette to the whole workbench as you walk it, " +
     "and esc there puts the old one back rather than closing the page. There is no Save: a change " +
     "applies and is written when you make it.",
-  DOCKER: "bare keys on the docker page (alt-c); on a stack row, r and x act on every container in it",
+  DOCKER:
+    "bare keys on the docker page (alt-c); on a stack row, r and x act on every container in it. " +
+    "esc goes back to the agents page, as the terminal's does",
+  PALETTE: "C-k, or ⌘K on a Mac, from anywhere off the stage. Type to filter; the arrows walk the list",
+  LAYOUT:
+    "LAYOUT mode, entered with alt-l. Every bare key moves a border instead of a cursor, and the " +
+    "arrows are h, j, k and l. The widths are saved in this browser",
+  HELP: "this page. The Keys topic's search box takes / and its keyboard follows a held alt",
   GIT:
     "bare keys on the git page (alt-r). tab walks REFS → HISTORY → the commit, and " +
     "enter only ever *reads*: it scopes the graph to a ref, loads a commit or a stash, or — on " +
@@ -1058,8 +1121,8 @@ const SURFACE_NOTES: Readonly<Record<string, string>> = Object.freeze({
     "stays. Everything that writes the repository has a letter, and everything git can do that " +
     "is not about one row is behind g.",
   overlays:
-    "any modal — a picker, a prompt, a confirmation. y/n answer a confirmation, n opens a new " +
-    "folder in the file picker, and c/C dismiss one or all in the needs-you list.",
+    "any modal — a picker, a prompt, a confirmation, a menu. y/n answer a confirmation; " +
+    "j/k walk a window's buttons or a menu's rows, and a menu's letters pick their row.",
 });
 
 /// One surface's name and every verb it offers.
@@ -1076,9 +1139,10 @@ export function allSurfaces(): Surface[] {
     ["DOCKER", dockerVerbs(DockerRow.Stack).concat(dockerVerbs(DockerRow.Container))],
     ["GIT", gitHelpVerbs()],
     ["SETTINGS", settingsHelpVerbs()],
-    ["overlays", overlayVerbs(OverlayKind.Ask)
-      .concat(overlayVerbs(OverlayKind.Picker))
-      .concat(overlayVerbs(OverlayKind.List))],
+    ["overlays", overlayVerbs(OverlayKind.Ask)],
+    ["PALETTE", paletteVerbs()],
+    ["LAYOUT", layoutVerbs()],
+    ["HELP", helpVerbs()],
   ];
 }
 
@@ -1115,7 +1179,6 @@ export const TARGETS = Object.freeze({
   "space.docker": t("header", [VerbId.SpaceDocker]),
   "space.git": t("header", [VerbId.SpaceGit]),
   "space.docs": t("header", [VerbId.SpaceDocs]),
-  "header.alerts": t("header", [VerbId.Alerts]),
   "header.font.bigger": t("header", [VerbId.FontBigger]),
   "header.font.smaller": t("header", [VerbId.FontSmaller]),
   "header.rails": t("header", [VerbId.Zen]),
@@ -1245,12 +1308,6 @@ export const TARGETS = Object.freeze({
   "overlay.accept": t("an overlay", [VerbId.Accept]),
   "overlay.cancel": t("an overlay", [VerbId.Cancel]),
   "overlay.row": t("an overlay", [VerbId.Down, VerbId.Up, VerbId.Accept]),
-  "overlay.clear": t("an overlay", [VerbId.Clear]),
-  "overlay.clearAll": t("an overlay", [VerbId.ClearAll]),
-  "overlay.newFolder": t("an overlay", [VerbId.NewFolder]),
-  // The new-folder row's own cancel. A second `overlay.cancel` would be found
-  // ahead of the picker's, and `esc` would close the row you are not in.
-  "overlay.closeRow": t("an overlay", [VerbId.Cancel]),
 });
 
 /// The name of a declared click target — every key of [`TARGETS`], as a type.
@@ -1322,9 +1379,7 @@ function surfaceTable(where: string): readonly Verb[] {
     case "GIT": return gitHelpVerbs();
     case "SETTINGS": return settingsHelpVerbs();
     case "an overlay":
-      return overlayVerbs(OverlayKind.Ask)
-        .concat(overlayVerbs(OverlayKind.Picker))
-        .concat(overlayVerbs(OverlayKind.List));
+      return overlayVerbs(OverlayKind.Ask);
     default: return [];
   }
 }

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **1.6.0-dev.3: the browser's key tables say what its keys do.** HELP's
+  keyboard is drawn from these tables, and several of their rows described keys
+  the browser never handled, while some keys it did handle were in no table.
+  Where a listed key did nothing, the browser now does what the terminal client
+  does with it, or the row is gone when the terminal has no such key.
+  - `alt-v` / `C-b v` paste the image on your clipboard into the pane on the
+    stage, as they do in the terminal. Before, `alt-v` reached the pane and
+    `C-b v` was silently swallowed.
+  - `alt-u` / `C-b u` are gone from the tables. The terminal has no `alt-u`,
+    because the usage view is kept out of navigation and key bindings until it
+    is reliable.
+  - A bare `esc` on the AGENTS, PROCESSES and CHANGES rails no longer claims to
+    reach the stage: the terminal binds none there, and the browser's own `esc`
+    (back to AGENTS) is gone with it. `alt-esc` and `enter` are unchanged.
+  - On DOCKER, `esc` goes back to the agents page, as the terminal's does.
+    DOCKER and FILES no longer list `tab` as "next rail": neither page has a
+    second rail.
+  - The shell's "are you sure" answers `y` and `n` as the terminal's does, and
+    `j`/`k` walk a window's buttons. A host-key trust still needs its button.
+    The overlay rows for a folder picker's `n` and a needs-you list's `c`/`C`
+    are gone, because the browser has neither overlay.
+  - Keys that worked but were in no table are now in one and run from it: the
+    command palette (`C-k`, ⌘K on a Mac), LAYOUT mode's `h`/`j`/`k`/`l`, `tab`
+    and `esc`, and HELP's own scroll keys. The rails' arrows go through
+    `ARROW_ALIASES`, and `enter` on a BOOTH machine row folds it through the
+    table's `enter` rather than a special case.
+  - On a Mac, the Alt layer read Option-letter as the composed character
+    (`ø` for Option-o), so no Alt binding fired. It now reads the physical key.
+  - `logic/keys.ts`, a dispatcher nothing used, is deleted. The check that
+    every offered verb is dispatched now reads the handlers the app runs, and a
+    new check requires a shell `case` for every alt and prefix verb.
+
 ### Added
 
 - **1.6.0-dev.2: HELP's Keys page is a keyboard.** The Keys topic opens on a

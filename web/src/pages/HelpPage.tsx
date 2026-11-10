@@ -58,7 +58,7 @@ import { SectionTitle } from "@/components/SectionTitle";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { HELP_TOPIC, readMarkdown, slugFor, topicFor, topics, type Topic } from "@/logic/docs.ts";
-import { reference } from "@/logic/verbs.ts";
+import { ARROW_ALIASES, VerbId, helpVerbs, keyName, reference } from "@/logic/verbs.ts";
 import { KeysTopic } from "./HelpKeys.tsx";
 
 // The contents column. `help.rs` gives it 24 columns for a longest row of 19;
@@ -171,7 +171,11 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
     // The Keys topic's search box: `j` is a letter there, not a scroll.
     if (isField(e.target)) return;
-    if (e.key === "Escape") {
+    const name = keyName(e.nativeEvent);
+    const alias = ARROW_ALIASES[name];
+    const verbs = helpVerbs();
+    const id = verbs.find((v) => (alias ? v.id === alias : v.key === name))?.id;
+    if (id === VerbId.CloseHelp) {
       if (!onClose) return;
       e.preventDefault();
       onClose();
@@ -179,25 +183,23 @@ export function HelpPage({ prefix, topic, onTopic, onClose }: HelpPageProps) {
     }
     const el = body.current;
     if (!el) return;
-    switch (e.key) {
-      case "j":
-      case "ArrowDown":
+    switch (id) {
+      case VerbId.Down:
         el.scrollBy({ top: LINE });
         break;
-      case "k":
-      case "ArrowUp":
+      case VerbId.Up:
         el.scrollBy({ top: -LINE });
         break;
-      case "PageDown":
+      case VerbId.PageDown:
         el.scrollBy({ top: el.clientHeight - LINE });
         break;
-      case "PageUp":
+      case VerbId.PageUp:
         el.scrollBy({ top: -(el.clientHeight - LINE) });
         break;
-      case "Home":
+      case VerbId.Top:
         el.scrollTo({ top: 0 });
         break;
-      case "End":
+      case VerbId.Bottom:
         el.scrollTo({ top: el.scrollHeight });
         break;
       default:

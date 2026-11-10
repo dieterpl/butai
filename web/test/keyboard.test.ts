@@ -13,6 +13,7 @@ import {
   ALT_MUST_FALL_THROUGH,
   ARROW_ALIASES,
   GLOBAL,
+  LAYOUT_ARROWS,
   VerbId,
   allSurfaces,
   altVerb,
@@ -42,8 +43,15 @@ function expected(): Set<Fact> {
   for (const [name, verbs] of allSurfaces()) {
     const layer = layerIdFor(name);
     for (const v of verbs) for (const p of places(v.key)) out.add(fact(layer, p.cap, p.mod, v.id));
-    for (const [arrow, id] of Object.entries(ARROW_ALIASES)) {
-      if (verbs.some((v) => v.id === id)) for (const p of places(arrow)) out.add(fact(layer, p.cap, p.mod, id));
+    if (name === "LAYOUT") {
+      for (const [arrow, key] of Object.entries(LAYOUT_ARROWS)) {
+        const v = verbs.find((x) => x.key === key);
+        if (v) for (const p of places(arrow)) out.add(fact(layer, p.cap, p.mod, v.id));
+      }
+    } else {
+      for (const [arrow, id] of Object.entries(ARROW_ALIASES)) {
+        if (verbs.some((v) => v.id === id)) for (const p of places(arrow)) out.add(fact(layer, p.cap, p.mod, id));
+      }
     }
   }
   return out;

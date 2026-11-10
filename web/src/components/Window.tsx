@@ -37,6 +37,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { ARROW_ALIASES, OverlayKind, VerbId, keyName, overlayVerbs } from "@/logic/verbs";
 
 /** How alarming it is. Picks the frame and the title mark, nothing else. */
 export type WindowTone = "info" | "warn" | "danger";
@@ -64,6 +65,12 @@ export interface WindowAction {
   destructive?: boolean | undefined;
   /** Focused when the window opens. Give this to the safe answer, never to a trust. */
   autoFocus?: boolean | undefined;
+  /**
+   * What `y` presses. Marks the window as a yes/no question, where `n` is
+   * dismissing it — the terminal's confirmation keys. Give it only to the
+   * shell's own "are you sure", never to a trust.
+   */
+  yes?: boolean | undefined;
   /**
    * Do it. Return a message to keep the window open and say why it did not
    * work; return nothing and the window closes.
@@ -100,6 +107,35 @@ const HEADER: Record<WindowTone, string> = {
   danger: "text-bad before:border-bad",
 };
 const FACT_TONE = { ok: "text-ok", warn: "text-warn", bad: "text-bad" } as const;
+
+/**
+ * The overlays' table, run on a window or a menu: `j`/`k` (and `↓`/`↑`, their
+ * aliases) walk the buttons in `scope`. `enter` needs nothing here — it is the
+ * focused button's own — and `esc` is the dialog's. Returns the verb the key
+ * is in the table, so a caller with more to answer (a confirmation's `y`/`n`)
+ * can take the rest.
+ */
+export function overlayKey(e: React.KeyboardEvent<HTMLElement>, kind: OverlayKind, scope: HTMLElement): VerbId | null {
+  if (e.altKey || e.ctrlKey || e.metaKey || isField(e.target)) return null;
+  const name = keyName(e);
+  const verbs = overlayVerbs(kind);
+  const arrow = ARROW_ALIASES[name];
+  const id = verbs.find((v) => v.key === name)?.id ?? (arrow && verbs.some((v) => v.id === arrow) ? arrow : null);
+  if (id === VerbId.Down || id === VerbId.Up) {
+    e.preventDefault();
+    const buttons = Array.from(scope.querySelectorAll<HTMLButtonElement>("button:not([disabled]):not([data-slot=dialog-close])"));
+    const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    buttons[(at + (id === VerbId.Down ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+  }
+  return id;
+}
+
+function isField(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+}
 
 const replace = <T,>(xs: readonly T[], i: number, v: T): T[] => xs.map((x, j) => (j === i ? v : x));
 
@@ -144,6 +180,20 @@ export function Window({
           if (e.key === "Enter" && !e.shiftKey && fields.length > 0 && primary && !(e.target instanceof HTMLButtonElement)) {
             e.preventDefault();
             void act(primary);
+            return;
+          }
+          const yes = actions.find((a) => a.yes);
+          const id = overlayKey(e, yes ? OverlayKind.Ask : OverlayKind.Picker, e.currentTarget);
+          if (!yes || pending) return;
+          // By the letter as well as the verb: `enter` is `Accept` too, and it
+          // is the focused button's — which opens on the safe answer.
+          const name = keyName(e);
+          if (name === "y" && id === VerbId.Accept) {
+            e.preventDefault();
+            void act(yes);
+          } else if (name === "n" && id === VerbId.Cancel) {
+            e.preventDefault();
+            onClose("dismissed");
           }
         }}
       >

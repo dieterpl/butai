@@ -28,7 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Patch } from "@/components/Patch";
-import { Window } from "@/components/Window";
+import { Window, overlayKey } from "@/components/Window";
 import { NO_FOLDS, type Folds } from "../logic/fleet.ts";
 import {
   Dialog,
@@ -60,7 +60,11 @@ import { type GitActionId, type MenuCx, type GroupId, groupsFor, itemsFor } from
 import type { StageEvents } from "@/stage/Stage";
 import type { SettingsFacts } from "@/pages/SettingsPage";
 import { VIEWS, cycleView, pageLabel, viewShortcut } from "./navigation";
-import { VerbId, altVerb, prefixVerb, keyName, isPrefix } from "../logic/verbs";
+import {
+  LAYOUT_ARROWS, VerbId, altKeyName, altVerb, helpVerbs, isPrefix, keyName, layoutVerbs, OverlayKind,
+  paletteVerbs, prefixVerb,
+} from "../logic/verbs";
+import { PASTE_IMAGE_EVENT } from "@/stage/Stage";
 import { PAGE_TABLE } from "./pages.tsx";
 
 /** The pages the shell can show. `work` is where a client opens. */
@@ -356,26 +360,31 @@ export function Shell() {
       if (document.querySelector('[role="dialog"]')) { prefixPending.current = false; return; }
       const inStage = !!(e.target as HTMLElement)?.closest('[data-slot="stage"]');
       const typing = isTyping(e.target) && !inStage;
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !inStage) {
+      // The palette's own table: `C-k`, and ⌘K, which is the same key on a Mac.
+      const chord = (e.metaKey || e.ctrlKey) && !e.altKey ? "C-" + keyName(e).toLowerCase() : "";
+      if (chord && !inStage && paletteVerbs().find(v => v.key === chord)?.id === VerbId.Palette) {
         e.preventDefault(); e.stopImmediatePropagation(); setPalette(v => !v); return;
       }
       if (typing) return;
       const key = keyName(e);
       if (layout && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        // Every bare key is LAYOUT's while it is on, bound or not: a letter
+        // that fell through would reach a rail that is not what you are moving.
         e.preventDefault(); e.stopImmediatePropagation();
-        if (key === "esc" || key === "enter") setLayout(false);
-        else if (key === "tab") setFocus(focus === "agents" ? "procs" : focus === "procs" ? "changes" : "agents");
-        else if (["arrowleft", "arrowright", "h", "l"].includes(key)) {
+        const id = layoutVerbs().find(v => v.key === (LAYOUT_ARROWS[key] ?? key))?.id;
+        if (id === VerbId.Layout) setLayout(false);
+        else if (id === VerbId.FocusCycle) setFocus(focus === "agents" ? "procs" : focus === "procs" ? "changes" : "agents");
+        else if (id === VerbId.Narrower || id === VerbId.Wider) {
           const right = focus === "changes";
           const rail = document.querySelector<HTMLElement>(right ? '[data-surface="changes"]' : '.work-rails');
           const width = rail?.getBoundingClientRect().width ?? (right ? 319 : 235);
           const other = document.querySelector<HTMLElement>(right ? '.work-rails' : '[data-surface="changes"]')?.getBoundingClientRect().width ?? 0;
           const cap = Math.max(180, Math.min(640, window.innerWidth - other - 168));
-          const next = Math.max(180, Math.min(cap, width + (key === "arrowright" || key === "l" ? 16.8 : -16.8)));
+          const next = Math.max(180, Math.min(cap, width + (id === VerbId.Wider ? 16.8 : -16.8)));
           save(storage(), { ...prefs, [right ? "rightRail" : "leftRail"]: Math.round(next) });
           setPrefsRevision(v => v + 1);
-        } else if (["arrowup", "arrowdown", "j", "k"].includes(key) && focus !== "changes") {
-          const delta = key === "arrowup" || key === "k" ? 36 : -36;
+        } else if ((id === VerbId.BorderUp || id === VerbId.BorderDown) && focus !== "changes") {
+          const delta = id === VerbId.BorderUp ? 36 : -36;
           const proc = document.querySelector<HTMLElement>('[data-surface="procs"]')?.getBoundingClientRect().height ?? 108;
           const system = document.querySelector<HTMLElement>('[data-surface="system"]')?.getBoundingClientRect().height ?? 18;
           const height = document.querySelector<HTMLElement>('.work-rails')?.getBoundingClientRect().height ?? 400;
@@ -397,7 +406,9 @@ export function Shell() {
       if (prefix && prefixPending.current) { prefixPending.current = false; return; }
       const pending = prefixPending.current;
       prefixPending.current = false;
-      const verb = pending ? prefixVerb(key) : e.altKey ? altVerb(key) : null;
+      // The Alt layer reads `altKeyName`: on a Mac, Option-o arrives as `ø`, and
+      // only the physical key says it was `o`.
+      const verb = pending ? prefixVerb(key) : e.altKey ? altVerb(altKeyName(e)) : null;
       let handled = true;
       switch (verb?.id) {
         case VerbId.Views: setViewsOpen(true); break;
@@ -411,7 +422,7 @@ export function Shell() {
         case VerbId.SpaceHome: case VerbId.FocusFleet: setPage("home"); setFocus("home"); (document.activeElement as HTMLElement)?.blur(); break;
         case VerbId.SpaceSettings: toggleUtility("settings"); break;
         case VerbId.Help: toggleUtility("help"); break;
-        case VerbId.Workspace: { const w = spaces[Number(key) - 1]; if (w) on.setWsId(String(w.id)); break; }
+        case VerbId.Workspace: { const w = spaces[Number(pending ? key : altKeyName(e)) - 1]; if (w) on.setWsId(String(w.id)); break; }
         case VerbId.WorkspaceNext: case VerbId.WorkspacePrev: {
           const at = spaces.findIndex(w => String(w.id) === String(ws?.id));
           const w = spaces[(at + (verb.id === VerbId.WorkspaceNext ? 1 : -1) + spaces.length) % spaces.length];
@@ -433,9 +444,20 @@ export function Shell() {
         case VerbId.PickAgent: if (ws) void actions.spawnPick(ws.id, true, view.pin); break;
         case VerbId.Layout: toggleLayout(); break;
         case VerbId.Zen: setZen(v => !v); break;
+        // Dispatched synchronously, inside this keydown, because that is the
+        // only moment a browser lets a page read the clipboard. The stage with
+        // the keyboard if one has it, else the one showing a pane.
+        case VerbId.PasteImage: {
+          const live = Array.from(document.querySelectorAll<HTMLElement>('[data-slot="stage"]'))
+            .filter(el => el.querySelector("canvas:not([hidden])"));
+          const el = live.find(s => s.contains(document.activeElement)) ?? live[0];
+          if (el) el.dispatchEvent(new Event(PASTE_IMAGE_EVENT));
+          else actions.toast("nothing on the stage");
+          break;
+        }
         default:
           if (!inStage && !e.altKey && !e.ctrlKey && !e.metaKey && key === "?") toggleUtility("help");
-          else if (!inStage && key === "esc" && page === "help") setPage(returnPage.current);
+          else if (!inStage && page === "help" && helpVerbs().find(v => v.key === key)?.id === VerbId.CloseHelp) setPage(returnPage.current);
           else handled = pending;
       }
       if (handled) { e.preventDefault(); e.stopImmediatePropagation(); }
@@ -517,13 +539,12 @@ export function Shell() {
           <DialogContent className="sm:max-w-sm">
             <DialogHeader><DialogTitle>Views</DialogTitle></DialogHeader>
             <div className="flex flex-col" role="menu" aria-label="Workspace views" onKeyDown={e => {
-              if (!["j", "k", "ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+              if (overlayKey(e, OverlayKind.List, e.currentTarget)) return;
+              // A menu's own: the first and last row, as every ARIA menu has.
+              if (e.key !== "Home" && e.key !== "End") return;
               e.preventDefault();
               const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
-              const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-              const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 :
-                (at + (e.key === "j" || e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-              buttons[next]?.focus();
+              buttons[e.key === "Home" ? 0 : buttons.length - 1]?.focus();
             }}>
               {VIEWS.map(p => <button key={p} type="button" role="menuitemradio" aria-checked={page === p}
                 aria-label={pageLabel(p)}
@@ -630,7 +651,7 @@ export function Shell() {
             }}
             actions={[
               { label: "Cancel", autoFocus: true, run: () => ask.resolve(false) },
-              { label: "Yes, do it", destructive: true, run: () => ask.resolve(true) },
+              { label: "Yes, do it", destructive: true, yes: true, run: () => ask.resolve(true) },
             ]}
           />
         ) : null}
@@ -718,11 +739,7 @@ function GitMenu({ open, cx, onOpenChange, onPick }: {
         <div key={group ?? "root"} role="menu" aria-label="Git operations" onKeyDown={e => {
           const row = rows.find(r => r.key && r.key === e.key);
           if (row) { e.preventDefault(); row.pick(); return; }
-          if (!["j", "k", "ArrowDown", "ArrowUp"].includes(e.key)) return;
-          e.preventDefault();
-          const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
-          const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-          buttons[(at + (e.key === "j" || e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+          overlayKey(e, OverlayKind.List, e.currentTarget);
         }}>
           {rows.map((row, i) => <button key={row.label} type="button" role="menuitem" autoFocus={i === 0}
             className="flex h-row w-full items-center gap-2 px-1 text-left hover:bg-sel focus:bg-sel focus:outline-none"
