@@ -717,8 +717,16 @@ pub async fn run(
     // flight, not a property of the view, and the thing it is waiting on is the
     // daemon list this loop owns.
     let mut machines_stale = MachinesStale::default();
+    // The chat BOOTH's cursor is on, so a fleet that re-sorts under it does not
+    // hand the stage to another one. See [`hold_booth_cursor`].
+    let mut booth_anchor: Option<chrome::FleetAnchor> = None;
 
     let reason = loop {
+        // First, so everything below — the new-agent follow, the tab bar, the
+        // paint — reads the cursor on the chat it was on, not on its old row.
+        if hold_booth_cursor(&daemons, &hosts, &mut view, &mut booth_anchor) {
+            dirty = true;
+        }
         let now_showing = active_ws_key(&daemons, &hosts, &view);
         // Before anything is drawn, so the frame that first shows the new
         // agent's row is already the frame with the cursor on it — a cursor
@@ -11386,6 +11394,27 @@ fn fold_cursors_space(daemons: &[Daemon], hosts: &[Option<String>], view: &mut V
     let (machine, id) = (machine.to_string(), space.id);
     view.booth_sel = header;
     view.folds.toggle_space(&machine, id);
+}
+
+/// Keep BOOTH's cursor, and the stage that follows it, on the same chat when
+/// the fleet re-sorts under it. See [`chrome::FleetAnchor`].
+///
+/// Only on BOOTH, where the cursor is drawn. Away from it the anchor is left as
+/// it was, so coming back after the fleet re-sorted finds the same chat too.
+fn hold_booth_cursor(
+    daemons: &[Daemon],
+    hosts: &[Option<String>],
+    view: &mut View,
+    anchor: &mut Option<chrome::FleetAnchor>,
+) -> bool {
+    if view.page != Page::Booth {
+        return false;
+    }
+    let all = all_agent_rows(daemons, hosts);
+    let machines = machine_rows(daemons, hosts, &all);
+    let spaces = fleet_spaces(daemons, &all, None);
+    let rows = chrome::booth_rows(&spaces, &machines, &view.folds, &view.arrange);
+    chrome::FleetAnchor::hold(anchor, &rows, &mut view.booth_sel)
 }
 
 /// Keep BOOTH's cursor on a row that exists, after a fold took some away.

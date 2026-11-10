@@ -253,6 +253,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **1.5.0-dev.20: renaming a chat no longer puts another chat on BOOTH's
+  stage.** BOOTH's cursor was a row number. In the `a-z` order, a chat that
+  renamed itself (claude's `/rename`, or a new task title) sorted to another
+  row, and the stage, which follows the cursor, showed whichever chat had moved
+  into that row. Your next keys went to that chat. The cursor now follows its
+  chat, project or machine when the fleet moves under it, whether a rename
+  re-sorted it or a chat started or closed above it. A cursor you moved with a
+  key or a click stays where you put it. Coming back to BOOTH after the fleet
+  re-sorted finds the same chat.
 - **1.5.0-dev.15: a URL an agent wrapped is one link again.** Claude Code and
   other agent TUIs break a long URL at their own width and indent the rest under
   it, often behind a `⎿`, `│`, `▎`, `>` or a diff's `+`. Those rows weren't

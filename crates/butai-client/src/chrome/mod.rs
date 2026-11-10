@@ -4651,6 +4651,74 @@ pub fn booth_preview(rows: &[BoothRow<'_>], sel: usize) -> Option<usize> {
     }
 }
 
+/// What a fleet row *is*, whatever row it is drawn on.
+///
+/// [`View::booth_sel`] is a row number, and the row a chat is drawn on is not
+/// fixed: in `a-z` a chat that renames itself (claude's `/rename`, or simply a
+/// new task title) sorts somewhere else, and a chat starting or closing above
+/// it pushes it down or pulls it up. A cursor that stayed on the number would
+/// put a different chat on the stage under you. This is what the cursor holds
+/// on to instead — see [`FleetAnchor`].
+///
+/// A machine by its label, a project by its machine and id, and an agent by its
+/// daemon and pane: a pane id is a counter inside one daemon, so the daemon is
+/// half of the address (see `fleet_row_of`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetKey {
+    Machine(String),
+    Space(String, SessionId),
+    Agent(usize, PaneId),
+}
+
+impl FleetKey {
+    pub fn of(row: &BoothRow<'_>) -> Self {
+        match row {
+            BoothRow::Machine { label, .. } => Self::Machine((*label).to_string()),
+            BoothRow::Space { space, machine, .. } => Self::Space((*machine).to_string(), space.id),
+            BoothRow::Agent { row, .. } => Self::Agent(row.daemon, row.agent.pane),
+        }
+    }
+
+    /// The row this is drawn on now, if it is drawn at all.
+    pub fn row_in(&self, rows: &[BoothRow<'_>]) -> Option<usize> {
+        rows.iter().position(|r| Self::of(r) == *self)
+    }
+}
+
+/// What BOOTH's cursor was on when it was last looked at, and the row it was
+/// drawn on then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetAnchor {
+    key: FleetKey,
+    row: usize,
+}
+
+impl FleetAnchor {
+    /// Put the cursor back on the row it was on, wherever that row went, and
+    /// re-anchor. True if the cursor moved.
+    ///
+    /// Renaming the chat you were typing into, in `a-z`, re-sorted it away
+    /// from the cursor, and the stage — which follows the cursor — showed
+    /// whichever chat had sorted into its place. Your next keys went there.
+    ///
+    /// **Only a cursor nobody moved is carried.** When `sel` is still the row
+    /// it was at the last call, whatever changed the rows was the fleet, and
+    /// the cursor follows its row. When it is not, a key, a click or a follow
+    /// put it there on purpose, and that wins: the anchor is retaken from where
+    /// it now is. A row no longer drawn at all — closed, or folded away —
+    /// leaves the cursor on its number, as before.
+    pub fn hold(anchor: &mut Option<Self>, rows: &[BoothRow<'_>], sel: &mut usize) -> bool {
+        let before = *sel;
+        if let Some(a) = anchor.as_ref().filter(|a| a.row == *sel) {
+            if let Some(row) = a.key.row_in(rows) {
+                *sel = row;
+            }
+        }
+        *anchor = rows.get(*sel).map(|r| Self { key: FleetKey::of(r), row: *sel });
+        *sel != before
+    }
+}
+
 /// Every project on every machine, as fold keys — what `Z` needs to decide
 /// whether it is folding or unfolding.
 pub fn booth_space_keys(
@@ -9937,6 +10005,57 @@ mod tests {
         assert_eq!(agent_branch(1, 0, false), "├ ");
         assert_eq!(agent_branch(2, 0b10, true), "  └ ");
         assert_eq!(agent_branch(2, 0, true), "│ └ ");
+    }
+
+    /// Renaming the chat on the stage, in `a-z`, sorts it to another row — and
+    /// the cursor, and with it the stage and the keyboard, goes with it rather
+    /// than staying on the row number and handing you to its neighbour.
+    ///
+    /// Mutation check: drop the `row_in` move from [`FleetAnchor::hold`] and
+    /// the first assertion lands on `delta`.
+    #[test]
+    fn a_chat_renamed_under_the_cursor_keeps_the_cursor() {
+        let sys = SysDto::default();
+        let name = Arrange { order: FleetOrder::Name, ..Default::default() };
+        let title_at = |rows: &[BoothRow<'_>], sel: usize| match &rows[sel] {
+            BoothRow::Agent { row, .. } => row.agent.title.clone(),
+            other => panic!("not an agent row: {other:?}"),
+        };
+        let mut agents = [
+            agent(1, "beta", AgentState::Idle),
+            agent(2, "delta", AgentState::Idle),
+            agent(3, "middle", AgentState::Idle),
+            agent(4, "gpu", AgentState::Idle),
+        ];
+        let mut anchor = None;
+        let mut sel;
+        {
+            let all = booth_fleet(&agents);
+            let ms = machines(&sys, &all);
+            let spaces = booth_spaces(&all);
+            let rows = booth_rows(&spaces, &ms, &Folds::default(), &name);
+            sel = rows
+                .iter()
+                .position(|r| matches!(r, BoothRow::Agent { row, .. } if row.agent.title == "beta"))
+                .unwrap();
+            assert!(!FleetAnchor::hold(&mut anchor, &rows, &mut sel), "nothing moved yet");
+        }
+        let was = sel;
+
+        // claude's `/rename`: the title changes and `a-z` re-sorts the pair.
+        agents[0].title = "✳ zulu".into();
+        let all = booth_fleet(&agents);
+        let ms = machines(&sys, &all);
+        let spaces = booth_spaces(&all);
+        let rows = booth_rows(&spaces, &ms, &Folds::default(), &name);
+        assert_eq!(title_at(&rows, was), "delta", "the rename moved the rows");
+        assert!(FleetAnchor::hold(&mut anchor, &rows, &mut sel));
+        assert_eq!(title_at(&rows, sel), "✳ zulu", "the cursor stays on the renamed chat");
+
+        // A cursor the person moved is theirs: it is not dragged back.
+        sel = was;
+        assert!(!FleetAnchor::hold(&mut anchor, &rows, &mut sel));
+        assert_eq!(title_at(&rows, sel), "delta");
     }
 
     /// Every order but the tree reorders projects within their machine and
