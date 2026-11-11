@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **1.6.0-dev.4: the coordinator cleans up after itself.** The built-in
+  `coordinator` prompt only offered to close finished panes and delete their
+  build folders once work was merged, so leads left worktrees, multi-gigabyte
+  `target/` folders, finished panes and merged branches behind. A lead now keeps
+  a ledger of every pane, worktree, branch and build folder it creates. Once a
+  worker's branch is released (merged into the base and tagged), it closes that
+  worker's pane, removes its worktree and build folder, deletes the merged
+  branch with `git branch -d`, and says what it removed and how much disk that
+  freed, without asking again: the release was the approval. It never forces
+  removal of a worktree with uncommitted or untracked changes, and never closes
+  a pane that is working or holds your draft. Abandoned or superseded work
+  takes one question listing exactly what would go. On start, a lead surveys
+  what earlier sessions left (worktrees, build folders, idle panes, merged
+  branches) and offers one cleanup list, but removes none of it. Before its
+  session ends it leaves nothing of its own behind except what you chose to
+  keep. The ground rule against closing panes or deleting files without your
+  OK now makes an exception for the lead's own released leftovers.
+
 ### Fixed
 
 - **1.6.0-dev.3: the browser's key tables say what its keys do.** HELP's

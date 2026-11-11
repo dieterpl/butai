@@ -580,8 +580,9 @@ Template prompts for the footer's `[prompts]` button (`alt-i`, `C-b i`,
 you like.
 
 Four are built in, one per built-in role: `coordinator` (role `lead`: hands
-each request to a worker agent and keeps the user informed), `worker`, `loop`
-and `watch`. A block with a built-in's name replaces it where it stands.
+each request to a worker agent, keeps the user informed, and cleans up the
+panes, worktrees, branches and build folders it created once their work is
+released), `worker`, `loop` and `watch`. A block with a built-in's name replaces it where it stands.
 Deleting a built-in in the picker writes `hidden = true` under its name, since
 the built-in would otherwise come back. Every prompt with a `role` is also a
 preset in the agent picker, which starts an agent with that role and pastes the
